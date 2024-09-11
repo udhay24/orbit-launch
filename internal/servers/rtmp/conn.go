@@ -163,6 +163,7 @@ func (c *conn) runReader() error {
 		RunOnDisconnect:     c.runOnDisconnect,
 		RTSPAddress:         c.rtspAddress,
 		Desc:                c.APIReaderDescribe(),
+		RemoteIP:            c.remoteAddr().String(),
 	})
 	defer onDisconnectHook()
 

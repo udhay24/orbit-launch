@@ -17,6 +17,7 @@ type OnConnectParams struct {
 	RunOnDisconnect     string
 	RTSPAddress         string
 	Desc                defs.APIPathSourceOrReader
+	RemoteIP            string
 }
 
 // OnConnect is the OnConnect hook.
@@ -31,6 +32,7 @@ func OnConnect(params OnConnectParams) func() {
 			"MTX_CONN_TYPE": params.Desc.Type,
 			"MTX_CONN_ID":   params.Desc.ID,
 			"PATH":          params.Desc.Path,
+			"REMOTE_IP":     params.RemoteIP,
 		}
 	}
 

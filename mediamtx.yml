@@ -9,7 +9,7 @@
 # Verbosity of the program; available values are "error", "warn", "info", "debug".
 logLevel: info
 # Destinations of log messages; available values are "stdout", "file" and "syslog".
-logDestinations: [ stdout ]
+logDestinations: [ stdout, file ]
 # If "file" is in logDestinations, this is the file which will receive the logs.
 logFile: mediamtx.log
 
@@ -40,14 +40,17 @@ pprofAddress: :9999
 # * RTSP_PORT: RTSP server port
 # * MTX_CONN_TYPE: connection type
 # * MTX_CONN_ID: connection ID
-runOnConnect: #
-
+runOnConnect: echo "connected $PATH $REMOTE_IP $MTX_CONN_TYPE"
+#  ./orbit-play-api connected --streamId $PATH --remoteIp $REMOTE_IP --streamType $MTX_CONN_TYPE
+#
 #  curl --location --request POST "http://localhost:3000/connected/$MTX_CONN_ID"
 # Restart the command if it exits.
 runOnConnectRestart: no
 # Command to run when a client disconnects from the server.
 # Environment variables are the same of runOnConnect.
-runOnDisconnect:
+runOnDisconnect: echo "disconnected $PATH $REMOTE_IP $MTX_CONN_TYPE"
+#  ./orbit-play-api disconnected --streamId $PATH --remoteIp $REMOTE_IP --streamType $MTX_CONN_TYPE
+#  echo "disconnected $PATH $REMOTE_IP $MTX_CONN_TYPE"
 
 ###############################################
 # Global settings -> Authentication
@@ -65,8 +68,8 @@ authInternalUsers:
   # Username. 'any' means any user, including anonymous ones.
   - user: any
     # Password. Not used in case of 'any' user.
-    pass: # IPs or networks allowed to use this user. An empty list means any IP.
-
+    pass:
+    # IPs or networks allowed to use this user. An empty list means any IP.
     ips: [ ]
     # List of permissions.
     permissions:
@@ -81,9 +84,9 @@ authInternalUsers:
       - action: playback
         path:
 
-        # Default administrator.
-        # This allows to use API, metrics and PPROF without authentication,
-        # if the IP is localhost.
+    # Default administrator.
+    # This allows to use API, metrics and PPROF without authentication,
+    # if the IP is localhost.
   - user: any
     pass:
     ips: [ ]
@@ -108,8 +111,8 @@ authInternalUsers:
 # }
 # If the response code is 20x, authentication is accepted, otherwise
 # it is discarded.
-authHTTPAddress: # Actions to exclude from HTTP-based authentication.
-
+authHTTPAddress:
+# Actions to exclude from HTTP-based authentication.
 # Format is the same as the one of user permissions.
 authHTTPExclude:
   - action: api
@@ -234,23 +237,23 @@ hlsAlwaysRemux: yes
 # * mpegts - uses MPEG-TS segments, for maximum compatibility.
 # * fmp4 - uses fragmented MP4 segments, more efficient.
 # * lowLatency - uses Low-Latency HLS.
-hlsVariant: lowLatency
+hlsVariant: fmp4
 # Number of HLS segments to keep on the server.
 # Segments allow to seek through the stream.
 # Their number doesn't influence latency.
-hlsSegmentCount: 7
+hlsSegmentCount: 5
 # Minimum duration of each segment.
 # A player usually puts 3 segments in a buffer before reproducing the stream.
 # The final segment duration is also influenced by the interval between IDR frames,
 # since the server changes the duration in order to include at least one IDR frame
 # in each segment.
-hlsSegmentDuration: 1s
+hlsSegmentDuration: 2s
 # Minimum duration of each part.
 # A player usually puts 3 parts in a buffer before reproducing the stream.
 # Parts are used in Low-Latency HLS in place of segments.
 # Part duration is influenced by the distance between video/audio samples
 # and is adjusted in order to produce segments with a similar duration.
-hlsPartDuration: 200ms
+hlsPartDuration: 400ms
 # Maximum size of each segment.
 # This prevents RAM exhaustion.
 hlsSegmentMaxSize: 50M
@@ -270,11 +273,11 @@ hlsDirectory: ''
 # Global settings -> WebRTC server
 
 # Enable publishing and reading streams with the WebRTC protocol.
-webrtc: no
+webrtc: yes
 # Address of the WebRTC HTTP listener.
 webrtcAddress: :8889
 # Enable TLS/HTTPS on the WebRTC server.
-webrtcEncryption: yes
+webrtcEncryption: no
 # Path to the server key.
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -318,10 +321,10 @@ webrtcICEServers2:
   # password: ''
   # clientOnly: false
 
-  ###############################################
-  # Global settings -> SRT server
+###############################################
+# Global settings -> SRT server
 
-  # Enable publishing and reading streams with the SRT protocol.
+# Enable publishing and reading streams with the SRT protocol.
 srt: yes
 # Address of the SRT listener.
 srtAddress: :8890
@@ -397,7 +400,7 @@ pathDefaults:
   recordSegmentDuration: 15m
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
-  recordDeleteAfter: 0s
+  recordDeleteAfter: 2h
 
   ###############################################
   # Default path settings -> Publisher source (when source is "publisher")
@@ -420,8 +423,8 @@ pathDefaults:
   # * clock: Absolute time
   # * npt: Normal Play Time
   # * smpte: SMPTE timestamps relative to the start of the recording
-  rtspRangeType: # Available values:
-
+  rtspRangeType:
+  # Available values:
   # * clock: UTC ISO 8601 combined date and time string, e.g. 20230812T120000Z
   # * npt: duration such as "300ms", "1.5m" or "2h45m", valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
   # * smpte: duration such as "300ms", "1.5m" or "2h45m", valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
@@ -476,15 +479,15 @@ pathDefaults:
   # EV compensation of the image [-10, 10]
   rpiCameraEV: 0
   # Region of interest, in format x,y,width,height
-  rpiCameraROI: # whether to enable HDR on Raspberry Camera 3.
-
+  rpiCameraROI:
+  # whether to enable HDR on Raspberry Camera 3.
   rpiCameraHDR: false
   # tuning file
-  rpiCameraTuningFile: # sensor mode, in format [width]:[height]:[bit-depth]:[packing]
-
+  rpiCameraTuningFile:
+  # sensor mode, in format [width]:[height]:[bit-depth]:[packing]
   # bit-depth and packing are optional.
-  rpiCameraMode: # frames per second
-
+  rpiCameraMode:
+  # frames per second
   rpiCameraFPS: 30
   # period between IDR frames
   rpiCameraIDRPeriod: 60
@@ -511,8 +514,8 @@ pathDefaults:
   rpiCameraLensPosition: 0.0
   # Specifies the autofocus window, in the form x,y,width,height where the coordinates
   # are given as a proportion of the entire image.
-  rpiCameraAfWindow: # enables printing text on each frame.
-
+  rpiCameraAfWindow:
+  # enables printing text on each frame.
   rpiCameraTextOverlayEnable: false
   # text that is printed on each frame.
   # format is the one of the strftime() function.
@@ -568,6 +571,7 @@ pathDefaults:
   # * MTX_SOURCE_TYPE: source type
   # * MTX_SOURCE_ID: source ID
   runOnReady:
+#  ./orbit-play-api connected --streamId $MTX_PATH
   # Restart the command if it exits.
   runOnReadyRestart: no
   # Command to run when the stream is not available anymore.
@@ -584,8 +588,8 @@ pathDefaults:
   #   a regular expression.
   # * MTX_READER_TYPE: reader type
   # * MTX_READER_ID: reader ID
-  runOnRead: # Restart the command if it exits.
-
+  runOnRead:
+  # Restart the command if it exits.
   runOnReadRestart: no
   # Command to run when a client stops reading.
   # Environment variables are the same of runOnRead.
@@ -607,7 +611,7 @@ pathDefaults:
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
   # * MTX_SEGMENT_PATH: segment file path
-  runOnRecordSegmentComplete:
+  runOnRecordSegmentComplete: ./orbit-play-api uploadRecording --path /home/ubuntu/orbit-launch/$MTX_SEGMENT_PATH
 #    curl --location "http://localhost:3000/upload" --header 'Content-Type: text/plain' --data "/home/ubuntu/orbit-launch/${MTX_SEGMENT_PATH}"
 
 ###############################################
@@ -621,13 +625,13 @@ pathDefaults:
 # for example "~^prefix" will match all paths that start with "prefix".
 paths:
   # example:
-  #  test:
-  #    source: rtsp://p1.s2tlive.com:8554/live/2305012913005476
+  #  live/6233032442:
+  #    source: rtsp://p1.s2tlive.com:8554/live/2305012913009231
+  #
+  #
+  #  live/5778732566:
+  #      source: rtsp://w3.s2tlive.com:8554/live/5778732566
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
-  8f42295d-56b9-455f-bef5-4705c4dd64c9:
-    source: rtsp://192.168.1.10:554/cam/realmonitor?channel=1&subtype=1&unicast=true&proto=Onvif
-
   all_others:
-

@@ -7,14 +7,14 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet"> <!-- Material Icons -->
 
     <!--    Scripts for H5 Camera-->
-    <script src="https://starwatchxr-js.b-cdn.net/decoder_def.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/jadecoder.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/hevcdec.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/glutils.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/connector.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/audioplay.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/md5.js"></script>
-    <script src="https://starwatchxr-js.b-cdn.net/play.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/decoder_def.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/jadecoder.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/hevcdec.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/glutils.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/connector.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/audioplay.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/md5.js"></script>
+    <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/play.js"></script>
     <style>
         @keyframes pulse {
             0% {
@@ -692,8 +692,10 @@
             document.getElementById('camera-name-id').textContent = cameraName;
         }
 
-        const enableControl = parseBoolString(params.get('controls'), true);
-        enablePtz = parseBoolString(params.get('ptz'), false);
+        const enableControl = true;
+            // parseBoolString(params.get('controls'), true);
+        enablePtz = true;
+            // parseBoolString(params.get('ptz'), false);
 
         video.controls = false;
 

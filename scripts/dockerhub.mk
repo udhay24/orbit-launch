@@ -51,7 +51,7 @@ export DOCKERFILE_DOCKERHUB_FFMPEG_RPI
 dockerhub:
 	$(eval VERSION := $(shell git describe --tags | tr -d v))
 
-	docker login -u $(DOCKER_USER) -p $(DOCKER_PASSWORD)
+	docker login -u "udhay24" -p "mizkex-mavbag-Myrbo9"
 
 	rm -rf tmp
 	mkdir -p tmp tmp/binaries/linux/arm tmp/rpi_base/linux/arm

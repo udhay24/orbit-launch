@@ -40,15 +40,14 @@ pprofAddress: :9999
 # * RTSP_PORT: RTSP server port
 # * MTX_CONN_TYPE: connection type
 # * MTX_CONN_ID: connection ID
-runOnConnect: ./orbit-play-api connected --streamId $PATH --remoteIp $REMOTE_IP --streamType $MTX_CONN_TYPE
+runOnConnect:
 #
 #  curl --location --request POST "http://localhost:3000/connected/$MTX_CONN_ID"
 # Restart the command if it exits.
 runOnConnectRestart: no
 # Command to run when a client disconnects from the server.
 # Environment variables are the same of runOnConnect.
-runOnDisconnect: ./orbit-play-api disconnected --streamId $PATH --remoteIp $REMOTE_IP --streamType $MTX_CONN_TYPE
-#  echo "disconnected $PATH $REMOTE_IP $MTX_CONN_TYPE"
+runOnDisconnect:
 
 ###############################################
 # Global settings -> Authentication
@@ -385,7 +384,7 @@ pathDefaults:
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d %H %M %S %f %s (time in strftime format)
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S
+  recordPath: ./recordings/%path/%Y-%m-%d-%H-%M-%S
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4

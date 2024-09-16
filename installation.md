@@ -25,9 +25,9 @@ There are several installation methods available: standalone binary, Docker imag
     sudo apt update
     sudo apt install certbot python3-certbot-nginx
     sudo systemctl stop nginx
-    sudo certbot certonly --standalone -d media.sstlive.com
-    sudo cp /etc/letsencrypt/live/s2tlive.com/privkey.pem server.key
+    sudo certbot certonly --standalone -d media.s2tlive.com
     sudo cp /etc/letsencrypt/live/s2tlive.com/fullchain.pem server.crt
+    sudo cp /etc/letsencrypt/live/s2tlive.com/privkey.pem server.key
     sudo chown ubuntu:ubuntu server.key
     sudo chown ubuntu:ubuntu server.crt
     ```
@@ -55,18 +55,18 @@ There are several installation methods available: standalone binary, Docker imag
    Paste the following content:
 
     ```sh
-    [Unit]
-    Description=Orbit Play Service
-    After=network.target
-
-    [Service]
-    ExecStart=/home/ubuntu/Media/orbit-play
-    WorkingDirectory=/home/ubuntu/Media
-    User=root
-    Restart=always
-
-    [Install]
-    WantedBy=multi-user.target
+   [Unit]
+   Description=Orbit Play Service
+   After=network.target
+   
+   [Service]
+   ExecStart=/home/ubuntu/orbit-play
+   WorkingDirectory=/home/ubuntu/orbit-play
+   User=root
+   Restart=always
+   
+   [Install]
+   WantedBy=multi-user.target
     ```
 
 5. **Enable and Start the Service:**

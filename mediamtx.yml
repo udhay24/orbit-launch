@@ -385,7 +385,7 @@ pathDefaults:
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d %H %M %S %f %s (time in strftime format)
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S
+  recordPath: ./recordings/%path/%Y-%m-%d-%H-%M-%S
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4

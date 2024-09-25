@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shirou/gopsutil/load"
 	"net"
 	"net/http"
 	"os"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/disk"
 	"github.com/shirou/gopsutil/mem"
 
@@ -286,14 +286,12 @@ func (a *API) Initialize() error {
 func getSystemStats() (*defs.SystemStats, error) {
 	stats := &defs.SystemStats{}
 
-	// Get CPU usage
-	cpuPercent, err := cpu.Percent(0, false)
+	// Get average CPU load (1 minute averages)
+	avgLoad, err := load.Avg()
 	if err != nil {
 		return nil, err
 	}
-	if len(cpuPercent) > 0 {
-		stats.CPUUsagePercent = cpuPercent[0]
-	}
+	stats.CPUUsagePercent = avgLoad.Load1
 
 	// Get memory usage
 	vmStat, err := mem.VirtualMemory()

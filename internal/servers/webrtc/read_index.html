@@ -816,7 +816,6 @@
         video.muted = !video.muted;
         updateMuteButton();
     });
-
     // Update the mute button icon based on the video's muted state
     function updateMuteButton() {
         if (video.muted || video.volume === 0) {
@@ -832,8 +831,8 @@
         let canvas = document.getElementById("canvas")
         Player.init([canvas]);
 
-        const user = "admin";
-        const pwd = "";
+        const user = "ptz";
+        const pwd = "ptz@sst";
 
         Player.ConnectDevice(streamId, '', user, pwd, 0, 80, 0, channel, 0, "wss")
     }

@@ -16,7 +16,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
-	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
@@ -50,26 +49,6 @@ func (c *conn) initialize() {
 	c.created = time.Now()
 
 	c.Log(logger.Info, "opened")
-
-	desc := defs.APIPathSourceOrReader{
-		Type: func() string {
-			if c.isTLS {
-				return "rtspsConn"
-			}
-			return "conn"
-		}(),
-		ID: c.uuid.String(),
-	}
-
-	c.onDisconnectHook = hooks.OnConnect(hooks.OnConnectParams{
-		Logger:              c,
-		ExternalCmdPool:     c.externalCmdPool,
-		RunOnConnect:        c.runOnConnect,
-		RunOnConnectRestart: c.runOnConnectRestart,
-		RunOnDisconnect:     c.runOnDisconnect,
-		RTSPAddress:         c.rtspAddress,
-		Desc:                desc,
-	})
 }
 
 // Log implements logger.Writer.

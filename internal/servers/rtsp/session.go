@@ -111,6 +111,28 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 		}
 	}
 
+	desc := defs.APIPathSourceOrReader{
+		Type: func() string {
+			if c.isTLS {
+				return "rtspsConn"
+			}
+			return "conn"
+		}(),
+		ID:   c.uuid.String(),
+		Path: ctx.Path,
+	}
+
+	c.onDisconnectHook = hooks.OnConnect(hooks.OnConnectParams{
+		Logger:              c,
+		ExternalCmdPool:     c.externalCmdPool,
+		RunOnConnect:        c.runOnConnect,
+		RunOnConnectRestart: c.runOnConnectRestart,
+		RunOnDisconnect:     c.runOnDisconnect,
+		RTSPAddress:         c.rtspAddress,
+		Desc:                desc,
+		RemoteIP:            c.remoteAddr().String(),
+	})
+
 	path, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
 		Author: s,
 		AccessRequest: defs.PathAccessRequest{

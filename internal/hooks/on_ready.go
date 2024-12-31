@@ -15,6 +15,7 @@ type OnReadyParams struct {
 	ExternalCmdEnv  externalcmd.Environment
 	Desc            defs.APIPathSourceOrReader
 	Query           string
+	RemoteIP        string
 }
 
 // OnReady is the OnReady hook.
@@ -27,6 +28,7 @@ func OnReady(params OnReadyParams) func() {
 		env["MTX_QUERY"] = params.Query
 		env["MTX_SOURCE_TYPE"] = params.Desc.Type
 		env["MTX_SOURCE_ID"] = params.Desc.ID
+		env["REMOTE_IP"] = params.RemoteIP
 	}
 
 	if params.Conf.RunOnReady != "" {

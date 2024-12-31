@@ -568,13 +568,21 @@ pathDefaults:
   #   a regular expression.
   # * MTX_SOURCE_TYPE: source type
   # * MTX_SOURCE_ID: source ID
-  runOnReady:
+  #  runOnReady: echo "connected $MTX_PATH $REMOTE_IP $MTX_CONN_TYPE"
+  runOnReady: >
+    grpcurl -plaintext -d
+    '{"camera_id": "$PATH", "remote_ip": "$REMOTE_IP"}'
+    localhost:50051 camera.CameraService/CameraConnect
   #  ./orbit-play-api connected --streamId $MTX_PATH
   # Restart the command if it exits.
   runOnReadyRestart: no
   # Command to run when the stream is not available anymore.
   # Environment variables are the same of runOnReady.
-  runOnNotReady:
+  #  runOnNotReady: echo "disconnected $MTX_PATH $REMOTE_IP $MTX_CONN_TYPE"
+  runOnNotReady: >
+    grpcurl -plaintext -d
+    '{"camera_id": "$PATH", "remote_ip": "$REMOTE_IP"}'
+    localhost:50051 camera.CameraService/CameraDisconnect
 
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.
@@ -609,7 +617,10 @@ pathDefaults:
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
   # * MTX_SEGMENT_PATH: segment file path
-  runOnRecordSegmentComplete: ./orbit-play-api uploadRecording --path /home/ubuntu/orbit-launch/$MTX_SEGMENT_PATH
+  runOnRecordSegmentComplete: >
+    grpcurl -plaintext -d
+    '{"recording_path": "/home/ubuntu/orbit-launch/$MTX_SEGMENT_PATH"}'
+    localhost:50051 camera.CameraService/UploadRecording
 #    curl --location "http://localhost:3000/upload" --header 'Content-Type: text/plain' --data "/home/ubuntu/orbit-launch/${MTX_SEGMENT_PATH}"
 
 ###############################################

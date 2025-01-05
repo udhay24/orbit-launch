@@ -1,0 +1,15 @@
+[Unit]
+Description=Orbit Play Service
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+Environment="PATH=/home/ubuntu/go/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/ubuntu/orbit-play/mediamtx
+WorkingDirectory=/home/ubuntu/orbit-play
+User=ubuntu
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

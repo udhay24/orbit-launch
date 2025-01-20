@@ -1,6 +1,7 @@
 [Unit]
 Description=Orbit Play Service
-After=network.target
+After=network.target orbit-play-state.service
+Requires=orbit-play-state.service
 
 [Service]
 User=ubuntu

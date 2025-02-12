@@ -16,7 +16,7 @@ for i in $(seq $START $END); do
     ssh -i $SSH_KEY $USER@$SERVER -o StrictHostKeyChecking=no << 'EOF'
         echo "Connected to $(hostname)"
         echo "Executing install.sh script..."
-        curl -sSL https://github.com/udhay24/orbit-launch/releases/download/1.0.1/install.sh | bash
+        curl -sSL https://github.com/udhay24/orbit-launch/releases/download/1.2/install.sh | bash
         echo "Script execution completed on $(hostname)"
 EOF
 

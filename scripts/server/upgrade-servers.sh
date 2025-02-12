@@ -2,8 +2,8 @@
 
 # Define the base server name and range
 BASE_SERVER="e"
-START=2
-END=31
+START=1
+END=3
 SSH_KEY="~/Downloads/orbit-ele-snre.pem"
 USER="ubuntu"
 
@@ -16,7 +16,7 @@ for i in $(seq $START $END); do
     ssh -i $SSH_KEY $USER@$SERVER -o StrictHostKeyChecking=no << 'EOF'
         echo "Connected to $(hostname)"
         echo "Executing update-config.sh script..."
-        curl -sSL https://github.com/udhay24/orbit-launch/releases/download/1.0.1/update-config.sh | bash
+        curl -sSL https://github.com/udhay24/orbit-launch/releases/download/1.2/update-config.sh | bash
         echo "Script execution completed on $(hostname)"
 EOF
 

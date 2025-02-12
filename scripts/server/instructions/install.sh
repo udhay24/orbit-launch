@@ -10,8 +10,8 @@ sudo systemctl stop orbit-play.service || { echo "Failed to stop orbit-play.serv
 rm -f mediamtx mediamtx.yml mediamtx.log || { echo "Failed to remove old files"; exit 1; }
 
 # Download the new mediamtx and mediamtx.yml files
-wget https://github.com/udhay24/orbit-launch/releases/download/1.0.1/mediamtx.yml || { echo "Failed to download mediamtx.yml"; exit 1; }
-wget https://github.com/udhay24/orbit-launch/releases/download/1.0.1/mediamtx || { echo "Failed to download mediamtx"; exit 1; }
+wget https://github.com/udhay24/orbit-launch/releases/download/1.2/mediamtx.yml || { echo "Failed to download mediamtx.yml"; exit 1; }
+wget https://github.com/udhay24/orbit-launch/releases/download/1.2/mediamtx || { echo "Failed to download mediamtx"; exit 1; }
 
 # Make the mediamtx file executable
 chmod +x mediamtx || { echo "Failed to make mediamtx executable"; exit 1; }

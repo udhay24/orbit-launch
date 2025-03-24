@@ -2,14 +2,14 @@
 
 # Define the base server name and range
 BASE_SERVER="e"
-START=1
-END=33
-SSH_KEY="~/Downloads/orbit-ele-snre.pem"
+START=10
+END=12
+SSH_KEY="/Users/udhay/Downloads/orbit-play-dev.pem"
 USER="ubuntu"
 
 # Loop through the servers
 for i in $(seq $START $END); do
-    SERVER="${BASE_SERVER}${i}.snre.in"
+    SERVER="${BASE_SERVER}${i}.s2tlive.com"
     echo "Connecting to server: $SERVER"
 
     # SSH into the server and execute the commands

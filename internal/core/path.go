@@ -83,6 +83,7 @@ type path struct {
 	confMutex                      sync.RWMutex
 	source                         defs.Source
 	publisherQuery                 string
+	publisherRemoteIP              string
 	stream                         *stream.Stream
 	recorder                       *recorder.Recorder
 	readyTime                      time.Time
@@ -478,7 +479,7 @@ func (pa *path) doAddPublisher(req defs.PathAddPublisherReq) {
 
 	pa.source = req.Author
 	pa.publisherQuery = req.AccessRequest.Query
-
+	pa.publisherRemoteIP = req.AccessRequest.IP.String()
 	req.Res <- defs.PathAddPublisherRes{Path: pa}
 }
 
@@ -727,6 +728,7 @@ func (pa *path) setReady(desc *description.Session, allocateEncoder bool) error 
 		ExternalCmdEnv:  pa.ExternalCmdEnv(),
 		Desc:            pa.source.APISourceDescribe(),
 		Query:           pa.publisherQuery,
+		RemoteIP:        pa.publisherRemoteIP,
 	})
 
 	pa.parent.pathReady(pa)

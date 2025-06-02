@@ -7,9 +7,9 @@
 # Global settings -> General
 
 # Verbosity of the program; available values are "error", "warn", "info", "debug".
-logLevel: info
+logLevel: error
 # Destinations of log messages; available values are "stdout", "file" and "syslog".
-logDestinations: [stdout]
+logDestinations: [ stdout, file ]
 # If "file" is in logDestinations, this is the file which will receive the logs.
 logFile: mediamtx.log
 # If "syslog" is in logDestinations, use prefix for logs.
@@ -76,7 +76,7 @@ authInternalUsers:
   # if the IP is localhost.
 - user: any
   pass:
-  ips: ['127.0.0.1', '::1']
+  ips: []
   permissions:
   - action: api
   - action: metrics
@@ -142,7 +142,7 @@ authJWTInHTTPQuery: true
 # Global settings -> Control API
 
 # Enable controlling the server through the Control API.
-api: no
+api: yes
 # Address of the Control API listener.
 apiAddress: :9997
 # Enable TLS/HTTPS on the Control API server.
@@ -165,7 +165,7 @@ apiTrustedProxies: []
 # Global settings -> Metrics
 
 # Enable Prometheus-compatible metrics.
-metrics: no
+metrics: yes
 # Address of the metrics HTTP listener.
 metricsAddress: :9998
 # Enable TLS/HTTPS on the Metrics server.
@@ -188,7 +188,7 @@ metricsTrustedProxies: []
 # Global settings -> PPROF
 
 # Enable pprof-compatible endpoint to monitor performances.
-pprof: no
+pprof: yes
 # Address of the pprof listener.
 pprofAddress: :9999
 # Enable TLS/HTTPS on the pprof server.
@@ -299,7 +299,7 @@ hls: yes
 hlsAddress: :8888
 # Enable TLS/HTTPS on the HLS server.
 # This is required for Low-Latency HLS.
-hlsEncryption: no
+hlsEncryption: yes
 # Path to the server key. This is needed only when encryption is yes.
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -316,7 +316,7 @@ hlsAllowOrigin: '*'
 hlsTrustedProxies: []
 # By default, HLS is generated only when requested by a user.
 # This option allows to generate it always, avoiding the delay between request and generation.
-hlsAlwaysRemux: no
+hlsAlwaysRemux: yes
 # Variant of the HLS protocol to use. Available options are:
 # * mpegts - uses MPEG-TS segments, for maximum compatibility.
 # * fmp4 - uses fragmented MP4 segments, more efficient.
@@ -347,7 +347,7 @@ hlsSegmentMaxSize: 50M
 hlsDirectory: ''
 # The muxer will be closed when there are no
 # reader requests and this amount of time has passed.
-hlsMuxerCloseAfter: 60s
+hlsMuxerCloseAfter: 60m
 
 ###############################################
 # Global settings -> WebRTC server
@@ -357,7 +357,7 @@ webrtc: yes
 # Address of the WebRTC HTTP listener.
 webrtcAddress: :8889
 # Enable TLS/HTTPS on the WebRTC server.
-webrtcEncryption: no
+webrtcEncryption: yes
 # Path to the server key.
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -390,8 +390,12 @@ webrtcAdditionalHosts: []
 # ICE servers. Needed only when local listeners can't be reached by clients.
 # STUN servers allows to obtain and share the public IP of the server.
 # TURN/TURNS servers forces all traffic through them.
-webrtcICEServers2: []
-  # - url: stun:stun.l.google.com:19302
+webrtcICEServers2:
+  - url: turn:turn.orbitplay.online:5349
+    username: admin
+    password: password
+
+# - url: stun:stun.l.google.com:19302
   # if user is "AUTH_SECRET", then authentication is secret based.
   # the secret must be inserted into the password field.
   # username: ''
@@ -470,12 +474,12 @@ pathDefaults:
   # Default path settings -> Record
 
   # Record streams to disk.
-  record: no
+  record: yes
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
   # %H %M %S (hours, minutes, seconds), %f (microseconds), %s (unix epoch).
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: ./recordings/%path/%Y-%m-%d-%H-%M-%S
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4
@@ -485,10 +489,11 @@ pathDefaults:
   # Therefore, the part duration is equal to the RPO (recovery point objective).
   recordPartDuration: 1s
   # Minimum duration of each segment.
-  recordSegmentDuration: 1h
+  recordSegmentDuration: 15m
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
-  recordDeleteAfter: 1d
+  recordDeleteAfter: 2h
+
 
   ###############################################
   # Default path settings -> Publisher source (when source is "publisher")
@@ -667,13 +672,19 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnReady:
+  runOnReady: >
+    grpcurl -plaintext -d
+    '{"camera_id": "$MTX_PATH", "remote_ip": "$REMOTE_IP"}'
+    localhost:50051 camera.CameraService/CameraConnect
+
   # Restart the command if it exits.
   runOnReadyRestart: no
   # Command to run when the stream is not available anymore.
   # Environment variables are the same of runOnReady.
-  runOnNotReady:
-
+  runOnNotReady: >
+    grpcurl -plaintext -d
+    '{"camera_id": "$MTX_PATH", "remote_ip": "$REMOTE_IP"}'
+    localhost:50051 camera.CameraService/CameraDisconnect
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.
   # The following environment variables are available:
@@ -708,8 +719,10 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnRecordSegmentComplete:
-
+  runOnRecordSegmentComplete: >
+    grpcurl -plaintext -d
+    '{"recording_path": "/home/ubuntu/orbit-play/$MTX_SEGMENT_PATH"}'
+    localhost:50051 camera.CameraService/UploadRecording
 ###############################################
 # Path settings
 

@@ -721,7 +721,7 @@ pathDefaults:
   #   a regular expression.
   runOnRecordSegmentComplete: >
     grpcurl -plaintext -d
-    '{"recording_path": "/home/ubuntu/orbit-play/$MTX_SEGMENT_PATH"}'
+    '{"recording_path": "/root/orbit-play/$MTX_SEGMENT_PATH"}'
     localhost:50051 camera.CameraService/UploadRecording
 ###############################################
 # Path settings

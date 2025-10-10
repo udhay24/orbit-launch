@@ -84,21 +84,21 @@
 
     #bottomBar {
       position: fixed;
-      bottom: 20px;
+      bottom: 1%;
       left: 50%;
       transform: translateX(-50%);
       width: auto;
-      max-width: 90%;
+      max-width: 95%;
       background: rgba(20, 20, 20, 0.85);
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
-      padding: 16px 24px;
-      border-radius: 20px;
+      padding: clamp(4px, 1.5vh, 16px) clamp(8px, 2vw, 24px);
+      border-radius: clamp(8px, 1.5vh, 20px);
       box-sizing: border-box;
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 24px;
+      gap: clamp(8px, 2vw, 24px);
       box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4),
       0 0 0 1px rgba(255, 255, 255, 0.05);
       animation: fadeIn 0.3s ease-out;
@@ -111,12 +111,14 @@
       background: rgba(255, 255, 255, 0.08);
       color: white;
       border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 12px;
-      padding: 10px;
+      border-radius: clamp(6px, 1vh, 12px);
+      padding: clamp(4px, 1vh, 10px);
       cursor: pointer;
       transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
       position: relative;
       overflow: hidden;
+      min-width: clamp(24px, 4vh, 40px);
+      min-height: clamp(24px, 4vh, 40px);
     }
 
     button::before {
@@ -153,10 +155,10 @@
       display: flex;
       justify-content: center;
       align-items: center;
-      gap: 8px;
+      gap: clamp(3px, 0.8vh, 8px);
       background: rgba(255, 255, 255, 0.03);
-      padding: 8px;
-      border-radius: 16px;
+      padding: clamp(3px, 0.8vh, 8px);
+      border-radius: clamp(6px, 1.5vh, 16px);
       border: 1px solid rgba(255, 255, 255, 0.05);
     }
 
@@ -164,8 +166,8 @@
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.1);
       border-radius: 50%;
-      width: 44px;
-      height: 44px;
+      width: clamp(28px, 5vh, 44px);
+      height: clamp(28px, 5vh, 44px);
       padding: 0;
       display: flex;
       justify-content: center;
@@ -250,18 +252,70 @@
     #zoomControls {
       display: flex;
       flex-direction: row;
-      gap: 8px;
+      gap: clamp(3px, 0.8vh, 8px);
       background: rgba(255, 255, 255, 0.03);
-      padding: 8px;
-      border-radius: 16px;
+      padding: clamp(3px, 0.8vh, 8px);
+      border-radius: clamp(6px, 1.5vh, 16px);
       border: 1px solid rgba(255, 255, 255, 0.05);
     }
 
     /* Separator */
     .control-separator {
       width: 1px;
-      height: 40px;
+      height: clamp(24px, 4vh, 40px);
       background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Responsive adjustments for small screens */
+    @media (max-width: 768px) {
+      #bottomBar {
+        gap: clamp(6px, 1.5vw, 12px);
+        padding: clamp(4px, 1vh, 8px) clamp(8px, 2vw, 16px);
+      }
+
+      .control-separator {
+        display: none;
+      }
+
+      .audio-controls,
+      .ptz-controls,
+      #zoomControls {
+        gap: clamp(2px, 0.5vh, 4px);
+        padding: clamp(2px, 0.5vh, 4px);
+      }
+    }
+
+    /* Ultra small screens (like in 4x4 grid) */
+    @media (max-width: 400px), (max-height: 400px) {
+      #bottomBar {
+        bottom: 0.5%;
+        padding: clamp(2px, 0.8vh, 8px) clamp(4px, 1vw, 12px);
+        gap: clamp(4px, 1vw, 8px);
+        border-radius: clamp(6px, 1vh, 12px);
+      }
+
+      .material-icons {
+        font-size: clamp(14px, 2vh, 20px);
+      }
+
+      .ptz-button {
+        width: clamp(24px, 4vh, 36px);
+        height: clamp(24px, 4vh, 36px);
+      }
+
+      button {
+        min-width: clamp(20px, 3.5vh, 32px);
+        min-height: clamp(20px, 3.5vh, 32px);
+        padding: clamp(3px, 0.8vh, 8px);
+      }
+
+      .volume-slider {
+        width: clamp(40px, 8vw, 70px);
+      }
+
+      .control-separator {
+        height: clamp(20px, 3vh, 32px);
+      }
     }
   </style>
 </head>
@@ -283,27 +337,31 @@
     <input type="range" id="volumeSlider" class="volume-slider" min="0" max="100" value="0">
   </div>
 
+  <div class="control-separator"></div>
+
   <!-- PTZ Controls -->
   <div id="ptzControls" class="ptz-controls">
     <button id="ptz_left" onclick="ptzLeft()" class="ptz-button">
-      <span class="material-icons">keyboard_arrow_left</span>
+      <span class="material-icons">arrow_back</span>
     </button>
     <button id="ptz_up" onclick="ptzUp()" class="ptz-button">
-      <span class="material-icons">keyboard_arrow_up</span>
+      <span class="material-icons">arrow_upward</span>
     </button>
     <button id="ptz_down" onclick="ptzDown()" class="ptz-button">
-      <span class="material-icons">keyboard_arrow_down</span>
+      <span class="material-icons">arrow_downward</span>
     </button>
     <button id="ptz_right" onclick="ptzRight()" class="ptz-button">
-      <span class="material-icons">keyboard_arrow_right</span>
+      <span class="material-icons">arrow_forward</span>
     </button>
   </div>
 
+  <div class="control-separator"></div>
+
   <!-- Zoom Controls -->
   <div id="zoomControls">
-    <button id="zoomIn"><span class="material-icons">add</span></button>
-    <button id="zoomOut"><span class="material-icons">remove</span></button>
-    <button id="resetZoom"><span class="material-icons">refresh</span></button>
+    <button id="zoomIn"><span class="material-icons">zoom_in</span></button>
+    <button id="zoomOut"><span class="material-icons">zoom_out</span></button>
+    <button id="resetZoom"><span class="material-icons">center_focus_strong</span></button>
     <button id="fullscreen"><span class="material-icons">fullscreen</span></button>
   </div>
 </div>
@@ -322,8 +380,7 @@
   const zoomSteps = [1, 1.2, 1.5, 2, 5];
 
   // Extract streamId and channel from URL
-  let streamId = "6233056447"
-    // window.location.href.split('/').at(window.location.href.split("/").length - 2);
+  let streamId = window.location.href.split('/').at(window.location.href.split("/").length - 2);
   const channel = 0;
 
   const setMessage = (str) => {

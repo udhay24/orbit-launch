@@ -1,14 +1,11 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html>
 <head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>WebRTC Player</title>
-  <link
-    rel="stylesheet"
-    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css"
-  />
-  <!-- SDK Scripts -->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+
+  <!-- Scripts for H5 Camera SDK -->
   <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/decoder_def.js"></script>
   <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/jadecoder.js"></script>
   <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/hevcdec.js"></script>
@@ -17,62 +14,53 @@
   <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/audioplay.js"></script>
   <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/md5.js"></script>
   <script src="https://orbit-play-ptz-files.s3.ap-south-1.amazonaws.com/play.js"></script>
+
+  <script defer src="./reader.js"></script>
+
   <style>
-    body {
-      background: #000;
-      color: #fff;
-      font-family: Arial, sans-serif;
-      margin: 0;
-      height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
+    @keyframes pulse {
+      0% { transform: scale(0.8); }
+      50% { transform: scale(1.3); }
+      100% { transform: scale(0.8); }
     }
 
-    .video-container {
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      background-color: #0a0a0a;
+    }
+
+    .material-icons {
+      font-size: 22px;
+      vertical-align: middle;
+    }
+
+    #videoContainer {
       position: relative;
-      width: 100vw;
-      height: 100vh;
+      width: 100%;
+      height: 100%;
       overflow: hidden;
     }
 
-    video {
+    #cameraCanvas {
+      display: none;
+    }
+
+    #video {
+      position: absolute;
+      top: 0;
+      left: 0;
       width: 100%;
       height: 100%;
+      background: linear-gradient(135deg, #1a1a1a 0%, #0a0a0a 100%);
       object-fit: fill;
-      transform-origin: center;
-      transition: transform 0.3s ease;
-    }
-
-    .video-controls {
-      position: absolute;
-      bottom: 2px;
-      left: 2px;
-      right: 2px;
-      display: flex;
-      align-items: center;
-      background: rgba(0, 0, 0, 0.5);
-      padding: 10px 15px;
-      border-radius: 8px;
-      gap: 10px;
-      z-index: 10;
-    }
-
-    .control-btn {
-      background: none;
-      border: none;
-      color: #fff;
-      font-size: 1rem;
-      cursor: pointer;
-    }
-
-    .spacer {
-      flex: 1;
-    }
-
-    .zoom-level {
-      margin: 0 5px;
-      font-size: 0.8rem;
     }
 
     #message {
@@ -86,296 +74,426 @@
       text-align: center;
       justify-content: center;
       font-size: 16px;
-      font-weight: bold;
-      color: white;
+      font-weight: 500;
+      color: #ffffff;
       pointer-events: none;
       padding: 20px;
       box-sizing: border-box;
-      text-shadow: 0 0 5px black;
+      text-shadow: 0 2px 10px rgba(0, 0, 0, 0.8);
+    }
+
+    #bottomBar {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: auto;
+      max-width: 90%;
+      background: rgba(20, 20, 20, 0.85);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      padding: 16px 24px;
+      border-radius: 20px;
+      box-sizing: border-box;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 24px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4),
+      0 0 0 1px rgba(255, 255, 255, 0.05);
+      animation: fadeIn 0.3s ease-out;
+    }
+
+    button {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255, 255, 255, 0.08);
+      color: white;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 10px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    button::before {
+      content: '';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 0;
+      height: 0;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.1);
+      transform: translate(-50%, -50%);
+      transition: width 0.3s, height 0.3s;
+    }
+
+    button:hover::before {
+      width: 100px;
+      height: 100px;
+    }
+
+    button:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+
+    button:active {
+      transform: translateY(0);
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+    }
+
+    .ptz-controls {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 8px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .ptz-button {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 50%;
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      cursor: pointer;
+      position: relative;
+    }
+
+    .ptz-button:hover {
+      background: rgba(59, 130, 246, 0.3);
+      border-color: rgba(59, 130, 246, 0.5);
+      transform: scale(1.1);
+      box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+    }
+
+    .ptz-button:active {
+      transform: scale(0.95);
+    }
+
+    .material-icons {
+      color: white;
+      font-size: 24px;
       z-index: 1;
     }
 
-  </style>
-  <script defer src="./reader.js"></script>
+    .audio-controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 8px 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
 
+    .volume-slider {
+      margin: 0;
+      width: 100px;
+      height: 4px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .volume-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 50%;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+    }
+
+    .volume-slider::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.6);
+    }
+
+    .volume-slider::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 50%;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 8px rgba(102, 126, 234, 0.4);
+    }
+
+    .volume-slider::-moz-range-thumb:hover {
+      transform: scale(1.2);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.6);
+    }
+
+    #zoomControls {
+      display: flex;
+      flex-direction: row;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.03);
+      padding: 8px;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* Separator */
+    .control-separator {
+      width: 1px;
+      height: 40px;
+      background: rgba(255, 255, 255, 0.1);
+    }
+  </style>
 </head>
 <body>
-<div class="video-container" id="video-container">
-  <video id="video" autoplay muted playsinline></video>
 
+<div id="cameraCanvas">
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="videoContainer">
+  <video id="video"></video>
   <div id="message"></div>
+</div>
 
-  <div id="cameraCanvas" style="display: none;">
-    <canvas id="canvas"></canvas>
+<div id="bottomBar">
+  <!-- Audio Controls -->
+  <div class="audio-controls">
+    <button id="muteToggle"><span class="material-icons">volume_off</span></button>
+    <input type="range" id="volumeSlider" class="volume-slider" min="0" max="100" value="0">
   </div>
 
-  <div class="video-controls" id="custom-controls">
-    <button class="control-btn" id="play-pause">
-      <i class="fa-solid fa-pause"></i>
+  <!-- PTZ Controls -->
+  <div id="ptzControls" class="ptz-controls">
+    <button id="ptz_left" onclick="ptzLeft()" class="ptz-button">
+      <span class="material-icons">keyboard_arrow_left</span>
     </button>
-    <button class="control-btn" id="mute">
-      <i class="fa-solid fa-volume-xmark"></i>
+    <button id="ptz_up" onclick="ptzUp()" class="ptz-button">
+      <span class="material-icons">keyboard_arrow_up</span>
     </button>
-    <button class="control-btn" id="ptz-left">
-      <i class="fa-solid fa-angle-left"></i>
+    <button id="ptz_down" onclick="ptzDown()" class="ptz-button">
+      <span class="material-icons">keyboard_arrow_down</span>
     </button>
-    <button class="control-btn" id="ptz-top">
-      <i class="fa-solid fa-angle-up"></i>
+    <button id="ptz_right" onclick="ptzRight()" class="ptz-button">
+      <span class="material-icons">keyboard_arrow_right</span>
     </button>
-    <button class="control-btn" id="ptz-bottom">
-      <i class="fa-solid fa-angle-down"></i>
-    </button>
-    <button class="control-btn" id="ptz-right">
-      <i class="fa-solid fa-angle-right"></i>
-    </button>
+  </div>
 
-    <span class="spacer"></span>
-
-    <span class="zoom-level" id="zoom-level">1x</span>
-    <button class="control-btn" id="zoom-in">
-      <i class="fa-solid fa-magnifying-glass-plus"></i>
-    </button>
-    <button class="control-btn" id="zoom-out">
-      <i class="fa-solid fa-magnifying-glass-minus"></i>
-    </button>
-    <button class="control-btn" id="zoom-reset">
-      <i class="fa-solid fa-arrow-rotate-left"></i>
-    </button>
-    <button class="control-btn" id="fullscreen">
-      <i class="fa-solid fa-expand"></i>
-    </button>
+  <!-- Zoom Controls -->
+  <div id="zoomControls">
+    <button id="zoomIn"><span class="material-icons">add</span></button>
+    <button id="zoomOut"><span class="material-icons">remove</span></button>
+    <button id="resetZoom"><span class="material-icons">refresh</span></button>
+    <button id="fullscreen"><span class="material-icons">fullscreen</span></button>
   </div>
 </div>
 
 <script>
-  const urlParams = new URLSearchParams(window.location.search);
-  const controlsQuery = urlParams.get('controls'); // This will look for ?controls=true
-  const zoomQuery = urlParams.get('zoom'); // This will look for ?zoom=true
-  const ptzQuery = urlParams.get('ptz'); // This will look for ?zoom=true
-
-  if (controlsQuery === 'false' || !controlsQuery) {
-    document.getElementById('custom-controls').style.display = 'none';
-  }
-  if (zoomQuery === 'false' || !zoomQuery) {
-    document.getElementById('zoom-in').style.display = 'none';
-    document.getElementById('zoom-out').style.display = 'none';
-    document.getElementById('zoom-reset').style.display = 'none';
-    document.getElementById('zoom-level').style.display = 'none';
-  }
-  if (ptzQuery === 'false' || !ptzQuery) {
-    document.getElementById('ptz-left').style.display = 'none';
-    document.getElementById('ptz-right').style.display = 'none';
-    document.getElementById('ptz-top').style.display = 'none';
-    document.getElementById('ptz-bottom').style.display = 'none';
-  }
-
-
   const video = document.getElementById('video');
-  const playPauseBtn = document.getElementById('play-pause');
-  const muteBtn = document.getElementById('mute');
-  const fullscreenBtn = document.getElementById('fullscreen');
+  const message = document.getElementById('message');
+  const volumeSlider = document.getElementById('volumeSlider');
+  const muteToggle = document.getElementById('muteToggle');
+  const bottomBar = document.getElementById('bottomBar');
+  const ptzControls = document.getElementById('ptzControls');
 
-  // PTZ controls
-  const ptzTopBtn = document.getElementById('ptz-top');
-  const ptzBottomBtn = document.getElementById('ptz-bottom');
-  const ptzLeftBtn = document.getElementById('ptz-left');
-  const ptzRightBtn = document.getElementById('ptz-right');
-
-
-  // Zoom controls
-  const zoomInBtn = document.getElementById('zoom-in');
-  const zoomOutBtn = document.getElementById('zoom-out');
-  const zoomResetBtn = document.getElementById('zoom-reset');
-  const zoomLevelSpan = document.getElementById('zoom-level');
+  let defaultControls = false;
+  let enablePtz = true;
   let zoomLevel = 1;
-  let zoomLabel = 1;
+  const zoomSteps = [1, 1.2, 1.5, 2, 5];
 
-  // PTZ Config
-  const CONFIG = {
-    defaultSDKCredentials: {
-      username: 'ptz',
-      password: 'ptz@sst',
-    },
-  };
-
-  let streamId = window.location.href.split('/').at(window.location.href.split('/').length - 2);
+  // Extract streamId and channel from URL
+  let streamId = "6233056447"
+    // window.location.href.split('/').at(window.location.href.split("/").length - 2);
   const channel = 0;
 
-
-  // Initialize WebRTC Player
-  const loadAttributesFromQuery = () => {
-    const params = new URLSearchParams(window.location.search);
-    video.muted = parseBoolString(params.get('muted'), true);
-    video.autoplay = parseBoolString(params.get('autoplay'), true);
-    video.playsInline = parseBoolString(params.get('playsinline'), true);
-
-// Get SDK flag and credentials
-    const enablePTZ = parseBoolString(params.get('ptz'), false);
-    const sdkUsername = params.get('username') || CONFIG.defaultSDKCredentials.username;
-    const sdkPassword = params.get('password') || CONFIG.defaultSDKCredentials.password;
-
-// Store SDK parameters globally
-    window.sdkConfig = {
-      enabled: enablePTZ,
-      username: sdkUsername,
-      password: sdkPassword,
-    };
-  };
-
-  // PTZ functions
-  ptzTopBtn.addEventListener('click', () => {
-    if (!window.sdkConfig.enabled) return;
-    Player.ptz_ctrl(streamId, '', channel, 2, 6);
-    setTimeout(() => stopPtz(), 1000);
-  });
-
-  ptzBottomBtn.addEventListener('click', () => {
-    if (!window.sdkConfig.enabled) return;
-    Player.ptz_ctrl(streamId, '', channel, 3, 6);
-    setTimeout(() => stopPtz(), 1000);
-  });
-
-  ptzLeftBtn.addEventListener('click', () => {
-    if (!window.sdkConfig.enabled) return;
-    Player.ptz_ctrl(streamId, '', channel, 4, 6);
-    setTimeout(() => stopPtz(), 1000);
-  });
-
-  ptzRightBtn.addEventListener('click', () => {
-    if (!window.sdkConfig.enabled) return;
-    Player.ptz_ctrl(streamId, '', channel, 5, 6);
-    setTimeout(() => stopPtz(), 1000);
-  });
-
-
-  const stopPtz = () => {
-    if (!window.sdkConfig.enabled) return;
-    Player.ptz_ctrl(streamId, '', channel, 0, 0);
-  };
-
-  // Modified initialization function
-  const initH5Sdk = () => {
-    if (!window.sdkConfig.enabled) return;
-
-    let canvas = document.getElementById('canvas');
-    Player.init([canvas]);
-
-    Player.ConnectDevice(
-      streamId,
-      '',
-      window.sdkConfig.username,
-      window.sdkConfig.password,
-      0,
-      80,
-      0,
-      channel,
-      0,
-      'wss',
-    );
+  const setMessage = (str) => {
+    if (str !== '') {
+      video.controls = false;
+    } else {
+      video.controls = defaultControls;
+    }
+    message.innerText = str;
   };
 
   const parseBoolString = (str, defaultVal) => {
     str = (str || '');
-    if (['1', 'yes', 'true'].includes(str.toLowerCase())) return true;
-    if (['0', 'no', 'false'].includes(str.toLowerCase())) return false;
+    if (['1', 'yes', 'true'].includes(str.toLowerCase())) {
+      return true;
+    }
+    if (['0', 'no', 'false'].includes(str.toLowerCase())) {
+      return false;
+    }
     return defaultVal;
   };
 
-  const setMessage = (str) => {
-    message.innerText = str;
-    document.getElementById('custom-controls').style.visibility = str ? 'hidden' : 'visible';
+  const loadAttributesFromQuery = () => {
+    const params = new URLSearchParams(window.location.search);
+
+    const enableControl = parseBoolString(params.get('controls'), true);
+    enablePtz = parseBoolString(params.get('ptz'), true);
+
+    video.controls = false;
+    video.muted = parseBoolString(params.get('muted'), true);
+    video.autoplay = parseBoolString(params.get('autoplay'), true);
+    video.playsInline = parseBoolString(params.get('playsinline'), true);
+
+    defaultControls = video.controls;
+    bottomBar.style.display = enableControl ? 'flex' : 'none';
+    ptzControls.style.display = enablePtz ? 'flex' : 'none';
   };
 
+  // PTZ Functions
+  const ptzUp = () => {
+    Player.ptz_ctrl(streamId, '', channel, 2, 6);
+    setTimeout(() => stopPtz(), 1000);
+  };
+
+  const ptzDown = () => {
+    Player.ptz_ctrl(streamId, '', channel, 3, 6);
+    setTimeout(() => stopPtz(), 1000);
+  };
+
+  const ptzLeft = () => {
+    Player.ptz_ctrl(streamId, '', channel, 4, 6);
+    setTimeout(() => stopPtz(), 1000);
+  };
+
+  const ptzRight = () => {
+    Player.ptz_ctrl(streamId, '', channel, 5, 6);
+    setTimeout(() => stopPtz(), 1000);
+  };
+
+  const stopPtz = () => {
+    Player.ptz_ctrl(streamId, '', channel, 0, 0);
+  };
+
+  // Zoom Functions
+  const updateZoom = () => {
+    video.style.transform = `scale(${zoomLevel})`;
+  };
+
+  document.getElementById('zoomIn').addEventListener('click', () => {
+    const currentIndex = zoomSteps.indexOf(zoomLevel);
+    if (currentIndex < zoomSteps.length - 1) {
+      zoomLevel = zoomSteps[currentIndex + 1];
+      updateZoom();
+    }
+  });
+
+  document.getElementById('zoomOut').addEventListener('click', () => {
+    const currentIndex = zoomSteps.indexOf(zoomLevel);
+    if (currentIndex > 0) {
+      zoomLevel = zoomSteps[currentIndex - 1];
+      updateZoom();
+    }
+  });
+
+  document.getElementById('resetZoom').addEventListener('click', () => {
+    zoomLevel = zoomSteps[0];
+    updateZoom();
+  });
+
+  document.getElementById('fullscreen').addEventListener('click', () => {
+    const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement ||
+      document.mozFullScreenElement || document.msFullscreenElement;
+
+    if (isFullscreen) {
+      document.getElementById('fullscreen').innerHTML = '<span class="material-icons">fullscreen</span>';
+      if (document.exitFullscreen) {
+        document.exitFullscreen();
+      } else if (document.webkitExitFullscreen) {
+        document.webkitExitFullscreen();
+      } else if (document.mozCancelFullScreen) {
+        document.mozCancelFullScreen();
+      } else if (document.msExitFullscreen) {
+        document.msExitFullscreen();
+      }
+    } else {
+      document.getElementById('fullscreen').innerHTML = '<span class="material-icons">fullscreen_exit</span>';
+      const element = document.documentElement;
+      if (element.requestFullscreen) {
+        element.requestFullscreen();
+      } else if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen();
+      } else if (element.mozRequestFullScreen) {
+        element.mozRequestFullScreen();
+      } else if (element.msRequestFullscreen) {
+        element.msRequestFullscreen();
+      }
+    }
+  });
+
+  // Audio Controls
+  volumeSlider.addEventListener('input', () => {
+    video.volume = volumeSlider.value / 100;
+    video.muted = video.volume === 0;
+    updateMuteButton();
+  });
+
+  muteToggle.addEventListener('click', () => {
+    video.muted = !video.muted;
+    updateMuteButton();
+  });
+
+  function updateMuteButton() {
+    if (video.muted || video.volume === 0) {
+      muteToggle.innerHTML = '<span class="material-icons">volume_off</span>';
+      volumeSlider.value = 0;
+    } else {
+      muteToggle.innerHTML = '<span class="material-icons">volume_up</span>';
+      volumeSlider.value = video.volume * 100;
+    }
+  }
+
+  // Initialize H5 SDK
+  const initH5Sdk = () => {
+    let canvas = document.getElementById("canvas");
+    Player.init([canvas]);
+
+    const user = "ptz";
+    const pwd = "ptz@sst";
+
+    Player.ConnectDevice(streamId, '', user, pwd, 0, 80, 0, channel, 0, "wss");
+  };
+
+  // Main initialization
   window.addEventListener('DOMContentLoaded', () => {
     loadAttributesFromQuery();
-    initH5Sdk();
 
     new MediaMTXWebRTCReader({
       url: new URL('whep', window.location.href) + window.location.search,
       onError: (err) => {
         setMessage(err);
-        console.error(err);
       },
       onTrack: (evt) => {
         setMessage('');
         video.srcObject = evt.streams[0];
       },
     });
+
+    initH5Sdk();
   });
-
-
-  // Play/Pause toggle
-  playPauseBtn.addEventListener('click', () => {
-    if (video.paused) {
-      video.play();
-      playPauseBtn.innerHTML =
-        '<i class="fa-solid fa-pause"></i>';
-    } else {
-      video.pause();
-      playPauseBtn.innerHTML = '<i class="fa-solid fa-play"></i>';
-    }
-  });
-
-  // Mute/Unmute toggle
-  muteBtn.addEventListener('click', () => {
-    video.muted = !video.muted;
-    muteBtn.innerHTML = video.muted
-      ? '<i class="fa-solid fa-volume-xmark"></i>'
-      : '<i class="fa-solid fa-volume-high"></i>';
-  });
-
-  // Fullscreen
-  fullscreenBtn.addEventListener('click', () => {
-    const videoContainer =
-      document.querySelector('.video-container');
-    if (!document.fullscreenElement) {
-      if (videoContainer.requestFullscreen) {
-        videoContainer.requestFullscreen();
-      } else if (videoContainer.webkitRequestFullscreen) {
-        videoContainer.webkitRequestFullscreen();
-      } else if (videoContainer.msRequestFullscreen) {
-        videoContainer.msRequestFullscreen();
-      }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-      } else if (document.webkitExitFullscreen) {
-        document.webkitExitFullscreen();
-      } else if (document.msExitFullscreen) {
-        document.msExitFullscreen();
-      }
-    }
-  });
-
-  // Zoom In
-  zoomInBtn.addEventListener('click', () => {
-    if (zoomLevel < 3.25) {
-      zoomLevel += 0.25;
-      video.style.transform = `scale(${zoomLevel})`;
-      zoomLabel += 1;
-      zoomLevelSpan.innerHTML = zoomLabel + 'x';
-    }
-  });
-
-  // Zoom Out
-  zoomOutBtn.addEventListener('click', () => {
-    if (zoomLevel > 1) {
-      zoomLevel -= 0.25;
-      video.style.transform = `scale(${zoomLevel})`;
-      zoomLabel -= 1;
-      zoomLevelSpan.innerHTML = zoomLabel + 'x';
-    }
-  });
-
-  // Zoom Reset
-  zoomResetBtn.addEventListener('click', () => {
-    zoomLevel = 1;
-    video.style.transform = `scale(${zoomLevel})`;
-    zoomLabel = 1;
-    zoomLevelSpan.innerHTML = zoomLabel + 'x';
-  });
-
-
 </script>
+
 </body>
 </html>

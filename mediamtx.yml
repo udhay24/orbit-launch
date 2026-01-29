@@ -696,18 +696,12 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnReady: >
-    grpcurl -plaintext -d
-    '{"camera_id": "$MTX_PATH", "remote_ip": ""}'
-    localhost:50051 camera.CameraService/CameraConnect
+  runOnReady: sh -c 'echo connect:$MTX_PATH | nc -q0 localhost 50052'
   # Restart the command if it exits.
   runOnReadyRestart: no
   # Command to run when the stream is not available anymore.
   # Environment variables are the same of runOnReady.
-  runOnNotReady: >
-    grpcurl -plaintext -d
-    '{"camera_id": "$MTX_PATH", "remote_ip": ""}'
-    localhost:50051 camera.CameraService/CameraDisconnect
+  runOnNotReady: sh -c 'echo disconnect:$MTX_PATH | nc -q0 localhost 50052'
 
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.

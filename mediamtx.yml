@@ -15,7 +15,7 @@ logStructured: no
 # When "file" is in logDestinations, this is the file which will receive logs.
 logFile: mediamtx.log
 # When "syslog" is in logDestinations, use prefix for logs.
-sysLogPrefix: mediamtx
+sysLogPrefix: orbit-play
 
 # Timeout of read operations.
 readTimeout: 10s
@@ -82,7 +82,7 @@ authInternalUsers:
   # if the IP is localhost.
 - user: any
   pass:
-  ips: ['127.0.0.1', '::1']
+  ips: []
   permissions:
   - action: api
   - action: metrics
@@ -148,7 +148,7 @@ authJWTInHTTPQuery: true
 # Global settings -> Control API
 
 # Enable controlling the server through the Control API.
-api: no
+api: yes
 # Address of the Control API listener.
 apiAddress: :9997
 # Enable HTTPS on the Control API server.
@@ -329,22 +329,22 @@ hlsAllowOrigins: ['*']
 hlsTrustedProxies: []
 # By default, HLS is generated only when requested by a user.
 # This option allows to generate it always, avoiding the delay between request and generation.
-hlsAlwaysRemux: no
+hlsAlwaysRemux: yes
 # Variant of the HLS protocol to use. Available options are:
 # * mpegts - uses MPEG-TS segments, for maximum compatibility.
 # * fmp4 - uses fragmented MP4 segments, more efficient.
 # * lowLatency - uses Low-Latency HLS.
-hlsVariant: lowLatency
+hlsVariant: mpegts
 # Number of HLS segments to keep on the server.
 # Segments allow to seek through the stream.
 # Their number doesn't influence latency.
-hlsSegmentCount: 7
+hlsSegmentCount: 5
 # Minimum duration of each segment.
 # A player usually puts 3 segments in a buffer before reproducing the stream.
 # The final segment duration is also influenced by the interval between IDR frames,
 # since the server changes the duration in order to include at least one IDR frame
 # in each segment.
-hlsSegmentDuration: 1s
+hlsSegmentDuration: 2s
 # Minimum duration of each part.
 # A player usually puts 3 parts in a buffer before reproducing the stream.
 # Parts are used in Low-Latency HLS in place of segments.
@@ -490,12 +490,12 @@ pathDefaults:
   # Default path settings -> Record
 
   # Record streams to disk.
-  record: no
+  record: yes
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
   # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: ./recordings/%path/%Y-%m-%d-%H-%M-%S
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4
@@ -507,10 +507,10 @@ pathDefaults:
   # This prevents RAM exhaustion.
   recordMaxPartSize: 50M
   # Minimum duration of each segment.
-  recordSegmentDuration: 1h
+  recordSegmentDuration: 15m
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
-  recordDeleteAfter: 1d
+  recordDeleteAfter: 1h
 
   ###############################################
   # Default path settings -> Publisher source (when source is "publisher")
@@ -696,12 +696,18 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnReady:
+  runOnReady: >
+    grpcurl -plaintext -d
+    '{"camera_id": "$MTX_PATH", "remote_ip": ""}'
+    localhost:50051 camera.CameraService/CameraConnect
   # Restart the command if it exits.
   runOnReadyRestart: no
   # Command to run when the stream is not available anymore.
   # Environment variables are the same of runOnReady.
-  runOnNotReady:
+  runOnNotReady: >
+    grpcurl -plaintext -d
+    '{"camera_id": "$MTX_PATH", "remote_ip": ""}'
+    localhost:50051 camera.CameraService/CameraDisconnect
 
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.
@@ -737,7 +743,10 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnRecordSegmentComplete:
+  runOnRecordSegmentComplete: >
+    grpcurl -plaintext -d
+    '{"recording_path": "/root/orbit-play/$MTX_SEGMENT_PATH"}'
+    localhost:50051 camera.CameraService/UploadRecording
 
 ###############################################
 # Path settings

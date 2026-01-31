@@ -370,7 +370,7 @@ webrtc: yes
 # Address of the WebRTC HTTP listener.
 webrtcAddress: :8889
 # Enable HTTPS on the WebRTC server.
-webrtcEncryption: no
+webrtcEncryption: yes
 # Path to the server key.
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -737,10 +737,7 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnRecordSegmentComplete: >
-    grpcurl -plaintext -d
-    '{"recording_path": "/root/orbit-play/$MTX_SEGMENT_PATH"}'
-    localhost:50051 camera.CameraService/UploadRecording
+  runOnRecordSegmentComplete: sh -c 'echo "upload:/root/orbit-play/$MTX_SEGMENT_PATH" | nc -q0 localhost 50052'
 
 ###############################################
 # Path settings

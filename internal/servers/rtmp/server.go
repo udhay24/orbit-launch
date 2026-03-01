@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -211,6 +212,12 @@ outer:
 			break outer
 
 		case nconn := <-s.chNewConn:
+			// Enable TCP optimizations for cameras on poor networks
+			if tc, ok := nconn.(*net.TCPConn); ok {
+				tc.SetNoDelay(true)
+				tc.SetKeepAlive(true)
+				tc.SetKeepAlivePeriod(30 * time.Second)
+			}
 			c := &conn{
 				parentCtx:           s.ctx,
 				isTLS:               s.IsTLS,

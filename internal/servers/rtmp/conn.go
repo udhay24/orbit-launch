@@ -124,18 +124,29 @@ func (c *conn) runReader() error {
 	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
 	c.nconn.SetWriteDeadline(time.Now().Add(time.Duration(c.writeTimeout)))
 
+	t0 := time.Now()
+	c.Log(logger.Info, "starting RTMP handshake")
+
 	conn := &gortmplib.ServerConn{
 		RW: c.nconn,
 	}
 	err := conn.Initialize()
 	if err != nil {
+		c.Log(logger.Info, "handshake failed after %v: %v", time.Since(t0), err)
 		return err
 	}
+	c.Log(logger.Info, "handshake completed in %v", time.Since(t0))
 
+	// Reset deadline after handshake for the Accept phase.
+	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
+
+	t1 := time.Now()
 	err = conn.Accept()
 	if err != nil {
+		c.Log(logger.Info, "accept failed after %v: %v", time.Since(t1), err)
 		return err
 	}
+	c.Log(logger.Info, "accept completed in %v, publish=%v, path=%v", time.Since(t1), conn.Publish, conn.URL)
 
 	c.mutex.Lock()
 	c.rconn = conn
@@ -221,6 +232,9 @@ func (c *conn) runPublish() error {
 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
 	query := c.rconn.URL.Query()
 
+	// Reset read deadline for the publish setup phase.
+	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
+
 	r := &gortmplib.Reader{
 		Conn: c.rconn,
 	}
@@ -228,6 +242,8 @@ func (c *conn) runPublish() error {
 	if err != nil {
 		return err
 	}
+
+	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
 
 	var subStream *stream.SubStream
 

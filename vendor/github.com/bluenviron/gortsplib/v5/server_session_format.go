@@ -1,0 +1,185 @@
+package gortsplib
+
+import (
+	"fmt"
+	"log"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
+
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
+	"github.com/bluenviron/gortsplib/v5/pkg/rtpreceiver"
+)
+
+type serverSessionFormat struct {
+	sm          *serverSessionMedia
+	format      format.Format
+	localSSRC   uint32
+	onPacketRTP OnPacketRTPFunc
+
+	remoteSSRCMutex       sync.RWMutex          // record
+	remoteSSRCFilled      bool                  // record
+	remoteSSRCValue       uint32                // record
+	rtpReceiver           *rtpreceiver.Receiver // record
+	writePacketRTPInQueue func([]byte) error
+	rtpPacketsSent        *uint64
+}
+
+func (sf *serverSessionFormat) initialize() {
+	sf.rtpPacketsSent = new(uint64)
+
+	udp := sf.sm.ss.setuppedTransport.Protocol == ProtocolUDP ||
+		sf.sm.ss.setuppedTransport.Protocol == ProtocolUDPMulticast
+
+	if udp {
+		sf.writePacketRTPInQueue = sf.writePacketRTPInQueueUDP
+	} else {
+		sf.writePacketRTPInQueue = sf.writePacketRTPInQueueTCP
+	}
+
+	if sf.sm.ss.state == ServerSessionStatePreRecord || sf.sm.media.IsBackChannel {
+		sf.rtpReceiver = &rtpreceiver.Receiver{
+			ClockRate:            sf.format.ClockRate(),
+			LocalSSRC:            sf.localSSRC,
+			UnrealiableTransport: udp,
+			Period:               sf.sm.ss.s.receiverReportPeriod,
+			TimeNow:              sf.sm.ss.s.timeNow,
+			WritePacketRTCP: func(pkt rtcp.Packet) {
+				if udp {
+					sf.sm.ss.WritePacketRTCP(sf.sm.media, pkt) //nolint:errcheck
+				}
+			},
+		}
+		err := sf.rtpReceiver.Initialize()
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func (sf *serverSessionFormat) close() {
+	if sf.rtpReceiver != nil {
+		sf.rtpReceiver.Close()
+		sf.rtpReceiver = nil
+	}
+}
+
+func (sf *serverSessionFormat) remoteSSRC() (uint32, bool) {
+	sf.remoteSSRCMutex.RLock()
+	defer sf.remoteSSRCMutex.RUnlock()
+	return sf.remoteSSRCValue, sf.remoteSSRCFilled
+}
+
+func (sf *serverSessionFormat) readPacketRTP(payload []byte, header *rtp.Header, headerSize int, now time.Time) bool {
+	if !sf.remoteSSRCFilled {
+		sf.remoteSSRCMutex.Lock()
+		sf.remoteSSRCFilled = true
+		sf.remoteSSRCValue = header.SSRC
+		sf.remoteSSRCMutex.Unlock()
+
+		// a wrong SSRC is an issue only when encryption is enabled, since it spams srtp.Context.DecryptRTP.
+	} else if sf.sm.srtpInCtx != nil &&
+		header.SSRC != sf.remoteSSRCValue {
+		sf.sm.onPacketRTPDecodeError(fmt.Errorf("received packet with wrong SSRC %d, expected %d",
+			header.SSRC, sf.remoteSSRCValue))
+		return false
+	}
+
+	pkt, err := sf.sm.decodeRTP(payload, header, headerSize)
+	if err != nil {
+		sf.sm.onPacketRTPDecodeError(err)
+		return false
+	}
+
+	pkts, lost := sf.rtpReceiver.ProcessPacket2(pkt, now, sf.format.PTSEqualsDTS(pkt))
+
+	if lost != 0 {
+		if h, ok := sf.sm.ss.s.Handler.(ServerHandlerOnPacketsLost); ok {
+			h.OnPacketsLost(&ServerHandlerOnPacketsLostCtx{
+				Session: sf.sm.ss,
+				Lost:    lost,
+			})
+		} else {
+			log.Printf("%d RTP %s lost",
+				lost,
+				func() string {
+					if lost == 1 {
+						return "packet"
+					}
+					return "packets"
+				}())
+		}
+	}
+
+	for _, pkt := range pkts {
+		sf.onPacketRTP(pkt)
+	}
+
+	return true
+}
+
+func (sf *serverSessionFormat) writePacketRTP(pkt *rtp.Packet) error {
+	pkt.SSRC = sf.localSSRC
+
+	maxPlainPacketSize := sf.sm.ss.s.MaxPacketSize
+	if isSecure(sf.sm.ss.setuppedTransport.Profile) {
+		maxPlainPacketSize -= srtpOverhead
+	}
+
+	plain := make([]byte, maxPlainPacketSize)
+	n, err := pkt.MarshalTo(plain)
+	if err != nil {
+		return err
+	}
+	plain = plain[:n]
+
+	var encr []byte
+	if isSecure(sf.sm.ss.setuppedTransport.Profile) {
+		encr = make([]byte, sf.sm.ss.s.MaxPacketSize)
+		encr, err = sf.sm.srtpOutCtx.encryptRTP(encr, plain, &pkt.Header)
+		if err != nil {
+			return err
+		}
+	}
+
+	if isSecure(sf.sm.ss.setuppedTransport.Profile) {
+		return sf.writePacketRTPEncoded(encr)
+	}
+	return sf.writePacketRTPEncoded(plain)
+}
+
+func (sf *serverSessionFormat) writePacketRTPEncoded(payload []byte) error {
+	atomic.AddUint64(sf.sm.bytesSent, uint64(len(payload)))
+	atomic.AddUint64(sf.rtpPacketsSent, 1)
+
+	sf.sm.ss.writerMutex.RLock()
+	defer sf.sm.ss.writerMutex.RUnlock()
+
+	if sf.sm.ss.writer == nil {
+		return nil
+	}
+
+	ok := sf.sm.ss.writer.Push(func() error {
+		return sf.writePacketRTPInQueue(payload)
+	})
+	if !ok {
+		return liberrors.ErrServerWriteQueueFull{}
+	}
+
+	return nil
+}
+
+func (sf *serverSessionFormat) writePacketRTPInQueueUDP(payload []byte) error {
+	return sf.sm.ss.s.udpRTPListener.write(payload, sf.sm.udpRTPWriteAddr)
+}
+
+func (sf *serverSessionFormat) writePacketRTPInQueueTCP(payload []byte) error {
+	sf.sm.ss.tcpFrame.Channel = sf.sm.tcpChannel
+	sf.sm.ss.tcpFrame.Payload = payload
+	sf.sm.ss.tcpConn.nconn.SetWriteDeadline(time.Now().Add(sf.sm.ss.s.WriteTimeout))
+	return sf.sm.ss.tcpConn.conn.WriteInterleavedFrame(sf.sm.ss.tcpFrame, sf.sm.ss.tcpBuffer)
+}

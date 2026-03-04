@@ -7,7 +7,7 @@
 # Global settings -> General
 
 # Verbosity of the program; available values are "error", "warn", "info", "debug".
-logLevel: info
+logLevel: error
 # Destinations of log messages; available values are "stdout", "file" and "syslog".
 logDestinations: [stdout]
 # When destination is "stdout" or "file", emit logs in structured format (JSONL).
@@ -85,7 +85,7 @@ authInternalUsers:
   # if the IP is localhost.
 - user: any
   pass:
-  ips: ['127.0.0.1', '::1']
+  ips: []
   permissions:
   - action: api
   - action: metrics
@@ -157,7 +157,7 @@ authJWTInHTTPQuery: true
 # Global settings -> Control API
 
 # Enable controlling the server through the Control API.
-api: false
+api: yes
 # Address of the Control API listener.
 apiAddress: :9997
 # Enable HTTPS on the Control API server.
@@ -321,7 +321,7 @@ hls: true
 hlsAddress: :8888
 # Enable HTTPS on the HLS server.
 # This is required for Low-Latency HLS to function correctly on Apple devices.
-hlsEncryption: false
+hlsEncryption: yes
 # Path to the server key. This is needed only when encryption is yes.
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -338,12 +338,12 @@ hlsAllowOrigins: ['*']
 hlsTrustedProxies: []
 # By default, HLS is generated only when requested by a user.
 # This option allows to generate it always, avoiding the delay between request and generation.
-hlsAlwaysRemux: false
+hlsAlwaysRemux: true
 # Variant of the HLS protocol to use. Available options are:
 # * mpegts - uses MPEG-TS segments, for maximum compatibility.
 # * fmp4 - uses fragmented MP4 segments, more efficient.
 # * lowLatency - uses Low-Latency HLS.
-hlsVariant: lowLatency
+hlsVariant: mpegts
 # Number of HLS segments to keep on the server.
 # Segments allow to seek through the stream.
 # Their number doesn't influence latency.
@@ -381,7 +381,7 @@ webrtcAddress: :8889
 # Enable HTTPS on the WebRTC server.
 # This covers only the WebRTC handshake and does not influence the encryption of WebRTC streams
 # which are always encrypted, with a key that is exchanged during the WebRTC handshake.
-webrtcEncryption: false
+webrtcEncryption: yes
 # Path to the server key.
 # This can be generated with:
 # openssl genrsa -out server.key 2048
@@ -514,12 +514,12 @@ pathDefaults:
   # Default path settings -> Record
 
   # Record streams to disk.
-  record: false
+  record: yes
   # Path of recording segments.
   # Extension is added automatically.
   # Available variables are %path (path name), %Y %m %d (year, month, day),
   # %H %M %S (hours, minutes, seconds), %f (microseconds), %z (time zone), %s (unix epoch).
-  recordPath: ./recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordPath: ./recordings/%path/%Y-%m-%d-%H-%M-%S
   # Format of recorded segments.
   # Available formats are "fmp4" (fragmented MP4) and "mpegts" (MPEG-TS).
   recordFormat: fmp4
@@ -534,7 +534,7 @@ pathDefaults:
   recordSegmentDuration: 1h
   # Delete segments after this timespan.
   # Set to 0s to disable automatic deletion.
-  recordDeleteAfter: 1d
+  recordDeleteAfter: 1h
 
   ###############################################
   # Default path settings -> Publisher source (when source is "publisher")
@@ -734,12 +734,12 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnReady:
+  runOnReady: sh -c 'echo connect:$MTX_PATH | nc -q0 localhost 50052'
   # Restart the command if it exits.
   runOnReadyRestart: false
   # Command to run when the stream is not available anymore.
   # Environment variables are the same of runOnReady.
-  runOnNotReady:
+  runOnNotReady: sh -c 'echo disconnect:$MTX_PATH | nc -q0 localhost 50052'
 
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.
@@ -775,7 +775,7 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnRecordSegmentComplete:
+  runOnRecordSegmentComplete: sh -c 'echo "upload:/root/orbit-play/$MTX_SEGMENT_PATH" | nc -q0 localhost 50052'
 
 ###############################################
 # Path settings

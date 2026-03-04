@@ -1,0 +1,35 @@
+Index: installation.md
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.BaseRevisionTextPatchEP
+<+># Orbit Play\n\n<h1 align=\"center\">\n  <img src=\"logo.png\" alt=\"Orbit Play\">\n  <br>\n</h1>\n\n_Orbit Play_ is a media server that allows publishing, reading, and recording video and audio streams.\n\n## Installation\n\nThere are several installation methods available: standalone binary, Docker image.\n\n### Standalone Binary\n\n1. **Create a Directory and Download Binary:**\n    ```sh \n    mkdir media\n    cd media\n    ```\n   Download and extract the standalone binary from the [drive link](https://drive.google.com/drive/folders/18fdmQQA1C2TGCqx9ysinnRJn-3foRuSu?usp=drive_link).\n\n2. **Generate Required Certificates:**\n    ```sh\n    sudo apt update\n    sudo apt install certbot python3-certbot-nginx\n    sudo systemctl stop nginx\n    sudo certbot certonly --standalone -d orbit1.s2tlive.com\n    sudo cp /etc/letsencrypt/live/orbit1.s2tlive.com/fullchain.pem server.crt\n    sudo cp /etc/letsencrypt/live/orbit1.s2tlive.com/privkey.pem server.key\n    sudo chown ubuntu:ubuntu server.key\n    sudo chown ubuntu:ubuntu server.crt\n    ```\n\n3. **Download and Set Permissions for Binaries:**\n    ```sh\n    wget --no-check-certificate 'https://drive.google.com/uc?export=download&id=1Pls3rmF7PmXtrJQ8yuSl8yF1M2q1aQse' -O orbit-play\n    chmod +x orbit-play\n\n    wget --no-check-certificate 'https://drive.google.com/uc?export=download&id=12a1lcEil3l7vdGYwOo40-J1PP2XMb82G' -O orbit-play-wasabi-sync\n    chmod +x orbit-play-wasabi-sync\n\n    wget --no-check-certificate 'https://drive.google.com/uc?export=download&id=1RAiX9T6EJdpohr5_K6pALPt1-VP7_Edv' -O orbit-play.yml\n    ```\n\n4. **Create a Systemd Service File:**\n   ```\n    sudo cp orbit-launch.service /etc/systemd/system/\n    ```\n   \n    ```sh\n    sudo nano /etc/systemd/system/orbit-play.service\n    ```\n\n   Paste the following content:\n\n    ```sh\n[Unit]\nDescription=Orbit Play Service\nAfter=network.target\n\n[Service]\nExecStart=/home/ubuntu/orbit-play/mediamtx\nWorkingDirectory=/home/ubuntu/orbit-play\nUser=root\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n    ```\n\n5. **Enable and Start the Service:**\n    ```sh\n    sudo systemctl daemon-reload\n    sudo systemctl enable orbit-play.service \n    sudo systemctl start orbit-play.service\n    ```\n\n6. **Start the Wasabi Server:**\n    ```sh\n    ./orbit-play-wasabi-sync\n    ```\n\n7. **Start the Media Server:**\n    ```sh\n    ./orbit-play\n    ```\n
+===================================================================
+diff --git a/installation.md b/installation.md
+--- a/installation.md	(revision 5b78fb0f8fc105084e90ce8712b1892167237cb4)
++++ b/installation.md	(date 1753536641650)
+@@ -14,7 +14,7 @@
+ ### Standalone Binary
+ 
+ 1. **Create a Directory and Download Binary:**
+-    ```sh 
++    ```sh
+     mkdir media
+     cd media
+     ```
+@@ -47,7 +47,7 @@
+    ```
+     sudo cp orbit-launch.service /etc/systemd/system/
+     ```
+-   
++
+     ```sh
+     sudo nano /etc/systemd/system/orbit-play.service
+     ```
+@@ -72,7 +72,7 @@
+ 5. **Enable and Start the Service:**
+     ```sh
+     sudo systemctl daemon-reload
+-    sudo systemctl enable orbit-play.service 
++    sudo systemctl enable orbit-play.service
+     sudo systemctl start orbit-play.service
+     ```
+ 

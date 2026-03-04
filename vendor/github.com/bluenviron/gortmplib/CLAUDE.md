@@ -7,5 +7,6 @@
 
 | ID | Time | T | Title | Read |
 |----|------|---|-------|------|
+| #3348 | 7:06 PM | 🟣 | RTMP Camera Compatibility Patches Vendored into MediaMTX Build | ~555 |
 | #3332 | 6:59 PM | ✅ | RTMP Camera Compatibility Patches Applied to Vendored gortmplib | ~343 |
 </claude-mem-context>

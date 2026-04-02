@@ -45,16 +45,59 @@ if ! command -v gh &>/dev/null; then
 fi
 gh auth status --hostname github.com >/dev/null
 
-# ── Build ─────────────────────────────────────────────────────────────────────
+# ── Build inside Docker (native Linux — no cross-compile surprises) ───────────
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-echo "==> Building mediamtx (linux/amd64)..."
+if ! command -v docker &>/dev/null; then
+    echo "ERROR: docker not found. Install Docker Desktop to build release binaries."
+    exit 1
+fi
+
 cd "$SCRIPT_DIR"
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$BUILD_DIR/mediamtx" .
+
+# Detect Go version from go.mod for an exact match in the build image
+GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}' | cut -d. -f1,2)
+GO_IMAGE="golang:${GO_VERSION}-alpine"
+echo "==> Building mediamtx inside Docker ($GO_IMAGE)..."
+
+docker run --rm \
+    --platform linux/amd64 \
+    -v "$SCRIPT_DIR":/src \
+    -v "$BUILD_DIR":/out \
+    -w /src \
+    -e CGO_ENABLED=0 \
+    -e GOOS=linux \
+    -e GOARCH=amd64 \
+    "$GO_IMAGE" \
+    sh -c 'go build -o /out/mediamtx .'
+
 cp mediamtx.yml "$BUILD_DIR/mediamtx.yml"
 
-echo "==> Build complete: $(du -sh "$BUILD_DIR/mediamtx" | cut -f1) binary"
+# Verify ELF binary is Linux x86-64 — catches ARM cross-compile from Apple Silicon
+file "$BUILD_DIR/mediamtx" | grep -q "ELF 64-bit.*x86-64" \
+    || { echo "ERROR: mediamtx is not a Linux x86-64 binary (got: $(file "$BUILD_DIR/mediamtx")) — aborting"; exit 1; }
+
+echo "==> Build complete: $(du -sh "$BUILD_DIR/mediamtx" | cut -f1) binary (ELF 64-bit x86-64 verified)"
+
+# Verify yml is compatible with the binary — catches version mismatch (e.g. unknown fields)
+# mediamtx exits immediately with an error if the config has unrecognised fields.
+# We run it with a 2s timeout; it will either print an ERR and exit 1 (bad yml)
+# or start listening and be killed by the timeout (good yml → exit 143, treated as success).
+echo "==> Validating mediamtx.yml against binary..."
+VALIDATE_OUTPUT=$(docker run --rm \
+    --platform linux/amd64 \
+    -v "$BUILD_DIR":/out \
+    -w /out \
+    alpine \
+    sh -c 'timeout 2 ./mediamtx mediamtx.yml 2>&1 || true')
+
+if echo "$VALIDATE_OUTPUT" | grep -q "^ERR:"; then
+    echo "ERROR: mediamtx rejected the yml config:"
+    echo "$VALIDATE_OUTPUT" | grep "^ERR:"
+    exit 1
+fi
+echo "==> mediamtx.yml validated OK"
 
 # ── Checksum ─────────────────────────────────────────────────────────────────
 cd "$BUILD_DIR"

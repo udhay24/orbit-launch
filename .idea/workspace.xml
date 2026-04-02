@@ -4,10 +4,12 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="62dc1b71-8045-4dc7-9650-c7e911b7b4ff" name="Changes" comment="feat(mediamtx): enable WebRTC encryption and update recording upload command">
-      <change beforePath="$PROJECT_DIR$/gortmplib-patched/pkg/rawmessage/reader.go" beforeDir="false" afterPath="$PROJECT_DIR$/gortmplib-patched/pkg/rawmessage/reader.go" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mediamtx.yml" beforeDir="false" afterPath="$PROJECT_DIR$/mediamtx.yml" afterDir="false" />
+    <list default="true" id="62dc1b71-8045-4dc7-9650-c7e911b7b4ff" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mediamtx-patched" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/CLAUDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/CLAUDE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/reader.go" beforeDir="false" afterPath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/reader.go" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -15,7 +17,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="780" />
+    <option name="cachedIndexableFilesCount" value="787" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="FileTemplateManagerImpl">
@@ -79,6 +81,7 @@
     "RunOnceActivity.GoLinterPluginStorageMigration": "true",
     "RunOnceActivity.MCP Project settings loaded": "true",
     "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
     "RunOnceActivity.git.unshallow": "true",
     "RunOnceActivity.go.analysis.ui.options.defaults": "true",
     "RunOnceActivity.go.formatter.settings.were.checked": "true",
@@ -89,6 +92,7 @@
     "SHELLCHECK.PATH": "/Users/udhay/Library/Application Support/JetBrains/GoLand2025.1/plugins/Shell Script/shellcheck",
     "Shell Script.install-servers.sh.executor": "Run",
     "Shell Script.upgrade-servers.sh.executor": "Run",
+    "codeWithMe.voiceChat.enabledByDefault": "false",
     "com.codeium.enabled": "true",
     "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultAutoModeForALLUsers.v1": "true",
     "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
@@ -193,8 +197,8 @@
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-gosdk-72a9cf600ed8-dfa3e7267ae0-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-253.31033.129" />
-        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-GO-253.31033.129" />
+        <option value="bundled-gosdk-72a9cf600ed8-3105c3b11fe0-org.jetbrains.plugins.go.sharedIndexes.bundled-GO-261.22158.291" />
+        <option value="bundled-js-predefined-d6986cc7102b-3bd3a6803838-JavaScript-GO-261.22158.291" />
       </set>
     </attachedChunks>
   </component>

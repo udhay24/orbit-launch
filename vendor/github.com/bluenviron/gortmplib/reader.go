@@ -58,6 +58,9 @@ func h265FindNALU(array []mp4.HEVCNaluArray, typ h265.NALUType) []byte {
 }
 
 func h264TrackFromConfig(avcC *mp4.AVCDecoderConfiguration) (*Track, error) {
+	if avcC == nil {
+		return nil, fmt.Errorf("missing AVC config")
+	}
 	if avcC.NumOfSequenceParameterSets < 1 {
 		return nil, fmt.Errorf("no SPS found")
 	}
@@ -72,6 +75,9 @@ func h264TrackFromConfig(avcC *mp4.AVCDecoderConfiguration) (*Track, error) {
 }
 
 func h265TrackFromConfig(hvcC *mp4.HvcC) (*Track, error) {
+	if hvcC == nil {
+		return nil, fmt.Errorf("missing HEVC config")
+	}
 	vps := h265FindNALU(hvcC.NaluArrays, h265.NALUType_VPS_NUT)
 	sps := h265FindNALU(hvcC.NaluArrays, h265.NALUType_SPS_NUT)
 	pps := h265FindNALU(hvcC.NaluArrays, h265.NALUType_PPS_NUT)
@@ -132,13 +138,16 @@ func audioTrackFromData(msg *message.Audio) (*Track, error) {
 		}}, nil
 
 	default:
-		panic("should not happen")
+		return nil, fmt.Errorf("unsupported audio codec: %v", msg.Codec)
 	}
 }
 
 func videoTrackFromSequenceStart(msg *message.VideoExSequenceStart) (*Track, error) {
 	switch msg.FourCC {
 	case message.FourCCAV1:
+		if msg.AV1Config == nil {
+			return nil, fmt.Errorf("missing AV1 config")
+		}
 		// parse sequence header and metadata contained in ConfigOBUs, but do not use them
 		var tu av1.Bitstream
 		err := tu.Unmarshal(msg.AV1Config.ConfigOBUs)
@@ -152,6 +161,9 @@ func videoTrackFromSequenceStart(msg *message.VideoExSequenceStart) (*Track, err
 		return &Track{Codec: &codecs.VP9{}}, nil
 
 	case message.FourCCHEVC:
+		if msg.HEVCConfig == nil {
+			return nil, fmt.Errorf("missing HEVC config")
+		}
 		vps := h265FindNALU(msg.HEVCConfig.NaluArrays, h265.NALUType_VPS_NUT)
 		sps := h265FindNALU(msg.HEVCConfig.NaluArrays, h265.NALUType_SPS_NUT)
 		pps := h265FindNALU(msg.HEVCConfig.NaluArrays, h265.NALUType_PPS_NUT)
@@ -166,6 +178,9 @@ func videoTrackFromSequenceStart(msg *message.VideoExSequenceStart) (*Track, err
 		}}, nil
 
 	case message.FourCCAVC:
+		if msg.AVCConfig == nil {
+			return nil, fmt.Errorf("missing AVC config")
+		}
 		if len(msg.AVCConfig.SequenceParameterSets) != 1 || len(msg.AVCConfig.PictureParameterSets) != 1 {
 			return nil, fmt.Errorf("H264 parameters are missing")
 		}
@@ -176,7 +191,7 @@ func videoTrackFromSequenceStart(msg *message.VideoExSequenceStart) (*Track, err
 		}}, nil
 
 	default:
-		panic("should not happen")
+		return nil, fmt.Errorf("unsupported video FourCC: %v", msg.FourCC)
 	}
 }
 
@@ -234,7 +249,7 @@ func audioTrackFromExtendedMessages(
 		return &Track{Codec: &codecs.MPEG1Audio{}}, nil
 
 	default:
-		panic("should not happen")
+		return nil, fmt.Errorf("unsupported audio FourCC: %v", frames.FourCC)
 	}
 }
 
@@ -572,6 +587,10 @@ func (r *Reader) OnDataH265(track *Track, cb OnDataH26xFunc) {
 		case *message.Video:
 			switch msg.Type {
 			case message.VideoTypeConfig:
+				if msg.HEVCConfig == nil {
+					return fmt.Errorf("missing HEVC config in VideoTypeConfig message")
+				}
+
 				vps := h265FindNALU(msg.HEVCConfig.NaluArrays, h265.NALUType_VPS_NUT)
 				sps := h265FindNALU(msg.HEVCConfig.NaluArrays, h265.NALUType_SPS_NUT)
 				pps := h265FindNALU(msg.HEVCConfig.NaluArrays, h265.NALUType_PPS_NUT)
@@ -638,6 +657,9 @@ func (r *Reader) OnDataH264(track *Track, cb OnDataH26xFunc) {
 		case *message.Video:
 			switch msg.Type {
 			case message.VideoTypeConfig:
+				if msg.AVCConfig == nil {
+					return fmt.Errorf("missing AVC config in VideoTypeConfig message")
+				}
 				if msg.AVCConfig.NumOfSequenceParameterSets < 1 {
 					return fmt.Errorf("no SPS found")
 				}
@@ -757,7 +779,13 @@ func (r *Reader) OnDataG711(track *Track, cb OnDataG711Func) {
 
 // OnDataLPCM sets a callback that is called when LPCM data is received.
 func (r *Reader) OnDataLPCM(track *Track, cb OnDataLPCMFunc) {
-	codec := track.Codec.(*codecs.LPCM)
+	codec, ok := track.Codec.(*codecs.LPCM)
+	if !ok || codec == nil {
+		r.onAudioData[r.audioTrackID(track)] = func(msg message.Message) error {
+			return fmt.Errorf("track codec is not LPCM")
+		}
+		return
+	}
 	bitDepth := codec.BitDepth
 
 	if bitDepth == 16 {
@@ -799,14 +827,18 @@ func (r *Reader) Read() error {
 		if r.videoTracks[0] == nil {
 			return fmt.Errorf("received a packet for video track 0, but track is not set up")
 		}
-
+		if r.onVideoData[0] == nil {
+			return nil
+		}
 		return r.onVideoData[0](msg)
 
 	case *message.Audio, *message.AudioExCodedFrames:
 		if r.audioTracks[0] == nil {
 			return fmt.Errorf("received a packet for audio track 0, but track is not set up")
 		}
-
+		if r.onAudioData[0] == nil {
+			return nil
+		}
 		return r.onAudioData[0](msg)
 
 	case *message.VideoExMultitrack:
@@ -815,7 +847,9 @@ func (r *Reader) Read() error {
 			if r.videoTracks[msg.TrackID] == nil {
 				return fmt.Errorf("received a packet for video track %d, but track is not set up", msg.TrackID)
 			}
-
+			if r.onVideoData[msg.TrackID] == nil {
+				return nil
+			}
 			return r.onVideoData[msg.TrackID](wmsg)
 		}
 
@@ -824,7 +858,9 @@ func (r *Reader) Read() error {
 			if r.audioTracks[msg.TrackID] == nil {
 				return fmt.Errorf("received a packet for audio track %d, but track is not set up", msg.TrackID)
 			}
-
+			if r.onAudioData[msg.TrackID] == nil {
+				return nil
+			}
 			return r.onAudioData[msg.TrackID](wmsg)
 		}
 	}

@@ -61,6 +61,20 @@ type pathSetHLSServerReq struct {
 	res chan pathSetHLSServerRes
 }
 
+type pathManagerStreamRegistry interface {
+	Register(streamID string)
+	Deregister(streamID string)
+}
+
+type pathSetStreamRegistryRes struct {
+	readyPaths []string
+}
+
+type pathSetStreamRegistryReq struct {
+	sr  pathManagerStreamRegistry
+	res chan pathSetStreamRegistryRes
+}
+
 type pathManagerAuthManager interface {
 	Authenticate(req *auth.Request) *auth.Error
 }
@@ -84,15 +98,17 @@ type pathManager struct {
 	metrics           *metrics.Metrics
 	parent            pathManagerParent
 
-	ctx       context.Context
-	ctxCancel func()
-	wg        sync.WaitGroup
-	hlsServer *hls.Server
-	paths     map[string]*path
+	ctx            context.Context
+	ctxCancel      func()
+	wg             sync.WaitGroup
+	hlsServer      *hls.Server
+	streamRegistry pathManagerStreamRegistry
+	paths          map[string]*path
 
 	// in
-	chReloadConf      chan map[string]*conf.Path
-	chSetHLSServer    chan pathSetHLSServerReq
+	chReloadConf         chan map[string]*conf.Path
+	chSetHLSServer       chan pathSetHLSServerReq
+	chSetStreamRegistry  chan pathSetStreamRegistryReq
 	chRemovePath      chan *path
 	chClosePathIfIdle chan *path
 	chSetPathReady    chan *path
@@ -113,6 +129,7 @@ func (pm *pathManager) initialize() {
 	pm.paths = make(map[string]*path)
 	pm.chReloadConf = make(chan map[string]*conf.Path)
 	pm.chSetHLSServer = make(chan pathSetHLSServerReq)
+	pm.chSetStreamRegistry = make(chan pathSetStreamRegistryReq)
 	pm.chRemovePath = make(chan *path)
 	pm.chClosePathIfIdle = make(chan *path)
 	pm.chSetPathReady = make(chan *path)
@@ -169,8 +186,15 @@ outer:
 			readyPaths := pm.doSetHLSServer(req.s)
 			req.res <- pathSetHLSServerRes{readyPaths: readyPaths}
 
+		case req := <-pm.chSetStreamRegistry:
+			names := pm.doSetStreamRegistry(req.sr)
+			req.res <- pathSetStreamRegistryRes{readyPaths: names}
+
 		case pa := <-pm.chRemovePath:
 			if pa2, ok := pm.paths[pa.name]; ok && pa2 == pa {
+				if pa.ready && pm.streamRegistry != nil {
+					pm.streamRegistry.Deregister(pa.name)
+				}
 				delete(pm.paths, pa.name)
 			}
 
@@ -295,6 +319,19 @@ func (pm *pathManager) doSetHLSServer(m *hls.Server) []defs.Path {
 	return ret
 }
 
+func (pm *pathManager) doSetStreamRegistry(sr pathManagerStreamRegistry) []string {
+	pm.streamRegistry = sr
+
+	var ret []string
+	for name, pa := range pm.paths {
+		if pa.ready {
+			ret = append(ret, name)
+		}
+	}
+
+	return ret
+}
+
 func (pm *pathManager) doSetPathReady(pa *path) {
 	if pa2, ok := pm.paths[pa.name]; !ok || pa2 != pa {
 		return
@@ -304,6 +341,10 @@ func (pm *pathManager) doSetPathReady(pa *path) {
 
 	if pm.hlsServer != nil {
 		pm.hlsServer.PathReady(pa)
+	}
+
+	if pm.streamRegistry != nil {
+		pm.streamRegistry.Register(pa.name)
 	}
 }
 
@@ -316,6 +357,10 @@ func (pm *pathManager) doSetPathNotReady(pa *path) {
 
 	if pm.hlsServer != nil {
 		pm.hlsServer.PathNotReady(pa)
+	}
+
+	if pm.streamRegistry != nil {
+		pm.streamRegistry.Deregister(pa.name)
 	}
 }
 
@@ -588,6 +633,21 @@ func (pm *pathManager) SetHLSServer(s *hls.Server) []defs.Path {
 		res := <-req.res
 		return res.readyPaths
 
+	case <-pm.ctx.Done():
+		return nil
+	}
+}
+
+// SetStreamRegistry is called by core.
+func (pm *pathManager) SetStreamRegistry(sr pathManagerStreamRegistry) []string {
+	req := pathSetStreamRegistryReq{
+		sr:  sr,
+		res: make(chan pathSetStreamRegistryRes),
+	}
+
+	select {
+	case pm.chSetStreamRegistry <- req:
+		return (<-req.res).readyPaths
 	case <-pm.ctx.Done():
 		return nil
 	}

@@ -437,6 +437,22 @@ srt: true
 srtAddress: :8890
 
 ###############################################
+# Global settings -> Stream registry
+
+# Enable Redis-based stream registry for stream-to-server lookups.
+streamRegistry: false
+# Address of the Redis server.
+streamRegistryAddress: localhost:6379
+# Password for the Redis server. Empty string means no authentication.
+streamRegistryPassword: ""
+# Redis database number.
+streamRegistryDB: 0
+# Unique identifier for this server instance. Empty uses the hostname.
+streamRegistryServerID: ""
+# TTL for stream registry keys. Keys are refreshed at half the TTL interval.
+streamRegistryTTL: 60s
+
+###############################################
 # Default path settings
 
 # Settings in "pathDefaults" are applied anywhere,

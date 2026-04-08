@@ -391,6 +391,14 @@ type Conf struct {
 	SRT        bool   `json:"srt"`
 	SRTAddress string `json:"srtAddress"`
 
+	// Stream registry
+	StreamRegistry         bool     `json:"streamRegistry"`
+	StreamRegistryAddress  string   `json:"streamRegistryAddress"`
+	StreamRegistryPassword string   `json:"streamRegistryPassword"`
+	StreamRegistryDB       int      `json:"streamRegistryDB"`
+	StreamRegistryServerID string   `json:"streamRegistryServerID"`
+	StreamRegistryTTL      Duration `json:"streamRegistryTTL"`
+
 	// Record (deprecated)
 	Record                *bool         `json:"record,omitempty"`                // deprecated
 	RecordPath            *string       `json:"recordPath,omitempty"`            // deprecated
@@ -519,6 +527,10 @@ func (conf *Conf) setDefaults() {
 	// SRT server
 	conf.SRT = true
 	conf.SRTAddress = ":8890"
+
+	// Stream registry
+	conf.StreamRegistryAddress = "localhost:6379"
+	conf.StreamRegistryTTL = 60 * Duration(time.Second)
 
 	conf.PathDefaults.setDefaults()
 }

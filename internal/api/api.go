@@ -17,6 +17,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
+	"github.com/bluenviron/mediamtx/internal/streamregistry"
 )
 
 func interfaceIsEmpty(i any) bool {
@@ -70,6 +71,10 @@ type apiAuthManager interface {
 	RefreshJWTJWKS()
 }
 
+type apiStreamRegistry interface {
+	Lookup(streamID string) (*streamregistry.StreamInfo, error)
+}
+
 type apiParent interface {
 	logger.Writer
 	APIConfigSet(conf *conf.Conf)
@@ -98,6 +103,7 @@ type API struct {
 	HLSServer      defs.APIHLSServer
 	WebRTCServer   defs.APIWebRTCServer
 	SRTServer      defs.APISRTServer
+	StreamRegistry apiStreamRegistry
 	Parent         apiParent
 
 	httpServer *httpp.Server
@@ -177,6 +183,10 @@ func (a *API) Initialize() error {
 		group.GET("/srtconns/list", a.onSRTConnsList)
 		group.GET("/srtconns/get/:id", a.onSRTConnsGet)
 		group.POST("/srtconns/kick/:id", a.onSRTConnsKick)
+	}
+
+	if !interfaceIsEmpty(a.StreamRegistry) {
+		group.GET("/stream-registry/lookup/*name", a.onStreamRegistryLookup)
 	}
 
 	group.GET("/recordings/list", a.onRecordingsList)

@@ -299,8 +299,8 @@ func (r *Reader) Read() (*Message, error) {
 		chunkStreamID := byt & 0x3F
 
 		// Handle extended chunk stream IDs (2-byte and 3-byte forms).
-		// For these, consume the extra bytes and construct a synthetic
-		// basic header byte for chunk.Read() to re-read.
+		// Construct a synthetic basic header byte for chunk.Read() to parse,
+		// since it expects to re-read the basic header from the stream.
 		if chunkStreamID == 0 {
 			// 2-byte form: real ID = next byte + 64
 			byt2, err := r.br.ReadByte()
@@ -308,15 +308,8 @@ func (r *Reader) Read() (*Message, error) {
 				return nil, err
 			}
 			chunkStreamID = byt2 + 64
-
-			// Construct synthetic basic header with type bits and a
-			// placeholder chunk stream ID (2) for chunk.Read() to parse.
-			// chunk.Read() only uses the bottom 6 bits for ChunkStreamID
-			// which we override anyway via msg.ChunkStreamID.
+			// Prepend synthetic basic header for chunk.Read()
 			synthByte := (typ << 6) | 2
-			r.br.UnreadByte() //nolint:errcheck
-			// We consumed 2 bytes but can only unread 1.
-			// Re-buffer the synthetic byte instead.
 			r.br = bufio.NewReader(io.MultiReader(
 				bytes.NewReader([]byte{synthByte}),
 				r.br,
@@ -329,7 +322,6 @@ func (r *Reader) Read() (*Message, error) {
 				return nil, err
 			}
 			chunkStreamID = buf[0] + 64
-
 			synthByte := (typ << 6) | 2
 			r.br = bufio.NewReader(io.MultiReader(
 				bytes.NewReader([]byte{synthByte}),

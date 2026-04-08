@@ -35,6 +35,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/servers/srt"
 	"github.com/bluenviron/mediamtx/internal/servers/webrtc"
+	"github.com/bluenviron/mediamtx/internal/streamregistry"
 )
 
 //go:generate go run ./versiongetter
@@ -123,6 +124,7 @@ type Core struct {
 	hlsServer       *hls.Server
 	webRTCServer    *webrtc.Server
 	srtServer       *srt.Server
+	streamRegistry  *streamregistry.Registry
 	api             *api.API
 	confWatcher     *confwatcher.ConfWatcher
 
@@ -675,6 +677,29 @@ func (p *Core) createResources(initial bool) error {
 		p.srtServer = i
 	}
 
+	if p.conf.StreamRegistry && p.streamRegistry == nil {
+		serverID := p.conf.StreamRegistryServerID
+		if serverID == "" {
+			serverID, _ = os.Hostname()
+		}
+		sr := &streamregistry.Registry{
+			RedisAddress:  p.conf.StreamRegistryAddress,
+			RedisPassword: p.conf.StreamRegistryPassword,
+			RedisDB:       p.conf.StreamRegistryDB,
+			ServerID:      serverID,
+			APIAddress:    p.conf.APIAddress,
+			TTL:           time.Duration(p.conf.StreamRegistryTTL),
+			Parent:        p,
+		}
+		err = sr.Initialize()
+		if err != nil {
+			return err
+		}
+		readyPaths := p.pathManager.SetStreamRegistry(sr)
+		sr.RegisterAll(readyPaths)
+		p.streamRegistry = sr
+	}
+
 	if p.conf.API &&
 		p.api == nil {
 		i := &api.API{
@@ -699,6 +724,7 @@ func (p *Core) createResources(initial bool) error {
 			HLSServer:      p.hlsServer,
 			WebRTCServer:   p.webRTCServer,
 			SRTServer:      p.srtServer,
+			StreamRegistry: p.streamRegistry,
 			Parent:         p,
 		}
 		err = i.Initialize()
@@ -951,6 +977,16 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closePathManager ||
 		closeLogger
 
+	closeStreamRegistry := newConf == nil ||
+		newConf.StreamRegistry != p.conf.StreamRegistry ||
+		newConf.StreamRegistryAddress != p.conf.StreamRegistryAddress ||
+		newConf.StreamRegistryPassword != p.conf.StreamRegistryPassword ||
+		newConf.StreamRegistryDB != p.conf.StreamRegistryDB ||
+		newConf.StreamRegistryServerID != p.conf.StreamRegistryServerID ||
+		newConf.StreamRegistryTTL != p.conf.StreamRegistryTTL ||
+		closePathManager ||
+		closeLogger
+
 	closeAPI := newConf == nil ||
 		newConf.API != p.conf.API ||
 		newConf.APIAddress != p.conf.APIAddress ||
@@ -970,6 +1006,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeHLSServer ||
 		closeWebRTCServer ||
 		closeSRTServer ||
+		closeStreamRegistry ||
 		closeLogger
 
 	if newConf == nil && p.confWatcher != nil {
@@ -984,6 +1021,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		} else if !calledByAPI { // avoid a loop
 			p.api.ReloadConf(newConf)
 		}
+	}
+
+	if closeStreamRegistry && p.streamRegistry != nil {
+		p.pathManager.SetStreamRegistry(nil)
+		p.streamRegistry.Close()
+		p.streamRegistry = nil
 	}
 
 	if closeSRTServer && p.srtServer != nil {

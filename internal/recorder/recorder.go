@@ -10,7 +10,13 @@ import (
 )
 
 const (
-	ntpDriftTolerance = 5 * time.Second
+	ntpDriftTolerance = 30 * time.Second
+
+	// maxResetsPerWindow limits how many times a recorder can restart within
+	// resetWindow before giving up. Prevents OOM from cascading drift resets
+	// across dozens of cameras (e.g. after an NTP correction on the host).
+	maxResetsPerWindow = 5
+	resetWindow        = 5 * time.Minute
 )
 
 // OnSegmentCreateFunc is the prototype of the function passed as OnSegmentCreate
@@ -89,6 +95,8 @@ func (r *Recorder) Close() {
 func (r *Recorder) run() {
 	defer close(r.done)
 
+	var resetTimes []time.Time
+
 	for {
 		select {
 		case <-r.currentInstance.done:
@@ -103,6 +111,27 @@ func (r *Recorder) run() {
 		case <-r.terminate:
 			return
 		}
+
+		// Prune reset timestamps outside the window, then check rate limit.
+		now := time.Now()
+		cutoff := now.Add(-resetWindow)
+		n := 0
+		for _, t := range resetTimes {
+			if t.After(cutoff) {
+				resetTimes[n] = t
+				n++
+			}
+		}
+		resetTimes = resetTimes[:n]
+
+		if len(resetTimes) >= maxResetsPerWindow {
+			r.Log(logger.Error,
+				"recorder restarted %d times in %s, giving up to prevent OOM; check camera clock or NTP sync",
+				maxResetsPerWindow, resetWindow)
+			<-r.terminate
+			return
+		}
+		resetTimes = append(resetTimes, now)
 
 		r.currentInstance = &recorderInstance{
 			pathFormat:        r.PathFormat,

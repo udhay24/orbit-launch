@@ -14,6 +14,7 @@ import (
 // It is in charge of:
 // - counting sent packets
 // - generating RTCP sender reports.
+// - parsing incoming RTCP receiver reports.
 type Sender struct {
 	ClockRate       int
 	Period          time.Duration
@@ -29,8 +30,8 @@ type Sender struct {
 	lastSystem         time.Time
 	localSSRC          uint32
 	lastSequenceNumber uint16
-	packetCount        uint32
-	packetCount2       uint64
+	sent               uint64
+	reportedLost       uint64
 	octetCount         uint32
 
 	terminate chan struct{}
@@ -91,7 +92,7 @@ func (rs *Sender) report() rtcp.Packet {
 		SSRC:        rs.localSSRC,
 		NTPTime:     ntp.Encode(ntpTime),
 		RTPTime:     rtpTime,
-		PacketCount: rs.packetCount,
+		PacketCount: uint32(rs.sent),
 		OctetCount:  rs.octetCount,
 	}
 }
@@ -111,17 +112,33 @@ func (rs *Sender) ProcessPacket(pkt *rtp.Packet, ntp time.Time, ptsEqualsDTS boo
 
 	rs.lastSequenceNumber = pkt.SequenceNumber
 
-	rs.packetCount++
-	rs.packetCount2++
+	rs.sent++
 	rs.octetCount += uint32(len(pkt.Payload))
+}
+
+// ProcessReceptionReport extracts data from RTCP receiver reports.
+func (rs *Sender) ProcessReceptionReport(report *rtcp.ReceptionReport) {
+	rs.mutex.Lock()
+	defer rs.mutex.Unlock()
+
+	rs.reportedLost = uint64(report.TotalLost)
 }
 
 // Stats are statistics.
 type Stats struct {
+	// outbound RTP packets.
+	Sent uint64
+	// last sequence number of outbound RTP packets.
 	LastSequenceNumber uint16
-	LastRTP            uint32
-	LastNTP            time.Time
-	TotalSent          uint64
+	// last RTP time of outbound RTP packets.
+	LastRTP uint32
+	// last NTP time of outbound RTP packets.
+	LastNTP time.Time
+	// outbound RTP packets reported as lost by the remote receiver.
+	ReportedLost uint64
+
+	// Deprecated: use Sent.
+	TotalSent uint64
 }
 
 // Stats returns statistics.
@@ -134,9 +151,12 @@ func (rs *Sender) Stats() *Stats {
 	}
 
 	return &Stats{
+		Sent:               rs.sent,
 		LastSequenceNumber: rs.lastSequenceNumber,
 		LastRTP:            rs.lastRTP,
 		LastNTP:            rs.lastNTP,
-		TotalSent:          rs.packetCount2,
+		ReportedLost:       rs.reportedLost,
+		// deprecated
+		TotalSent: rs.sent,
 	}
 }

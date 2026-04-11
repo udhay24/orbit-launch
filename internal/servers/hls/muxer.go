@@ -13,18 +13,14 @@ import (
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
+	"github.com/bluenviron/mediamtx/internal/stream"
+	"github.com/gin-gonic/gin"
 )
 
 const (
 	closeCheckPeriod = 1 * time.Second
 	recreatePause    = 10 * time.Second
 )
-
-func ptrOf[T any](v T) *T {
-	p := new(T)
-	*p = v
-	return p
-}
 
 func emptyTimer() *time.Timer {
 	t := time.NewTimer(0)
@@ -34,17 +30,22 @@ func emptyTimer() *time.Timer {
 
 type responseWriterWithCounter struct {
 	http.ResponseWriter
-	bytesSent *uint64
+	bytesSent *atomic.Uint64
 }
 
 func (w *responseWriterWithCounter) Write(p []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(p)
-	atomic.AddUint64(w.bytesSent, uint64(n))
+	w.bytesSent.Add(uint64(n))
 	return n, err
 }
 
+type muxerGetInstanceRes struct {
+	instance                         *muxerInstance
+	cumulatedOutboundFramesDiscarded uint64
+}
+
 type muxerGetInstanceReq struct {
-	res chan *muxerInstance
+	res chan muxerGetInstanceRes
 }
 
 type muxer struct {
@@ -67,8 +68,8 @@ type muxer struct {
 	ctxCancel       func()
 	created         time.Time
 	path            defs.Path
-	lastRequestTime *int64
-	bytesSent       *uint64
+	lastRequestTime atomic.Int64
+	bytesSent       atomic.Uint64
 
 	// in
 	chGetInstance chan muxerGetInstanceReq
@@ -80,8 +81,8 @@ func (m *muxer) initialize() {
 	m.ctx = ctx
 	m.ctxCancel = ctxCancel
 	m.created = time.Now()
-	m.lastRequestTime = ptrOf(time.Now().UnixNano())
-	m.bytesSent = new(uint64)
+	m.lastRequestTime.Store(time.Now().UnixNano())
+	m.bytesSent.Store(0)
 	m.chGetInstance = make(chan muxerGetInstanceReq)
 
 	m.Log(logger.Info, "created %s", func() string {
@@ -122,7 +123,7 @@ func (m *muxer) run() {
 }
 
 func (m *muxer) runInner() error {
-	path, stream, err := m.pathManager.AddReader(defs.PathAddReaderReq{
+	res, err := m.pathManager.AddReader(defs.PathAddReaderReq{
 		Author: m,
 		AccessRequest: defs.PathAccessRequest{
 			Name:     m.pathName,
@@ -134,26 +135,11 @@ func (m *muxer) runInner() error {
 		return err
 	}
 
-	m.path = path
+	m.path = res.Path
 
 	defer m.path.RemoveReader(defs.PathRemoveReaderReq{Author: m})
 
-	var instanceError chan error
-	var recreateTimer *time.Timer
-
-	mi := &muxerInstance{
-		variant:         m.variant,
-		segmentCount:    m.segmentCount,
-		segmentDuration: m.segmentDuration,
-		partDuration:    m.partDuration,
-		segmentMaxSize:  m.segmentMaxSize,
-		directory:       m.directory,
-		pathName:        m.pathName,
-		stream:          stream,
-		bytesSent:       m.bytesSent,
-		parent:          m,
-	}
-	err = mi.initialize()
+	mi, err := m.createInstance(res.Stream)
 	if err != nil {
 		if m.remoteAddr != "" || errors.Is(err, hls.ErrNoSupportedCodecs) {
 			return err
@@ -161,11 +147,6 @@ func (m *muxer) runInner() error {
 
 		m.Log(logger.Error, err.Error())
 		mi = nil
-		instanceError = make(chan error)
-		recreateTimer = time.NewTimer(recreatePause)
-	} else {
-		instanceError = mi.errorChan()
-		recreateTimer = emptyTimer()
 	}
 
 	defer func() {
@@ -174,6 +155,17 @@ func (m *muxer) runInner() error {
 		}
 	}()
 
+	var instanceError chan error
+	var recreateTimer *time.Timer
+
+	if mi != nil {
+		instanceError = mi.errorChan()
+		recreateTimer = emptyTimer()
+	} else {
+		instanceError = make(chan error)
+		recreateTimer = time.NewTimer(recreatePause)
+	}
+
 	var activityCheckTimer *time.Timer
 	if m.remoteAddr != "" {
 		activityCheckTimer = time.NewTimer(closeCheckPeriod)
@@ -181,10 +173,15 @@ func (m *muxer) runInner() error {
 		activityCheckTimer = emptyTimer()
 	}
 
+	cumulatedOutboundFramesDiscarded := uint64(0)
+
 	for {
 		select {
 		case req := <-m.chGetInstance:
-			req.res <- mi
+			req.res <- muxerGetInstanceRes{
+				instance:                         mi,
+				cumulatedOutboundFramesDiscarded: cumulatedOutboundFramesDiscarded,
+			}
 
 		case err = <-instanceError:
 			if m.remoteAddr != "" {
@@ -193,24 +190,13 @@ func (m *muxer) runInner() error {
 
 			m.Log(logger.Error, err.Error())
 			mi.close()
+			cumulatedOutboundFramesDiscarded += mi.reader.OutboundFramesDiscarded()
 			mi = nil
 			instanceError = make(chan error)
 			recreateTimer = time.NewTimer(recreatePause)
 
 		case <-recreateTimer.C:
-			mi = &muxerInstance{
-				variant:         m.variant,
-				segmentCount:    m.segmentCount,
-				segmentDuration: m.segmentDuration,
-				partDuration:    m.partDuration,
-				segmentMaxSize:  m.segmentMaxSize,
-				directory:       m.directory,
-				pathName:        m.pathName,
-				stream:          stream,
-				bytesSent:       m.bytesSent,
-				parent:          m,
-			}
-			err = mi.initialize()
+			mi, err = m.createInstance(res.Stream)
 			if err != nil {
 				m.Log(logger.Error, err.Error())
 				mi = nil
@@ -220,7 +206,7 @@ func (m *muxer) runInner() error {
 			}
 
 		case <-activityCheckTimer.C:
-			t := time.Unix(0, atomic.LoadInt64(m.lastRequestTime))
+			t := time.Unix(0, m.lastRequestTime.Load())
 			if time.Since(t) >= time.Duration(m.closeAfter) {
 				return fmt.Errorf("not used anymore")
 			}
@@ -232,33 +218,73 @@ func (m *muxer) runInner() error {
 	}
 }
 
-func (m *muxer) getInstance() *muxerInstance {
-	atomic.StoreInt64(m.lastRequestTime, time.Now().UnixNano())
+func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
+	mi := &muxerInstance{
+		variant:         m.variant,
+		segmentCount:    m.segmentCount,
+		segmentDuration: m.segmentDuration,
+		partDuration:    m.partDuration,
+		segmentMaxSize:  m.segmentMaxSize,
+		directory:       m.directory,
+		pathName:        m.pathName,
+		stream:          strm,
+		parent:          m,
+	}
+	err := mi.initialize()
+	return mi, err
+}
 
-	req := muxerGetInstanceReq{res: make(chan *muxerInstance)}
+func (m *muxer) getInstance() muxerGetInstanceRes {
+	req := muxerGetInstanceReq{res: make(chan muxerGetInstanceRes)}
 
 	select {
 	case m.chGetInstance <- req:
 		return <-req.res
 
 	case <-m.ctx.Done():
-		return nil
+		return muxerGetInstanceRes{}
 	}
 }
 
 // APIReaderDescribe implements reader.
 func (m *muxer) APIReaderDescribe() *defs.APIPathReader {
 	return &defs.APIPathReader{
-		Type: "hlsMuxer",
+		Type: defs.APIPathReaderTypeHLSMuxer,
 		ID:   "",
 	}
 }
 
+func (m *muxer) handleRequest(ctx *gin.Context) {
+	m.lastRequestTime.Store(time.Now().UnixNano())
+
+	res := m.getInstance()
+	if res.instance == nil {
+		ctx.Writer.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	w := &responseWriterWithCounter{
+		ResponseWriter: ctx.Writer,
+		bytesSent:      &m.bytesSent,
+	}
+
+	res.instance.handleRequest(w, ctx.Request)
+}
+
 func (m *muxer) apiItem() *defs.APIHLSMuxer {
+	res := m.getInstance()
+
+	outboundFramesDiscarded := res.cumulatedOutboundFramesDiscarded
+	if res.instance != nil {
+		outboundFramesDiscarded += res.instance.reader.OutboundFramesDiscarded()
+	}
+
 	return &defs.APIHLSMuxer{
-		Path:        m.pathName,
-		Created:     m.created,
-		LastRequest: time.Unix(0, atomic.LoadInt64(m.lastRequestTime)),
-		BytesSent:   atomic.LoadUint64(m.bytesSent),
+		Path:                    m.pathName,
+		Created:                 m.created,
+		LastRequest:             time.Unix(0, m.lastRequestTime.Load()),
+		OutboundBytes:           m.bytesSent.Load(),
+		OutboundFramesDiscarded: outboundFramesDiscarded,
+		BytesSent:               m.bytesSent.Load(),
 	}
 }

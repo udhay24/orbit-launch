@@ -69,7 +69,7 @@ func TestServerPublish(t *testing.T) {
 			n := 0
 
 			pathManager := &test.PathManager{
-				AddPublisherImpl: func(req defs.PathAddPublisherReq) (defs.Path, *stream.SubStream, error) {
+				AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
 					require.Equal(t, "teststream", req.AccessRequest.Name)
 					require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
 					require.Equal(t, "myuser", req.AccessRequest.Credentials.User)
@@ -118,7 +118,11 @@ func TestServerPublish(t *testing.T) {
 
 					strm.AddReader(reader)
 
-					return &dummyPath{}, subStream, nil
+					return &defs.PathAddPublisherRes{
+						Path:      &dummyPath{},
+						User:      req.AccessRequest.Credentials.User,
+						SubStream: subStream,
+					}, nil
 				},
 			}
 
@@ -126,7 +130,7 @@ func TestServerPublish(t *testing.T) {
 				Address:             "127.0.0.1:1939",
 				ReadTimeout:         conf.Duration(10 * time.Second),
 				WriteTimeout:        conf.Duration(10 * time.Second),
-				IsTLS:               encrypt == "tls",
+				Encryption:          encrypt == "tls",
 				ServerCert:          serverCertFpath,
 				ServerKey:           serverKeyFpath,
 				RTSPAddress:         "",
@@ -186,6 +190,27 @@ func TestServerPublish(t *testing.T) {
 			require.NoError(t, err)
 
 			<-dataReceived
+
+			list, err := s.APIConnsList()
+			require.NoError(t, err)
+			require.Equal(t, &defs.APIRTMPConnList{
+				Items: []defs.APIRTMPConn{
+					{
+						ID:                      list.Items[0].ID,
+						Created:                 list.Items[0].Created,
+						RemoteAddr:              list.Items[0].RemoteAddr,
+						State:                   "publish",
+						Path:                    "teststream",
+						Query:                   "user=myuser&pass=mypass&param=value",
+						User:                    "myuser",
+						InboundBytes:            list.Items[0].InboundBytes,
+						OutboundBytes:           list.Items[0].OutboundBytes,
+						OutboundFramesDiscarded: list.Items[0].OutboundFramesDiscarded,
+						BytesReceived:           list.Items[0].BytesReceived,
+						BytesSent:               list.Items[0].BytesSent,
+					},
+				},
+			}, list)
 		})
 	}
 }
@@ -228,12 +253,12 @@ func TestServerRead(t *testing.T) {
 			require.NoError(t, err)
 
 			pathManager := &test.PathManager{
-				AddReaderImpl: func(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error) {
+				AddReaderImpl: func(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
 					require.Equal(t, "teststream", req.AccessRequest.Name)
 					require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
 					require.Equal(t, "myuser", req.AccessRequest.Credentials.User)
 					require.Equal(t, "mypass", req.AccessRequest.Credentials.Pass)
-					return &dummyPath{}, strm, nil
+					return &defs.PathAddReaderRes{Path: &dummyPath{}, User: req.AccessRequest.Credentials.User, Stream: strm}, nil
 				},
 			}
 
@@ -241,7 +266,7 @@ func TestServerRead(t *testing.T) {
 				Address:             "127.0.0.1:1939",
 				ReadTimeout:         conf.Duration(10 * time.Second),
 				WriteTimeout:        conf.Duration(10 * time.Second),
-				IsTLS:               encrypt == "tls",
+				Encryption:          encrypt == "tls",
 				ServerCert:          serverCertFpath,
 				ServerKey:           serverKeyFpath,
 				RTSPAddress:         "",
@@ -326,6 +351,27 @@ func TestServerRead(t *testing.T) {
 
 			err = r.Read()
 			require.NoError(t, err)
+
+			list, err := s.APIConnsList()
+			require.NoError(t, err)
+			require.Equal(t, &defs.APIRTMPConnList{
+				Items: []defs.APIRTMPConn{
+					{
+						ID:                      list.Items[0].ID,
+						Created:                 list.Items[0].Created,
+						RemoteAddr:              list.Items[0].RemoteAddr,
+						State:                   "read",
+						Path:                    "teststream",
+						Query:                   "user=myuser&pass=mypass&param=value",
+						User:                    "myuser",
+						InboundBytes:            list.Items[0].InboundBytes,
+						OutboundBytes:           list.Items[0].OutboundBytes,
+						OutboundFramesDiscarded: list.Items[0].OutboundFramesDiscarded,
+						BytesReceived:           list.Items[0].BytesReceived,
+						BytesSent:               list.Items[0].BytesSent,
+					},
+				},
+			}, list)
 		})
 	}
 }

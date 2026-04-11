@@ -56,20 +56,47 @@ func (c *clientTunnelHTTP) SetWriteDeadline(t time.Time) error {
 
 func newClientTunnelHTTP(
 	ctx context.Context,
-	dialContext func(ctx context.Context, network, address string) (net.Conn, error),
 	addr string,
+	secure bool,
 	tlsConfig *tls.Config,
+	dialContext func(ctx context.Context, network, address string) (net.Conn, error),
+	dialTLSContext func(ctx context.Context, network string, addr string) (net.Conn, error),
 ) (net.Conn, error) {
 	c := &clientTunnelHTTP{}
 
-	var err error
-	c.readChan, err = dialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
+	if secure {
+		// clone TLS config and fill ServerName if empty.
+		// this is the same behavior of http.Client.
+		// https://cs.opensource.google/go/go/+/master:src/net/http/transport.go;l=1754;drc=a4b534f5e42fe58d58c0ff0562d76680cedb0466
+
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		} else {
+			tlsConfig = tlsConfig.Clone()
+		}
+
+		if tlsConfig.ServerName == "" {
+			host, _, _ := net.SplitHostPort(addr)
+			tlsConfig.ServerName = host
+		}
 	}
 
-	if tlsConfig != nil {
-		c.readChan = tls.Client(c.readChan, tlsConfig)
+	if secure && dialTLSContext != nil {
+		var err error
+		c.readChan, err = dialTLSContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		c.readChan, err = dialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+
+		if secure {
+			c.readChan = tls.Client(c.readChan, tlsConfig)
+		}
 	}
 
 	ok := false
@@ -99,7 +126,7 @@ func newClientTunnelHTTP(
 
 	// do not use http.Request
 	// since Content-Length requires a Body of same size
-	_, err = c.readChan.Write([]byte(
+	_, err := c.readChan.Write([]byte(
 		"GET / HTTP/1.1\r\n" +
 			"Host: " + addr + "\r\n" +
 			"X-Sessioncookie: " + tunnelID + "\r\n" +
@@ -122,13 +149,20 @@ func newClientTunnelHTTP(
 		return nil, fmt.Errorf("bad status code: %v", res.StatusCode)
 	}
 
-	c.writeChan, err = dialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
-	}
+	if secure && dialTLSContext != nil {
+		c.writeChan, err = dialTLSContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		c.writeChan, err = dialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
 
-	if tlsConfig != nil {
-		c.writeChan = tls.Client(c.writeChan, tlsConfig)
+		if secure {
+			c.writeChan = tls.Client(c.writeChan, tlsConfig)
+		}
 	}
 
 	defer func() {

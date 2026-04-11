@@ -17,7 +17,7 @@ import (
 )
 
 type pprofAuthManager interface {
-	Authenticate(req *auth.Request) *auth.Error
+	Authenticate(req *auth.Request) (string, *auth.Error)
 }
 
 type pprofParent interface {
@@ -69,7 +69,13 @@ func (pp *PPROF) Initialize() error {
 		return err
 	}
 
-	pp.Log(logger.Info, "listener opened on "+pp.Address)
+	str := "listener opened on " + pp.Address
+	if !pp.Encryption {
+		str += " (TCP/HTTP)"
+	} else {
+		str += " (TCP/HTTPS)"
+	}
+	pp.Log(logger.Info, str)
 
 	return nil
 }
@@ -103,12 +109,12 @@ func (pp *PPROF) middlewareAuth(ctx *gin.Context) {
 		IP:          net.ParseIP(ctx.ClientIP()),
 	}
 
-	err := pp.AuthManager.Authenticate(req)
+	_, err := pp.AuthManager.Authenticate(req)
 	if err != nil {
 		if err.AskCredentials {
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, &defs.APIError{
-				Status: "error",
+				Status: defs.APIErrorStatusError,
 				Error:  "authentication error",
 			})
 			return
@@ -120,7 +126,7 @@ func (pp *PPROF) middlewareAuth(ctx *gin.Context) {
 		<-time.After(auth.PauseAfterError)
 
 		ctx.AbortWithStatusJSON(http.StatusUnauthorized, &defs.APIError{
-			Status: "error",
+			Status: defs.APIErrorStatusError,
 			Error:  "authentication error",
 		})
 		return

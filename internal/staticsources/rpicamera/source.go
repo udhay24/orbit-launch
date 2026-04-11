@@ -95,7 +95,7 @@ func (r *secondaryReader) Close() {
 // APIReaderDescribe implements reader.
 func (*secondaryReader) APIReaderDescribe() *defs.APIPathReader {
 	return &defs.APIPathReader{
-		Type: "rpiCameraSecondary",
+		Type: defs.APIPathReaderTypeRPICameraSecondary,
 		ID:   "",
 	}
 }
@@ -104,7 +104,7 @@ type parent interface {
 	logger.Writer
 	SetReady(req defs.PathSourceStaticSetReadyReq) defs.PathSourceStaticSetReadyRes
 	SetNotReady(req defs.PathSourceStaticSetNotReadyReq)
-	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 }
 
 // Source is a Raspberry Pi Camera static source.
@@ -333,7 +333,7 @@ func (s *Source) waitForPrimary(
 	params defs.StaticSourceRunParams,
 ) (defs.Path, *stream.Stream, error) {
 	for {
-		path, primaryStream, err := s.Parent.AddReader(defs.PathAddReaderReq{
+		res, err := s.Parent.AddReader(defs.PathAddReaderReq{
 			Author: r,
 			AccessRequest: defs.PathAccessRequest{
 				Name:     params.Conf.RPICameraPrimaryName,
@@ -354,14 +354,14 @@ func (s *Source) waitForPrimary(
 			return nil, nil, err
 		}
 
-		return path, primaryStream, nil
+		return res.Path, res.Stream, nil
 	}
 }
 
 // APISourceDescribe implements StaticSource.
 func (*Source) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: "rpiCameraSource",
+		Type: defs.APIPathSourceTypeRPICameraSource,
 		ID:   "",
 	}
 }

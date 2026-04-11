@@ -18,6 +18,15 @@ const (
 	mimeTypeL16       = "audio/L16"
 )
 
+func incomingTrackTWCCExtensionID(params webrtc.RTPParameters) uint8 {
+	for _, ext := range params.HeaderExtensions {
+		if ext.URI == twccExtensionURI {
+			return uint8(ext.ID)
+		}
+	}
+	return 0
+}
+
 var incomingVideoCodecs = []webrtc.RTPCodecParameters{
 	{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -240,15 +249,34 @@ type IncomingTrack struct {
 
 	track     *webrtc.TrackRemote
 	receiver  *webrtc.RTPReceiver
+	rid       string
 	writeRTCP func([]rtcp.Packet) error
 	log       logger.Writer
 
-	packetsLost *counterdumper.Dumper
-	rtpReceiver *rtpreceiver.Receiver
+	twccExtID             uint8
+	inboundRTPPacketsLost *counterdumper.Dumper
+	rtpReceiver           *rtpreceiver.Receiver
 }
 
 func (t *IncomingTrack) initialize() {
 	t.OnPacketRTP = func(*rtp.Packet) {}
+	t.twccExtID = incomingTrackTWCCExtensionID(t.receiver.GetParameters())
+}
+
+func (t *IncomingTrack) stripTWCCExtension(pkt *rtp.Packet) {
+	if t.twccExtID == 0 || pkt.GetExtension(t.twccExtID) == nil {
+		return
+	}
+
+	err := pkt.DelExtension(t.twccExtID)
+	if err != nil {
+		panic(err)
+	}
+
+	if len(pkt.GetExtensionIDs()) == 0 {
+		pkt.Extension = false
+		pkt.ExtensionProfile = 0
+	}
 }
 
 // Codec returns the track codec.
@@ -267,7 +295,7 @@ func (*IncomingTrack) PTSEqualsDTS(*rtp.Packet) bool {
 }
 
 func (t *IncomingTrack) start() {
-	t.packetsLost = &counterdumper.Dumper{
+	t.inboundRTPPacketsLost = &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			t.log.Log(logger.Warn, "%d RTP %s lost",
 				val,
@@ -279,7 +307,7 @@ func (t *IncomingTrack) start() {
 				}())
 		},
 	}
-	t.packetsLost.Start()
+	t.inboundRTPPacketsLost.Start()
 
 	t.rtpReceiver = &rtpreceiver.Receiver{
 		ClockRate:            int(t.track.Codec().ClockRate),
@@ -299,7 +327,7 @@ func (t *IncomingTrack) start() {
 	go func() {
 		buf := make([]byte, 1500)
 		for {
-			n, _, err2 := t.receiver.Read(buf)
+			n, _, err2 := t.receiver.ReadSimulcast(buf, t.rid)
 			if err2 != nil {
 				return
 			}
@@ -347,7 +375,7 @@ func (t *IncomingTrack) start() {
 			packets, lost := t.rtpReceiver.ProcessPacket2(pkt, time.Now(), true)
 
 			if lost != 0 {
-				t.packetsLost.Add(lost)
+				t.inboundRTPPacketsLost.Add(lost)
 				// do not return
 			}
 
@@ -357,6 +385,7 @@ func (t *IncomingTrack) start() {
 					continue
 				}
 
+				t.stripTWCCExtension(pkt)
 				t.OnPacketRTP(pkt)
 			}
 		}
@@ -369,8 +398,8 @@ func (t *IncomingTrack) PacketNTP(pkt *rtp.Packet) (time.Time, bool) {
 }
 
 func (t *IncomingTrack) close() {
-	if t.packetsLost != nil {
-		t.packetsLost.Stop()
+	if t.inboundRTPPacketsLost != nil {
+		t.inboundRTPPacketsLost.Stop()
 	}
 	if t.rtpReceiver != nil {
 		t.rtpReceiver.Close()

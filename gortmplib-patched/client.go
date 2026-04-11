@@ -177,6 +177,9 @@ type Client struct {
 	// function used to initialize the TCP client.
 	// It defaults to (&net.Dialer{}).DialContext.
 	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
+	// function used to initialize the TLS client.
+	// It defaults to nil.
+	DialTLSContext func(ctx context.Context, network, address string) (net.Conn, error)
 
 	nconn         net.Conn
 	bc            *bytecounter.ReadWriter
@@ -217,13 +220,20 @@ func (c *Client) Initialize(ctx context.Context) error {
 
 func (c *Client) initialize2(ctx context.Context) error {
 	var err error
-	c.nconn, err = c.DialContext(ctx, "tcp", c.URL.Host)
-	if err != nil {
-		return err
-	}
+	if c.DialTLSContext != nil {
+		c.nconn, err = c.DialTLSContext(ctx, "tcp", c.URL.Host)
+		if err != nil {
+			return err
+		}
+	} else {
+		c.nconn, err = c.DialContext(ctx, "tcp", c.URL.Host)
+		if err != nil {
+			return err
+		}
 
-	if c.URL.Scheme == "rtmps" {
-		c.nconn = tls.Client(c.nconn, c.TLSConfig)
+		if c.URL.Scheme == "rtmps" {
+			c.nconn = tls.Client(c.nconn, c.TLSConfig)
+		}
 	}
 
 	closerDone := make(chan struct{})

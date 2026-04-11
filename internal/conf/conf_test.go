@@ -48,14 +48,12 @@ func TestConfFromFile(t *testing.T) {
 		pa, ok := conf.Paths["cam1"]
 		require.Equal(t, true, ok)
 		require.Equal(t, &Path{
-			Name:                       "cam1",
-			Source:                     "publisher",
-			SourceOnDemandStartTimeout: 10 * Duration(time.Second),
-			SourceOnDemandCloseAfter:   10 * Duration(time.Second),
-			OverridePublisher:          true,
-			AlwaysAvailableTracks: []AlwaysAvailableTrack{
-				{Codec: "H264"},
-			},
+			Name:                         "cam1",
+			Source:                       "publisher",
+			SourceOnDemandStartTimeout:   10 * Duration(time.Second),
+			SourceOnDemandCloseAfter:     10 * Duration(time.Second),
+			OverridePublisher:            true,
+			AlwaysAvailableTracks:        []AlwaysAvailableTrack{},
 			RecordPath:                   "./recordings/%path/%Y-%m-%d_%H-%M-%S-%f",
 			RecordFormat:                 RecordFormatFMP4,
 			RecordPartDuration:           Duration(1 * time.Second),
@@ -292,7 +290,12 @@ func TestConfErrors(t *testing.T) {
 			"'writeTimeout' must be greater than zero",
 		},
 		{
-			"invalid writeQueueSize",
+			"invalid writeQueueSize 1",
+			"writeQueueSize: 0\n",
+			"'writeQueueSize' must be greater than zero",
+		},
+		{
+			"invalid writeQueueSize 2",
 			"writeQueueSize: 1001\n",
 			"'writeQueueSize' must be a power of two",
 		},
@@ -317,7 +320,7 @@ func TestConfErrors(t *testing.T) {
 			"non existent parameter in auth",
 			"authInternalUsers:\n" +
 				"- users: test\n",
-			"json: unknown field \"users\"",
+			"json: unknown field \"authInternalUsers[0].users\"",
 		},
 		{
 			"invalid path name",
@@ -734,6 +737,16 @@ func TestConfErrors(t *testing.T) {
 				"playbackAddress: ''\n",
 			"'playbackAddress' must be set when playback is enabled",
 		},
+		{
+			"alwaysAvailableTracks and alwaysAvailableFile together",
+			"paths:\n" +
+				"  mypath:\n" +
+				"    alwaysAvailable: yes\n" +
+				"    alwaysAvailableTracks:\n" +
+				"    - codec: H264\n" +
+				"    alwaysAvailableFile: /path/to/file.mp4\n",
+			"'alwaysAvailableFile' and 'alwaysAvailableTracks' cannot be used together",
+		},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
 			tmpf, err := createTempFile([]byte(ca.conf))
@@ -747,7 +760,7 @@ func TestConfErrors(t *testing.T) {
 }
 
 func TestAlwaysAvailableFileErrorMagicBytes(t *testing.T) {
-	tmpf, err := createTempFile([]byte("not an mp4 file"))
+	tmpf, err := createTempFile([]byte("ABCDEFGHI"))
 	require.NoError(t, err)
 	defer os.Remove(tmpf)
 
@@ -759,7 +772,7 @@ func TestAlwaysAvailableFileErrorMagicBytes(t *testing.T) {
 	defer os.Remove(tmpConf)
 
 	_, _, err = Load(tmpConf, nil, nil)
-	require.EqualError(t, err, "invalid 'alwaysAvailableFile': file is not MP4, magic bytes are '[97 110 32 109]'")
+	require.EqualError(t, err, "invalid 'alwaysAvailableFile': file is not MP4, magic bytes are [69 70 71 72]")
 }
 
 func TestSampleConfFile(t *testing.T) {

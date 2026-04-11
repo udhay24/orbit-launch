@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"net"
 	"reflect"
 	"sort"
 	"strings"
@@ -25,7 +24,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/packetdumper"
-	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
 // ErrConnNotFound is returned when a connection is not found.
@@ -78,10 +76,10 @@ type serverMetrics interface {
 }
 
 type serverPathManager interface {
-	FindPathConf(req defs.PathFindPathConfReq) (*conf.Path, error)
+	FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error)
 	Describe(req defs.PathDescribeReq) defs.PathDescribeRes
-	AddPublisher(_ defs.PathAddPublisherReq) (defs.Path, *stream.SubStream, error)
-	AddReader(_ defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+	AddPublisher(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error)
+	AddReader(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 }
 
 type serverParent interface {
@@ -103,7 +101,7 @@ type Server struct {
 	MulticastIPRange    string
 	MulticastRTPPort    int
 	MulticastRTCPPort   int
-	IsTLS               bool
+	Encryption          bool
 	ServerCert          string
 	ServerKey           string
 	RTSPAddress         string
@@ -154,7 +152,7 @@ func (s *Server) Initialize() error {
 		s.srv.MulticastRTCPPort = s.MulticastRTCPPort
 	}
 
-	if s.IsTLS {
+	if s.Encryption {
 		s.loader = &certloader.CertLoader{
 			CertPath: s.ServerCert,
 			KeyPath:  s.ServerKey,
@@ -169,14 +167,23 @@ func (s *Server) Initialize() error {
 	}
 
 	if s.DumpPackets {
+		var proto string
+		if s.Encryption {
+			proto = "rtsps"
+		} else {
+			proto = "rtsp"
+		}
+
 		s.srv.Listen = (&packetdumper.Listen{
-			Prefix: "rtsp_server_conn",
-			Listen: net.Listen,
+			Prefix: proto + "_server_conn",
 		}).Do
 
 		s.srv.ListenPacket = (&packetdumper.ListenPacket{
-			Prefix:       "rtsp_server_packetconn",
-			ListenPacket: net.ListenPacket,
+			Prefix: proto + "_server_packet_conn",
+		}).Do
+
+		s.srv.TLSListen = (&packetdumper.TLSListen{
+			Listen: s.srv.Listen,
 		}).Do
 	}
 
@@ -191,7 +198,7 @@ func (s *Server) Initialize() error {
 	go s.run()
 
 	if !interfaceIsEmpty(s.Metrics) {
-		if s.IsTLS {
+		if s.Encryption {
 			s.Metrics.SetRTSPSServer(s)
 		} else {
 			s.Metrics.SetRTSPServer(s)
@@ -204,7 +211,7 @@ func (s *Server) Initialize() error {
 // Log implements logger.Writer.
 func (s *Server) Log(level logger.Level, format string, args ...any) {
 	label := func() string {
-		if s.IsTLS {
+		if s.Encryption {
 			return "RTSPS"
 		}
 		return "RTSP"
@@ -217,7 +224,7 @@ func (s *Server) Close() {
 	s.Log(logger.Info, "listener is closing")
 
 	if !interfaceIsEmpty(s.Metrics) {
-		if s.IsTLS {
+		if s.Encryption {
 			s.Metrics.SetRTSPSServer(nil)
 		} else {
 			s.Metrics.SetRTSPServer(nil)
@@ -258,7 +265,7 @@ outer:
 // OnConnOpen implements gortsplib.ServerHandlerOnConnOpen.
 func (s *Server) OnConnOpen(ctx *gortsplib.ServerHandlerOnConnOpenCtx) {
 	c := &conn{
-		isTLS:               s.IsTLS,
+		encryption:          s.Encryption,
 		rtspAddress:         s.RTSPAddress,
 		authMethods:         s.AuthMethods,
 		readTimeout:         s.ReadTimeout,
@@ -303,7 +310,7 @@ func (s *Server) OnResponse(sc *gortsplib.ServerConn, res *base.Response) {
 // OnSessionOpen implements gortsplib.ServerHandlerOnSessionOpen.
 func (s *Server) OnSessionOpen(ctx *gortsplib.ServerHandlerOnSessionOpenCtx) {
 	se := &session{
-		isTLS:           s.IsTLS,
+		encryption:      s.Encryption,
 		transports:      s.Transports,
 		rsession:        ctx.Session,
 		rconn:           ctx.Conn,

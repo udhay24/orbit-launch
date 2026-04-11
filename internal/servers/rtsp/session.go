@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	rtspauth "github.com/bluenviron/gortsplib/v5/pkg/auth"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/headers"
 	"github.com/google/uuid"
 
@@ -36,13 +39,26 @@ func profileLabel(p headers.TransportProfile) string {
 	return "unknown"
 }
 
+func findSingleMPEGTSFormat(desc *description.Session) (*description.Media, *format.MPEGTS) {
+	if len(desc.Medias) != 1 || len(desc.Medias[0].Formats) != 1 {
+		return nil, nil
+	}
+
+	forma := desc.Medias[0].Formats[0]
+	if forma, ok := forma.(*format.MPEGTS); ok {
+		return desc.Medias[0], forma
+	}
+
+	return nil, nil
+}
+
 type sessionParent interface {
 	logger.Writer
 	getConnByRConnUnsafe(rconn *gortsplib.ServerConn) *conn
 }
 
 type session struct {
-	isTLS           bool
+	encryption      bool
 	transports      conf.RTSPTransports
 	rsession        *gortsplib.ServerSession
 	rconn           *gortsplib.ServerConn
@@ -51,23 +67,26 @@ type session struct {
 	pathManager     serverPathManager
 	parent          sessionParent
 
-	uuid            uuid.UUID
-	created         time.Time
-	pathConf        *conf.Path // record only
-	path            defs.Path
-	stream          *stream.Stream
-	subStream       *stream.SubStream
-	onUnreadHook    func()
-	packetsLost     *counterdumper.Dumper
-	decodeErrors    *errordumper.Dumper
-	discardedFrames *counterdumper.Dumper
+	uuid                        uuid.UUID
+	created                     time.Time
+	pathConf                    *conf.Path // record only
+	path                        defs.Path
+	stream                      *stream.Stream
+	subStream                   *stream.SubStream
+	onUnreadHook                func()
+	inboundRTPPacketsLost       *counterdumper.Dumper
+	inboundRTPPacketsInError    *errordumper.Dumper
+	outboundRTPPacketsDiscarded *counterdumper.Dumper
+	mutex                       sync.RWMutex
+	user                        string
+	mpegtsDemuxer               *mpegtsDemuxer
 }
 
 func (s *session) initialize() {
 	s.uuid = uuid.New()
 	s.created = time.Now()
 
-	s.packetsLost = &counterdumper.Dumper{
+	s.inboundRTPPacketsLost = &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			s.Log(logger.Warn, "%d RTP %s lost",
 				val,
@@ -79,9 +98,9 @@ func (s *session) initialize() {
 				}())
 		},
 	}
-	s.packetsLost.Start()
+	s.inboundRTPPacketsLost.Start()
 
-	s.decodeErrors = &errordumper.Dumper{
+	s.inboundRTPPacketsInError = &errordumper.Dumper{
 		OnReport: func(val uint64, last error) {
 			if val == 1 {
 				s.Log(logger.Warn, "decode error: %v", last)
@@ -90,9 +109,9 @@ func (s *session) initialize() {
 			}
 		},
 	}
-	s.decodeErrors.Start()
+	s.inboundRTPPacketsInError.Start()
 
-	s.discardedFrames = &counterdumper.Dumper{
+	s.outboundRTPPacketsDiscarded = &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			s.Log(logger.Warn, "reader is too slow, discarding %d %s",
 				val,
@@ -104,7 +123,7 @@ func (s *session) initialize() {
 				}())
 		},
 	}
-	s.discardedFrames.Start()
+	s.outboundRTPPacketsDiscarded.Start()
 
 	s.Log(logger.Info, "created by %v", s.rconn.NetConn().RemoteAddr())
 }
@@ -132,21 +151,27 @@ func (s *session) onClose(err error) {
 		s.onUnreadHook()
 	}
 
+	if s.mpegtsDemuxer != nil {
+		s.mpegtsDemuxer.close()
+	}
+
 	switch s.rsession.State() {
 	case gortsplib.ServerSessionStatePrePlay, gortsplib.ServerSessionStatePlay:
 		s.path.RemoveReader(defs.PathRemoveReaderReq{Author: s})
 
 	case gortsplib.ServerSessionStateRecord:
-		s.path.RemovePublisher(defs.PathRemovePublisherReq{Author: s})
+		if s.path != nil {
+			s.path.RemovePublisher(defs.PathRemovePublisherReq{Author: s})
+		}
 	}
 
 	s.path = nil
 	s.stream = nil
 	s.subStream = nil
 
-	s.discardedFrames.Stop()
-	s.decodeErrors.Stop()
-	s.packetsLost.Stop()
+	s.outboundRTPPacketsDiscarded.Stop()
+	s.inboundRTPPacketsInError.Stop()
+	s.inboundRTPPacketsLost.Stop()
 
 	s.Log(logger.Info, "destroyed: %v", err)
 }
@@ -169,7 +194,7 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 		}
 	}
 
-	pathConf, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+	res, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		AccessRequest: defs.PathAccessRequest{
 			Name:             ctx.Path,
 			Query:            ctx.Query,
@@ -192,7 +217,11 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 		}, err
 	}
 
-	s.pathConf = pathConf
+	s.pathConf = res.Conf
+
+	s.mutex.Lock()
+	s.user = res.User
+	s.mutex.Unlock()
 
 	return &base.Response{
 		StatusCode: base.StatusOK,
@@ -200,7 +229,7 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 }
 
 func (s *session) rtspStream() *gortsplib.ServerStream {
-	if !s.isTLS {
+	if !s.encryption {
 		return s.stream.RTSPStream(s.rserver)
 	}
 	return s.stream.RTSPSStream(s.rserver)
@@ -239,7 +268,7 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 
 	switch s.rsession.State() {
 	case gortsplib.ServerSessionStateInitial: // play
-		path, stream, err := s.pathManager.AddReader(defs.PathAddReaderReq{
+		res, err := s.pathManager.AddReader(defs.PathAddReaderReq{
 			Author: s,
 			AccessRequest: defs.PathAccessRequest{
 				Name:             ctx.Path,
@@ -270,8 +299,12 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 			}, nil, err
 		}
 
-		s.path = path
-		s.stream = stream
+		s.path = res.Path
+		s.stream = res.Stream
+
+		s.mutex.Lock()
+		s.user = res.User
+		s.mutex.Unlock()
 
 		return &base.Response{
 			StatusCode: base.StatusOK,
@@ -317,7 +350,35 @@ func (s *session) onPlay(_ *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, e
 
 // onRecord is called by rtspServer.
 func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
-	path, subStream, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
+	if s.pathConf.RTSPDemuxMpegts {
+		mpegtsMedia, mpegtsFormat := findSingleMPEGTSFormat(s.rsession.AnnouncedDescription())
+		if mpegtsFormat != nil {
+			s.Log(logger.Info, "MPEG-TS demux mode enabled, starting demuxer...")
+
+			s.mpegtsDemuxer = &mpegtsDemuxer{
+				session:      s,
+				pathManager:  s.pathManager,
+				pathConf:     s.pathConf,
+				mpegtsMedia:  mpegtsMedia,
+				mpegtsFormat: mpegtsFormat,
+				decodeErrors: s.inboundRTPPacketsInError,
+				pathName:     s.rsession.Path()[1:],
+				query:        s.rsession.Query(),
+			}
+			err := s.mpegtsDemuxer.initialize()
+			if err != nil {
+				return &base.Response{
+					StatusCode: base.StatusInternalServerError,
+				}, err
+			}
+
+			return &base.Response{
+				StatusCode: base.StatusOK,
+			}, nil
+		}
+	}
+
+	res, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
 		Author:        s,
 		Desc:          s.rsession.AnnouncedDescription(),
 		UseRTPPackets: true,
@@ -339,12 +400,12 @@ func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Respons
 	rtsp.ToStream(
 		s.rsession,
 		s.rsession.AnnouncedDescription().Medias,
-		path.SafeConf(),
+		res.Path.SafeConf(),
 		&s.subStream,
 		s)
 
-	s.path = path
-	s.subStream = subStream
+	s.path = res.Path
+	s.subStream = res.SubStream
 
 	return &base.Response{
 		StatusCode: base.StatusOK,
@@ -353,6 +414,14 @@ func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Respons
 
 // onPause is called by rtspServer.
 func (s *session) onPause(_ *gortsplib.ServerHandlerOnPauseCtx) (*base.Response, error) {
+	// we can't close mpegtsDemuxer during pause because OnPacketRTP() is paused after onPause(),
+	// therefore a call to pipeWriter.CloseWithError() would cause a race condition.
+	if s.mpegtsDemuxer != nil {
+		return &base.Response{
+			StatusCode: base.StatusBadRequest,
+		}, fmt.Errorf("cannot pause in MPEG-TS demux mode")
+	}
+
 	switch s.rsession.State() {
 	case gortsplib.ServerSessionStatePlay:
 		s.onUnreadHook()
@@ -369,11 +438,11 @@ func (s *session) onPause(_ *gortsplib.ServerHandlerOnPauseCtx) (*base.Response,
 // APIReaderDescribe implements reader.
 func (s *session) APIReaderDescribe() *defs.APIPathReader {
 	return &defs.APIPathReader{
-		Type: func() string {
-			if s.isTLS {
-				return "rtspsSession"
+		Type: func() defs.APIPathReaderType {
+			if s.encryption {
+				return defs.APIPathReaderTypeRTSPSSession
 			}
-			return "rtspSession"
+			return defs.APIPathReaderTypeRTSPSession
 		}(),
 		ID: s.uuid.String(),
 	}
@@ -382,11 +451,11 @@ func (s *session) APIReaderDescribe() *defs.APIPathReader {
 // APISourceDescribe implements source.
 func (s *session) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: func() string {
-			if s.isTLS {
-				return "rtspsSession"
+		Type: func() defs.APIPathSourceType {
+			if s.encryption {
+				return defs.APIPathSourceTypeRTSPSSession
 			}
-			return "rtspSession"
+			return defs.APIPathSourceTypeRTSPSession
 		}(),
 		ID: s.uuid.String(),
 	}
@@ -394,22 +463,25 @@ func (s *session) APISourceDescribe() *defs.APIPathSource {
 
 // onPacketLost is called by rtspServer.
 func (s *session) onPacketsLost(ctx *gortsplib.ServerHandlerOnPacketsLostCtx) {
-	s.packetsLost.Add(ctx.Lost)
+	s.inboundRTPPacketsLost.Add(ctx.Lost)
 }
 
 // onDecodeError is called by rtspServer.
 func (s *session) onDecodeError(ctx *gortsplib.ServerHandlerOnDecodeErrorCtx) {
-	s.decodeErrors.Add(ctx.Error)
+	s.inboundRTPPacketsInError.Add(ctx.Error)
 }
 
 // onStreamWriteError is called by rtspServer.
 func (s *session) onStreamWriteError(_ *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
 	// currently the only error returned by OnStreamWriteError is ErrServerWriteQueueFull
-	s.discardedFrames.Increase()
+	s.outboundRTPPacketsDiscarded.Increase()
 }
 
 func (s *session) apiItem() *defs.APIRTSPSession {
 	stats := s.rsession.Stats()
+
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
 
 	return &defs.APIRTSPSession{
 		ID:         s.uuid,
@@ -436,6 +508,7 @@ func (s *session) apiItem() *defs.APIRTSPSession {
 			return ""
 		}(),
 		Query: s.rsession.Query(),
+		User:  s.user,
 		Transport: func() *string {
 			transport := s.rsession.Transport()
 			if transport == nil {
@@ -464,15 +537,27 @@ func (s *session) apiItem() *defs.APIRTSPSession {
 
 			return ret
 		}(),
-		BytesReceived:       stats.BytesReceived,
-		BytesSent:           stats.BytesSent,
-		RTPPacketsReceived:  stats.RTPPacketsReceived,
-		RTPPacketsSent:      stats.RTPPacketsSent,
-		RTPPacketsLost:      stats.RTPPacketsLost,
-		RTPPacketsInError:   stats.RTPPacketsInError,
-		RTPPacketsJitter:    stats.RTPPacketsJitter,
-		RTCPPacketsReceived: stats.RTCPPacketsReceived,
-		RTCPPacketsSent:     stats.RTCPPacketsSent,
-		RTCPPacketsInError:  stats.RTCPPacketsInError,
+		InboundBytes:                   stats.InboundBytes,
+		InboundRTPPackets:              stats.InboundRTPPackets,
+		InboundRTPPacketsLost:          stats.InboundRTPPacketsLost,
+		InboundRTPPacketsInError:       stats.InboundRTPPacketsInError,
+		InboundRTPPacketsJitter:        stats.InboundRTPPacketsJitter,
+		InboundRTCPPackets:             stats.InboundRTCPPackets,
+		InboundRTCPPacketsInError:      stats.InboundRTCPPacketsInError,
+		OutboundBytes:                  stats.OutboundBytes,
+		OutboundRTPPackets:             stats.OutboundRTPPackets,
+		OutboundRTPPacketsReportedLost: stats.OutboundRTPPacketsReportedLost,
+		OutboundRTPPacketsDiscarded:    s.outboundRTPPacketsDiscarded.Get(),
+		OutboundRTCPPackets:            stats.OutboundRTCPPackets,
+		BytesReceived:                  stats.InboundBytes,
+		BytesSent:                      stats.OutboundBytes,
+		RTPPacketsReceived:             stats.InboundRTPPackets,
+		RTPPacketsSent:                 stats.OutboundRTPPackets,
+		RTPPacketsLost:                 stats.InboundRTPPacketsLost,
+		RTPPacketsInError:              stats.InboundRTPPacketsInError,
+		RTPPacketsJitter:               stats.InboundRTPPacketsJitter,
+		RTCPPacketsReceived:            stats.InboundRTCPPackets,
+		RTCPPacketsSent:                stats.OutboundRTCPPackets,
+		RTCPPacketsInError:             stats.InboundRTCPPacketsInError,
 	}
 }

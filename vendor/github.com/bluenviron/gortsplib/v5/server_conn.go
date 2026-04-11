@@ -3,7 +3,6 @@ package gortsplib
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"net"
 	gourl "net/url"
@@ -13,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5/internal/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/auth"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
-	"github.com/bluenviron/gortsplib/v5/pkg/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/conn"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/headers"
@@ -144,10 +143,6 @@ type ServerConn struct {
 func (sc *ServerConn) initialize() {
 	ctx, ctxCancel := context.WithCancel(sc.s.ctx)
 
-	if sc.s.TLSConfig != nil && sc.tunnel == TunnelNone {
-		sc.nconn = tls.Server(sc.nconn, sc.s.TLSConfig)
-	}
-
 	sc.bc = bytecounter.New(sc.nconn, nil, nil)
 	sc.ctx = ctx
 	sc.ctxCancel = ctxCancel
@@ -202,6 +197,8 @@ func (sc *ServerConn) Transport() *ConnTransport {
 // Stats returns connection statistics.
 func (sc *ServerConn) Stats() *ConnStats {
 	return &ConnStats{
+		InboundBytes:  sc.bc.BytesReceived(),
+		OutboundBytes: sc.bc.BytesSent(),
 		BytesReceived: sc.bc.BytesReceived(),
 		BytesSent:     sc.bc.BytesSent(),
 	}

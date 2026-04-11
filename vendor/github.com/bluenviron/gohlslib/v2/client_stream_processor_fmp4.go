@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 
-	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
 	"github.com/bluenviron/gohlslib/v2/pkg/playlist"
 )
 
@@ -43,10 +43,6 @@ func findTimeScaleOfLeadingTrack(tracks []*fmp4.InitTrack, leadingTrackID int) u
 	return 0
 }
 
-func leadingTimeConvFMP4(client clientStreamDownloaderClient) *clientTimeConvFMP4 {
-	return client.getLeadingTimeConv().(*clientTimeConvFMP4)
-}
-
 type clientStreamProcessorFMP4 struct {
 	ctx              context.Context
 	isLeading        bool
@@ -61,13 +57,11 @@ type clientStreamProcessorFMP4 struct {
 	leadingTrackID     int
 	trackProcessors    map[int]*clientTrackProcessorFMP4
 	clientStreamTracks []*clientTrack
-
-	// in
-	chPartTrackProcessed chan struct{}
+	timeConv           *clientTimeConvFMP4
+	segmentWaitGroup   *sync.WaitGroup
 }
 
 func (p *clientStreamProcessorFMP4) initialize() {
-	p.chPartTrackProcessed = make(chan struct{}, clientMaxTracksPerStream)
 }
 
 func (p *clientStreamProcessorFMP4) run(ctx context.Context) error {
@@ -86,7 +80,7 @@ func (p *clientStreamProcessorFMP4) run(ctx context.Context) error {
 
 	for i, track := range p.init.Tracks {
 		tracks[i] = &Track{
-			Codec:     codecs.FromFMP4(track.Codec),
+			Codec:     fromFMP4(track.Codec),
 			ClockRate: int(track.TimeScale),
 			Name: func() string {
 				if !p.isLeading {
@@ -152,7 +146,12 @@ func (p *clientStreamProcessorFMP4) processSegment(ctx context.Context, seg *seg
 	}
 
 	if p.trackProcessors == nil {
-		err = p.initializeTrackProcessors(ctx, leadingPartTrack)
+		err = p.initializeTrackProcessors()
+		if err != nil {
+			return err
+		}
+
+		err = p.initializeTimeConv(ctx, leadingPartTrack)
 		if err != nil {
 			return err
 		}
@@ -161,15 +160,15 @@ func (p *clientStreamProcessorFMP4) processSegment(ctx context.Context, seg *seg
 	if p.isLeading {
 		if seg.dateTime != nil {
 			leadingPartTrackProc := p.trackProcessors[leadingPartTrack.ID]
-			dts := leadingTimeConvFMP4(p.client).
+			dts := p.timeConv.
 				convert(int64(leadingPartTrack.BaseTime), leadingPartTrackProc.track.track.ClockRate)
-			leadingTimeConvFMP4(p.client).
+			p.timeConv.
 				setNTP(*seg.dateTime, dts, leadingPartTrackProc.track.track.ClockRate)
 		}
-		leadingTimeConvFMP4(p.client).setLeadingNTPReceived()
+		p.timeConv.setLeadingNTPReceived()
 	}
 
-	partTrackCount := 0
+	p.segmentWaitGroup = &sync.WaitGroup{}
 
 	for _, part := range parts {
 		for _, partTrack := range part.Tracks {
@@ -178,8 +177,10 @@ func (p *clientStreamProcessorFMP4) processSegment(ctx context.Context, seg *seg
 				continue
 			}
 
-			dts := leadingTimeConvFMP4(p.client).convert(int64(partTrack.BaseTime), trackProc.track.track.ClockRate)
-			ntp := leadingTimeConvFMP4(p.client).getNTP(ctx, dts, trackProc.track.track.ClockRate)
+			dts := p.timeConv.convert(int64(partTrack.BaseTime), trackProc.track.track.ClockRate)
+			ntp := p.timeConv.getNTP(ctx, dts, trackProc.track.track.ClockRate)
+
+			p.segmentWaitGroup.Add(1)
 
 			err = trackProc.push(ctx, &procEntryFMP4{
 				partTrack: partTrack,
@@ -187,61 +188,22 @@ func (p *clientStreamProcessorFMP4) processSegment(ctx context.Context, seg *seg
 				ntp:       ntp,
 			})
 			if err != nil {
+				p.segmentWaitGroup.Done()
 				return err
 			}
-
-			partTrackCount++
 		}
 	}
 
-	return p.joinTrackProcessors(ctx, partTrackCount)
-}
-
-func (p *clientStreamProcessorFMP4) joinTrackProcessors(ctx context.Context, partTrackCount int) error {
-	for range partTrackCount {
-		select {
-		case <-p.chPartTrackProcessed:
-		case <-ctx.Done():
-			return nil
-		}
-	}
+	p.segmentWaitGroup.Wait()
 
 	return nil
 }
 
-func (p *clientStreamProcessorFMP4) onPartTrackProcessed(ctx context.Context) {
-	select {
-	case p.chPartTrackProcessed <- struct{}{}:
-	case <-ctx.Done():
-	}
+func (p *clientStreamProcessorFMP4) onPartTrackProcessed() {
+	p.segmentWaitGroup.Done()
 }
 
-func (p *clientStreamProcessorFMP4) initializeTrackProcessors(
-	ctx context.Context,
-	partTrack *fmp4.PartTrack,
-) error {
-	if p.isLeading {
-		timeScale := findTimeScaleOfLeadingTrack(p.init.Tracks, p.leadingTrackID)
-
-		timeConv := &clientTimeConvFMP4{
-			leadingTimeScale: int64(timeScale),
-			leadingBaseTime:  int64(partTrack.BaseTime),
-		}
-		timeConv.initialize()
-
-		p.client.setLeadingTimeConv(timeConv)
-	} else {
-		ok := p.client.waitLeadingTimeConv(ctx)
-		if !ok {
-			return fmt.Errorf("terminated")
-		}
-
-		_, ok = p.client.getLeadingTimeConv().(*clientTimeConvFMP4)
-		if !ok {
-			return fmt.Errorf("stream playlists are mixed MPEG-TS/fMP4")
-		}
-	}
-
+func (p *clientStreamProcessorFMP4) initializeTrackProcessors() error {
 	p.trackProcessors = make(map[int]*clientTrackProcessorFMP4)
 
 	for i, track := range p.clientStreamTracks {
@@ -256,6 +218,32 @@ func (p *clientStreamProcessorFMP4) initializeTrackProcessors(
 		p.rp.add(trackProc)
 
 		p.trackProcessors[p.init.Tracks[i].ID] = trackProc
+	}
+
+	return nil
+}
+
+func (p *clientStreamProcessorFMP4) initializeTimeConv(ctx context.Context, leadingPartTrack *fmp4.PartTrack) error {
+	if p.isLeading {
+		timeScale := findTimeScaleOfLeadingTrack(p.init.Tracks, p.leadingTrackID)
+
+		p.timeConv = &clientTimeConvFMP4{
+			leadingTimeScale: int64(timeScale),
+			leadingBaseTime:  int64(leadingPartTrack.BaseTime),
+		}
+		p.timeConv.initialize()
+
+		p.client.setTimeConv(p.timeConv)
+	} else {
+		tmp, ok := p.client.waitTimeConv(ctx)
+		if !ok {
+			return fmt.Errorf("terminated")
+		}
+
+		p.timeConv, ok = tmp.(*clientTimeConvFMP4)
+		if !ok {
+			return fmt.Errorf("stream playlists are mixed MPEG-TS/fMP4")
+		}
 	}
 
 	return nil

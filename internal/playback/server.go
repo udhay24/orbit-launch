@@ -16,7 +16,7 @@ import (
 )
 
 type serverAuthManager interface {
-	Authenticate(req *auth.Request) *auth.Error
+	Authenticate(req *auth.Request) (string, *auth.Error)
 }
 
 // Server is the playback server.
@@ -66,7 +66,13 @@ func (s *Server) Initialize() error {
 		return err
 	}
 
-	s.Log(logger.Info, "listener opened on "+s.Address)
+	str := "listener opened on " + s.Address
+	if !s.Encryption {
+		str += " (TCP/HTTP)"
+	} else {
+		str += " (TCP/HTTPS)"
+	}
+	s.Log(logger.Info, str)
 
 	return nil
 }
@@ -124,12 +130,12 @@ func (s *Server) doAuth(ctx *gin.Context, pathName string) bool {
 		IP:          net.ParseIP(ctx.ClientIP()),
 	}
 
-	err := s.AuthManager.Authenticate(req)
+	_, err := s.AuthManager.Authenticate(req)
 	if err != nil {
 		if err.AskCredentials {
 			ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 			ctx.AbortWithStatusJSON(http.StatusUnauthorized, &defs.APIError{
-				Status: "error",
+				Status: defs.APIErrorStatusError,
 				Error:  "authentication error",
 			})
 			return false
@@ -142,7 +148,7 @@ func (s *Server) doAuth(ctx *gin.Context, pathName string) bool {
 		<-time.After(auth.PauseAfterError)
 
 		ctx.AbortWithStatusJSON(http.StatusUnauthorized, &defs.APIError{
-			Status: "error",
+			Status: defs.APIErrorStatusError,
 			Error:  "authentication error",
 		})
 		return false

@@ -25,7 +25,7 @@ import (
 
 type conn struct {
 	parentCtx           context.Context
-	isTLS               bool
+	encryption          bool
 	rtspAddress         string
 	readTimeout         conf.Duration
 	writeTimeout        conf.Duration
@@ -47,6 +47,8 @@ type conn struct {
 	state     defs.APIRTMPConnState
 	pathName  string
 	query     string
+	user      string
+	reader    *stream.Reader
 }
 
 func (c *conn) initialize() {
@@ -162,7 +164,7 @@ func (c *conn) runRead() error {
 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
 	query := c.rconn.URL.Query()
 
-	path, strm, err := c.pathManager.AddReader(defs.PathAddReaderReq{
+	res, err := c.pathManager.AddReader(defs.PathAddReaderReq{
 		Author: c,
 		AccessRequest: defs.PathAccessRequest{
 			Name:  pathName,
@@ -186,29 +188,30 @@ func (c *conn) runRead() error {
 		return err
 	}
 
-	defer path.RemoveReader(defs.PathRemoveReaderReq{Author: c})
+	defer res.Path.RemoveReader(defs.PathRemoveReaderReq{Author: c})
 
 	c.mutex.Lock()
 	c.state = defs.APIRTMPConnStateRead
 	c.pathName = pathName
 	c.query = c.rconn.URL.RawQuery
+	c.user = res.User
 	c.mutex.Unlock()
 
 	r := &stream.Reader{Parent: c}
 
-	err = rtmp.FromStream(strm.Desc, r, c.rconn, c.nconn, time.Duration(c.writeTimeout))
+	err = rtmp.FromStream(res.Stream.Desc, r, c.rconn, c.nconn, time.Duration(c.writeTimeout))
 	if err != nil {
 		return err
 	}
 
 	c.Log(logger.Info, "is reading from path '%s', %s",
-		path.Name(), defs.FormatsInfo(r.Formats()))
+		res.Path.Name(), defs.FormatsInfo(r.Formats()))
 
 	onUnreadHook := hooks.OnRead(hooks.OnReadParams{
 		Logger:          c,
 		ExternalCmdPool: c.externalCmdPool,
-		Conf:            path.SafeConf(),
-		ExternalCmdEnv:  path.ExternalCmdEnv(),
+		Conf:            res.Path.SafeConf(),
+		ExternalCmdEnv:  res.Path.ExternalCmdEnv(),
 		Reader:          *c.APIReaderDescribe(),
 		Query:           c.rconn.URL.RawQuery,
 	})
@@ -216,8 +219,12 @@ func (c *conn) runRead() error {
 
 	c.nconn.SetReadDeadline(time.Time{})
 
-	strm.AddReader(r)
-	defer strm.RemoveReader(r)
+	res.Stream.AddReader(r)
+	defer res.Stream.RemoveReader(r)
+
+	c.mutex.Lock()
+	c.reader = r
+	c.mutex.Unlock()
 
 	select {
 	case <-c.ctx.Done():
@@ -252,8 +259,7 @@ func (c *conn) runPublish() error {
 		return err
 	}
 
-	var path defs.Path
-	path, subStream, err = c.pathManager.AddPublisher(defs.PathAddPublisherReq{
+	res, err := c.pathManager.AddPublisher(defs.PathAddPublisherReq{
 		Author:        c,
 		Desc:          &description.Session{Medias: medias},
 		UseRTPPackets: false,
@@ -281,12 +287,15 @@ func (c *conn) runPublish() error {
 		return err
 	}
 
-	defer path.RemovePublisher(defs.PathRemovePublisherReq{Author: c})
+	defer res.Path.RemovePublisher(defs.PathRemovePublisherReq{Author: c})
+
+	subStream = res.SubStream
 
 	c.mutex.Lock()
 	c.state = defs.APIRTMPConnStatePublish
 	c.pathName = pathName
 	c.query = c.rconn.URL.RawQuery
+	c.user = res.User
 	c.mutex.Unlock()
 
 	c.nconn.SetWriteDeadline(time.Time{})
@@ -303,11 +312,11 @@ func (c *conn) runPublish() error {
 // APIReaderDescribe implements reader.
 func (c *conn) APIReaderDescribe() *defs.APIPathReader {
 	return &defs.APIPathReader{
-		Type: func() string {
-			if c.isTLS {
-				return "rtmpsConn"
+		Type: func() defs.APIPathReaderType {
+			if c.encryption {
+				return defs.APIPathReaderTypeRTMPSConn
 			}
-			return "rtmpConn"
+			return defs.APIPathReaderTypeRTMPConn
 		}(),
 		ID: c.uuid.String(),
 	}
@@ -316,11 +325,11 @@ func (c *conn) APIReaderDescribe() *defs.APIPathReader {
 // APISourceDescribe implements source.
 func (c *conn) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: func() string {
-			if c.isTLS {
-				return "rtmpsConn"
+		Type: func() defs.APIPathSourceType {
+			if c.encryption {
+				return defs.APIPathSourceTypeRTMPSConn
 			}
-			return "rtmpConn"
+			return defs.APIPathSourceTypeRTMPConn
 		}(),
 		ID: c.uuid.String(),
 	}
@@ -332,20 +341,29 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 
 	bytesReceived := uint64(0)
 	bytesSent := uint64(0)
+	outboundFramesDiscarded := uint64(0)
 
 	if c.rconn != nil {
 		bytesReceived = c.rconn.BytesReceived()
 		bytesSent = c.rconn.BytesSent()
 	}
 
+	if c.reader != nil {
+		outboundFramesDiscarded = c.reader.OutboundFramesDiscarded()
+	}
+
 	return &defs.APIRTMPConn{
-		ID:            c.uuid,
-		Created:       c.created,
-		RemoteAddr:    c.remoteAddr().String(),
-		State:         c.state,
-		Path:          c.pathName,
-		Query:         c.query,
-		BytesReceived: bytesReceived,
-		BytesSent:     bytesSent,
+		ID:                      c.uuid,
+		Created:                 c.created,
+		RemoteAddr:              c.remoteAddr().String(),
+		State:                   c.state,
+		Path:                    c.pathName,
+		Query:                   c.query,
+		User:                    c.user,
+		InboundBytes:            bytesReceived,
+		OutboundBytes:           bytesSent,
+		BytesReceived:           bytesReceived,
+		BytesSent:               bytesSent,
+		OutboundFramesDiscarded: outboundFramesDiscarded,
 	}
 }

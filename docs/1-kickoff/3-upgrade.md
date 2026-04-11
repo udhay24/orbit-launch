@@ -4,7 +4,7 @@ If you have an existing _MediaMTX_ installation, you can upgrade it to the lates
 
 ## Standalone binary
 
-The standalone binary comes with a upgrade utility that can be launched with:
+The standalone binary comes with an upgrade utility that can be launched with:
 
 ```sh
 ./mediamtx --upgrade
@@ -33,7 +33,7 @@ Then recreate the container as described in [Install](2-install.md#docker-image)
 
 Repeat the installation procedure.
 
-## FreeBSD
+## FreeBSD package
 
 Repeat the installation procedure.
 

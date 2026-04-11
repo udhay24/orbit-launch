@@ -45,16 +45,16 @@ runOnConnect:
 # Restart the command if it exits.
 runOnConnectRestart: false
 # Command to run when a client disconnects from the server.
-# Environment variables are the same of runOnConnect.
+# Environment variables are the same as runOnConnect.
 runOnDisconnect:
 
 ###############################################
 # Global settings -> Authentication
 
-# Authentication method. Available values are:
-# * internal: credentials are stored in the configuration file
-# * http: an external HTTP URL is contacted to perform authentication
-# * jwt: an external identity server provides authentication through JWTs
+# Authentication method. Available values:
+# * Internal database: credentials are stored in the configuration file
+# * External HTTP server: an external HTTP URL is contacted for each authentication request
+# * External JWT provider: credentials are signed tokens released by an external identity server
 authMethod: internal
 
 # Internal authentication.
@@ -123,7 +123,7 @@ authHTTPExclude:
 - action: pprof
 
 # JWT-based authentication.
-# Users have to login through an external identity server and obtain a JWT.
+# Users have to log in through an external identity server and obtain a JWT.
 # This JWT must contain the claim "mediamtx_permissions" with permissions,
 # for instance:
 # {
@@ -149,14 +149,15 @@ authJWTClaimKey: mediamtx_permissions
 # Actions to exclude from JWT-based authentication.
 # Format is the same as the one of user permissions.
 authJWTExclude: []
-# allow passing the JWT through query parameters of HTTP requests (i.e. ?jwt=JWT).
-# This is a security risk and will be disabled in the future.
-authJWTInHTTPQuery: true
+# Expected issuer (iss) claim in the JWT. Leave empty to skip validation.
+authJWTIssuer:
+# Expected audience (aud) claim in the JWT. Leave empty to skip validation.
+authJWTAudience:
 
 ###############################################
 # Global settings -> Control API
 
-# Enable controlling the server through the Control API.
+# Allow clients to control the server through the Control API.
 api: yes
 # Address of the Control API listener.
 apiAddress: :9997
@@ -180,7 +181,7 @@ apiTrustedProxies: []
 ###############################################
 # Global settings -> Metrics
 
-# Enable Prometheus-compatible metrics.
+# Allow clients to extract Prometheus-compatible metrics.
 metrics: false
 # Address of the metrics HTTP listener.
 metricsAddress: :9998
@@ -204,7 +205,7 @@ metricsTrustedProxies: []
 ###############################################
 # Global settings -> PPROF
 
-# Enable pprof-compatible endpoint to monitor performances.
+# Allow clients to extract pprof-compatible performance reports.
 pprof: false
 # Address of the pprof listener.
 pprofAddress: :9999
@@ -228,7 +229,7 @@ pprofTrustedProxies: []
 ###############################################
 # Global settings -> Playback server
 
-# Enable downloading recordings from the playback server.
+# Allow clients to download recordings from the playback server.
 playback: false
 # Address of the playback server listener.
 playbackAddress: :9996
@@ -252,7 +253,7 @@ playbackTrustedProxies: []
 ###############################################
 # Global settings -> RTSP server
 
-# Enable publishing and reading streams with the RTSP protocol.
+# Allow clients to publish and read streams with the RTSP protocol.
 rtsp: true
 # Enabled RTSP transport protocols. The handshake is always performed with TCP.
 rtspTransports: [udp, multicast, tcp]
@@ -295,9 +296,9 @@ rtspAuthMethods: [basic]
 ###############################################
 # Global settings -> RTMP server
 
-# Enable publishing and reading streams with the RTMP protocol.
+# Allow clients to publish and read streams with the RTMP protocol.
 rtmp: true
-# Use the secure protocol variant (RTMP).
+# Use the secure protocol variant (RTMPS).
 # Available values are "no", "strict", "optional".
 rtmpEncryption: "no"
 # Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
@@ -315,7 +316,7 @@ rtmpServerCert: server.crt
 ###############################################
 # Global settings -> HLS server
 
-# Enable reading streams with the HLS protocol.
+# Allow clients to read streams with the HLS protocol.
 hls: true
 # Address of the HLS listener.
 hlsAddress: :8888
@@ -374,7 +375,7 @@ hlsMuxerCloseAfter: 60s
 ###############################################
 # Global settings -> WebRTC server
 
-# Enable publishing and reading streams with the WebRTC protocol.
+# Allow clients to publish and read streams with the WebRTC protocol.
 webrtc: true
 # Address of the WebRTC HTTP listener.
 webrtcAddress: :8889
@@ -412,8 +413,8 @@ webrtcIPsFromInterfacesList: []
 # Additional hosts or IPs to send to clients.
 webrtcAdditionalHosts: []
 # ICE servers. Needed only when local listeners can't be reached by clients.
-# STUN servers allows to obtain and share the public IP of the server.
-# TURN/TURNS servers forces all traffic through them.
+# STUN servers allow to obtain and share the public IP of the server.
+# TURN/TURNS servers force all traffic through them.
 webrtcICEServers2: []
   # - url: stun:stun.l.google.com:19302
   # if user is "AUTH_SECRET", then authentication is secret based.
@@ -431,7 +432,7 @@ webrtcTrackGatherTimeout: 2s
 ###############################################
 # Global settings -> SRT server
 
-# Enable publishing and reading streams with the SRT protocol.
+# Allow clients to publish and read streams with the SRT protocol.
 srt: true
 # Address of the SRT listener.
 srtAddress: :8890
@@ -512,19 +513,19 @@ pathDefaults:
   ###############################################
   # Default path settings -> Always available
 
-  # Enable always-available mode, in which a offline segment is played on repeat when the stream is not available.
+  # Enable always-available mode, in which an offline segment is played on repeat when the stream is not available.
   alwaysAvailable: false
+  # Tracks of the default offline segment.
+  alwaysAvailableTracks: []
+    # Available values are: AV1, VP9, H265, H264, Opus, MPEG4Audio, G711, LPCM
+    # - codec: H264
+    #   # in case of MPEG4Audio, G711, LPCM, sampleRate and ChannelCount must be provided too.
+    #   sampleRate: 48000
+    #   channelCount: 2
+    #   # in case of G711, muLaw must be provided too.
+    #   muLaw: false
   # An MP4 file can be used instead of the default offline segment.
   alwaysAvailableFile: ''
-  # Tracks of the default offline segment.
-  alwaysAvailableTracks:
-    # Available values are: AV1, VP9, H265, H264, Opus, MPEG4Audio, G711, LPCM
-    - codec: H264
-      # in case of MPEG4Audio, G711, LPCM, sampleRate and ChannelCount must be provided too.
-      #  sampleRate: 48000
-      #  channelCount: 2
-      #  in case of G711, muLaw must be provided too.
-      #  muLaw: false
 
   ###############################################
   # Default path settings -> Record
@@ -559,6 +560,11 @@ pathDefaults:
   overridePublisher: true
   # SRT encryption passphrase required to publish to this path.
   srtPublishPassphrase:
+  # Demux MPEG-TS over RTSP into elementary streams.
+  # When enabled, RTSP publishers sending MP2T/90000 will be demultiplexed
+  # and their elementary streams (H.264, H.265, AAC, etc.) exposed as native tracks.
+  # This allows HLS, WebRTC, and other outputs to work transparently with MPEG-TS sources.
+  rtspDemuxMpegts: false
 
   ###############################################
   # Default path settings -> RTSP source (when source is a RTSP or a RTSPS URL)
@@ -603,8 +609,8 @@ pathDefaults:
   ###############################################
   # Default path settings -> Redirect source (when source is "redirect")
 
-  # path which clients will be redirected to.
-  # It can be can be a relative path (i.e. /otherstream) or an absolute RTSP URL.
+  # Path to which clients will be redirected.
+  # It can be a relative path (i.e. /otherstream) or an absolute RTSP URL.
   sourceRedirect:
 
   ###############################################
@@ -736,7 +742,7 @@ pathDefaults:
   # readers connected and this amount of time has passed.
   runOnDemandCloseAfter: 10s
   # Command to run when there are no readers anymore.
-  # Environment variables are the same of runOnDemand.
+  # Environment variables are the same as runOnDemand.
   runOnUnDemand:
 
   # Command to run when the stream is ready to be read, whenever it is
@@ -754,7 +760,7 @@ pathDefaults:
   # Restart the command if it exits.
   runOnReadyRestart: false
   # Command to run when the stream is not available anymore.
-  # Environment variables are the same of runOnReady.
+  # Environment variables are the same as runOnReady.
   runOnNotReady: sh -c 'echo disconnect:$MTX_PATH | nc -q0 localhost 50052'
 
   # Command to run when a client starts reading.
@@ -771,7 +777,7 @@ pathDefaults:
   # Restart the command if it exits.
   runOnReadRestart: false
   # Command to run when a client stops reading.
-  # Environment variables are the same of runOnRead.
+  # Environment variables are the same as runOnRead.
   runOnUnread:
 
   # Command to run when a recording segment is created.

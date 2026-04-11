@@ -22,7 +22,8 @@ import (
 )
 
 const (
-	webrtcStreamID = "mediamtx"
+	webrtcStreamID   = "mediamtx"
+	twccExtensionURI = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
 )
 
 func interfaceIPs(interfaceList []string) ([]string, error) {
@@ -57,6 +58,25 @@ func interfaceIPs(interfaceList []string) ([]string, error) {
 	}
 
 	return ips, nil
+}
+
+func maxTrackCount(medias []*sdp.MediaDescription) int {
+	total := 0
+	for _, media := range medias {
+		ridCount := 0
+
+		for _, attr := range media.Attributes {
+			if attr.Key == "rid" {
+				ridCount++
+			}
+		}
+
+		if ridCount == 0 {
+			ridCount = 1
+		}
+		total += ridCount
+	}
+	return total
 }
 
 // * skip ConfigureRTCPReports
@@ -148,7 +168,7 @@ type PeerConnection struct {
 	wr               *webrtc.PeerConnection
 	ctx              context.Context
 	ctxCancel        context.CancelFunc
-	readingStarted   *int64
+	readingStarted   atomic.Int64
 	incomingTracks   []*IncomingTrack
 	statsInterceptor *statsInterceptor
 
@@ -301,8 +321,6 @@ func (co *PeerConnection) Start() error {
 
 	co.ctx, co.ctxCancel = context.WithCancel(context.Background())
 
-	co.readingStarted = new(int64)
-
 	co.newLocalCandidate = make(chan *webrtc.ICECandidateInit)
 	co.connected = make(chan struct{})
 	co.failed = make(chan struct{})
@@ -451,7 +469,7 @@ func (co *PeerConnection) run() {
 			for _, track := range co.incomingTracks {
 				track.start()
 			}
-			atomic.StoreInt64(co.readingStarted, 1)
+			co.readingStarted.Store(1)
 
 		case <-co.ctx.Done():
 			return
@@ -696,7 +714,7 @@ func (co *PeerConnection) GatherIncomingTracks(timeout time.Duration) error {
 	var sdp sdp.SessionDescription
 	sdp.Unmarshal([]byte(co.wr.RemoteDescription().SDP)) //nolint:errcheck
 
-	maxTrackCount := len(sdp.MediaDescriptions)
+	maxTrackCount := maxTrackCount(sdp.MediaDescriptions)
 
 	t := time.NewTimer(timeout)
 	defer t.Stop()
@@ -713,6 +731,7 @@ func (co *PeerConnection) GatherIncomingTracks(timeout time.Duration) error {
 			t := &IncomingTrack{
 				track:     pair.track,
 				receiver:  pair.receiver,
+				rid:       pair.track.RID(),
 				writeRTCP: co.wr.WriteRTCP,
 				log:       co.Log,
 			}
@@ -816,20 +835,20 @@ func (co *PeerConnection) Stats() *Stats {
 	packetsSent := uint64(0)
 	packetsLost := uint64(0)
 
-	if atomic.LoadInt64(co.readingStarted) == 1 {
+	if co.readingStarted.Load() == 1 {
 		for _, tr := range co.incomingTracks {
 			if recvStats := tr.rtpReceiver.Stats(); recvStats != nil {
 				v += recvStats.Jitter
 				n++
-				packetsReceived += recvStats.TotalReceived
-				packetsLost += recvStats.TotalLost
+				packetsReceived += recvStats.Received
+				packetsLost += recvStats.Lost
 			}
 		}
 	}
 
 	for _, tr := range co.OutgoingTracks {
 		if sentStats := tr.rtcpSender.Stats(); sentStats != nil {
-			packetsSent += sentStats.TotalSent
+			packetsSent += sentStats.Sent
 		}
 	}
 
@@ -847,7 +866,7 @@ func (co *PeerConnection) Stats() *Stats {
 		RTPPacketsSent:      packetsSent,
 		RTPPacketsLost:      packetsLost,
 		RTPPacketsJitter:    rtpPacketsJitter,
-		RTCPPacketsReceived: atomic.LoadUint64(co.statsInterceptor.rtcpPacketsReceived),
-		RTCPPacketsSent:     atomic.LoadUint64(co.statsInterceptor.rtcpPacketsSent),
+		RTCPPacketsReceived: co.statsInterceptor.rtcpPacketsReceived.Load(),
+		RTCPPacketsSent:     co.statsInterceptor.rtcpPacketsSent.Load(),
 	}
 }

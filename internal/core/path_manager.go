@@ -84,45 +84,45 @@ type pathManagerParent interface {
 }
 
 type pathManager struct {
-	logLevel          conf.LogLevel
-	rtspAddress       string
-	dumpPackets       bool
-	readTimeout       conf.Duration
-	writeTimeout      conf.Duration
-	writeQueueSize    int
-	udpReadBufferSize uint
-	rtpMaxPayloadSize int
-	pathConfs         map[string]*conf.Path
-	authManager       pathManagerAuthManager
-	externalCmdPool   *externalcmd.Pool
-	metrics           *metrics.Metrics
-	parent            pathManagerParent
+	logLevel            conf.LogLevel
+	rtspAddress         string
+	dumpPackets         bool
+	readTimeout         conf.Duration
+	writeTimeout        conf.Duration
+	writeQueueSize      int
+	udpReadBufferSize   uint
+	rtpMaxPayloadSize   int
+	pathConfs           map[string]*conf.Path
+	authManager         pathManagerAuthManager
+	externalCmdPool     *externalcmd.Pool
+	metrics             *metrics.Metrics
+	parent              pathManagerParent
 	maxPublishers       int
 	publisherHysteresis int
-	activePublishers    int
-	publisherLimitHit   bool
 
-	ctx            context.Context
-	ctxCancel      func()
-	wg             sync.WaitGroup
-	hlsServer      *hls.Server
-	streamRegistry pathManagerStreamRegistry
-	paths          map[string]*path
+	ctx               context.Context
+	ctxCancel         func()
+	wg                sync.WaitGroup
+	hlsServer         *hls.Server
+	streamRegistry    pathManagerStreamRegistry
+	paths             map[string]*path
+	activePublishers  int
+	publisherLimitHit bool
 
 	// in
-	chReloadConf         chan map[string]*conf.Path
-	chSetHLSServer       chan pathSetHLSServerReq
-	chSetStreamRegistry  chan pathSetStreamRegistryReq
-	chRemovePath      chan *path
-	chClosePathIfIdle chan *path
-	chSetPathReady    chan *path
-	chSetPathNotReady chan *path
-	chFindPathConf    chan defs.PathFindPathConfReq
-	chDescribe        chan defs.PathDescribeReq
-	chAddReader       chan defs.PathAddReaderReq
-	chAddPublisher    chan defs.PathAddPublisherReq
-	chAPIPathsList    chan pathAPIPathsListReq
-	chAPIPathsGet     chan pathAPIPathsGetReq
+	chReloadConf        chan map[string]*conf.Path
+	chSetHLSServer      chan pathSetHLSServerReq
+	chSetStreamRegistry chan pathSetStreamRegistryReq
+	chRemovePath        chan *path
+	chClosePathIfIdle   chan *path
+	chSetPathReady      chan *path
+	chSetPathNotReady   chan *path
+	chFindPathConf      chan defs.PathFindPathConfReq
+	chDescribe          chan defs.PathDescribeReq
+	chAddReader         chan defs.PathAddReaderReq
+	chAddPublisher      chan defs.PathAddPublisherReq
+	chAPIPathsList      chan pathAPIPathsListReq
+	chAPIPathsGet       chan pathAPIPathsGetReq
 }
 
 func (pm *pathManager) initialize() {

@@ -4,12 +4,10 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="62dc1b71-8045-4dc7-9650-c7e911b7b4ff" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+    <list default="true" id="61e4aedf-65b2-4fd3-bf81-1c8f2fc9ed3d" name="Changes" comment="feat(config): updated config to record for 15 mins">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mediamtx-patched" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/CLAUDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/CLAUDE.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/reader.go" beforeDir="false" afterPath="$PROJECT_DIR$/vendor/github.com/bluenviron/gortmplib/reader.go" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mediamtx" beforeDir="false" afterPath="$PROJECT_DIR$/mediamtx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/mediamtx.yml" beforeDir="false" afterPath="$PROJECT_DIR$/mediamtx.yml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -17,183 +15,51 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="787" />
+    <option name="cachedIndexableFilesCount" value="796" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
-  </component>
-  <component name="FileTemplateManagerImpl">
-    <option name="RECENT_TEMPLATES">
-      <list>
-        <option value="Dockerfile" />
-        <option value="Go File" />
-      </list>
-    </option>
   </component>
   <component name="GOROOT" url="file://$USER_HOME$/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.0.darwin-arm64" />
   <component name="Git.Settings">
-    <option name="RECENT_BRANCH_BY_REPOSITORY">
-      <map>
-        <entry key="$PROJECT_DIR$" value="release/v2.1" />
-      </map>
-    </option>
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
-  <component name="GitHubPullRequestSearchHistory">{
-  &quot;lastFilter&quot;: {
-    &quot;state&quot;: &quot;OPEN&quot;,
-    &quot;assignee&quot;: &quot;udhay24&quot;
-  }
-}</component>
-  <component name="GithubPullRequestsUISettings">{
-  &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/StarwatchXR/orbit-launch.git&quot;,
-    &quot;accountId&quot;: &quot;b41b0ddb-9b47-4a3e-8c33-a11d1e929853&quot;
-  }
-}</component>
   <component name="GoLinterSelectedExecutable" path="$USER_HOME$/golangci-lint/golangci-lint" />
-  <component name="KubernetesApiPersistence">{}</component>
-  <component name="KubernetesApiProvider">{
-  &quot;isMigrated&quot;: true
-}</component>
   <component name="McpProjectServerCommands">
     <commands />
     <urls />
   </component>
   <component name="ProjectColorInfo">{
-  &quot;associatedIndex&quot;: 2
+  &quot;customColor&quot;: &quot;&quot;,
+  &quot;associatedIndex&quot;: 7
 }</component>
-  <component name="ProjectId" id="2jozuHWQFlXgINYhaJUXYBuR85v" />
+  <component name="ProjectId" id="3CTyYx2vKZmKTTObIvWsHkuaX9d" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "DefaultGoTemplateProperty": "Go File",
-    "Docker.Mediamtx.executor": "Run",
-    "Go Build.go build github.com/bluenviron/mediamtx.executor": "Run",
-    "Go Build.go build github.com/bluenviron/mediamtx/internal/core/versiongetter.executor": "Run",
-    "Makefile Target.binaries.executor": "Run",
-    "Makefile Target.dockerhub (1).executor": "Run",
-    "Makefile Target.dockerhub.executor": "Run",
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "RunOnceActivity.GoLinterPluginOnboarding": "true",
-    "RunOnceActivity.GoLinterPluginOnboardingV2": "true",
-    "RunOnceActivity.GoLinterPluginStorageMigration": "true",
-    "RunOnceActivity.MCP Project settings loaded": "true",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.go.analysis.ui.options.defaults": "true",
-    "RunOnceActivity.go.formatter.settings.were.checked": "true",
-    "RunOnceActivity.go.migrated.go.modules.settings": "true",
-    "RunOnceActivity.go.modules.automatic.dependencies.download": "true",
-    "RunOnceActivity.go.modules.go.list.on.any.changes.was.set": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "SHELLCHECK.PATH": "/Users/udhay/Library/Application Support/JetBrains/GoLand2025.1/plugins/Shell Script/shellcheck",
-    "Shell Script.install-servers.sh.executor": "Run",
-    "Shell Script.upgrade-servers.sh.executor": "Run",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "com.codeium.enabled": "true",
-    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultAutoModeForALLUsers.v1": "true",
-    "com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1": "true",
-    "git-widget-placeholder": "feat/rtmp-camera-compatibility",
-    "go.import.settings.migrated": "true",
-    "junie.onboarding.icon.badge.shown": "true",
-    "last_opened_file_path": "/Users/udhay",
-    "node.js.detected.package.eslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "project.propDebugger",
-    "to.speed.mode.migration.done": "true"
-  },
-  "keyToStringList": {
-    "com.intellij.ide.scratch.ScratchImplUtil$2/New Scratch File": [
-      "yaml",
-      "HTML"
-    ]
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;RunOnceActivity.GoLinterPluginOnboardingV2&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.GoLinterPluginStorageMigration&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.MCP Project settings loaded&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.go.analysis.ui.options.defaults&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.go.formatter.settings.were.checked&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.go.modules.go.list.on.any.changes.was.set&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;com.intellij.ml.llm.matterhorn.ej.ui.settings.DefaultModelSelectionForGA.v1&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;feat/rtmp-camera-compatibility&quot;,
+    &quot;go.sdk.automatically.set&quot;: &quot;true&quot;,
+    &quot;junie.onboarding.icon.badge.shown&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/udhay&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;yarn&quot;,
+    &quot;to.speed.mode.migration.done&quot;: &quot;true&quot;
   }
-}]]></component>
-  <component name="RecapSpentCounter">
-    <option name="endsOfQuotaMs" value="1770325200000" />
-    <option name="spentUsd" value="0.0300641" />
-  </component>
-  <component name="RecapUselessUpdatesCounter">
-    <option name="suspendCountdown" value="0" />
-  </component>
-  <component name="RecentsManager">
-    <key name="CopyFile.RECENT_KEYS">
-      <recent name="$PROJECT_DIR$/changes" />
-      <recent name="$PROJECT_DIR$/scripts" />
-      <recent name="$PROJECT_DIR$/scripts/server" />
-      <recent name="$PROJECT_DIR$" />
-    </key>
-    <key name="MoveFile.RECENT_KEYS">
-      <recent name="$PROJECT_DIR$/changes/internal/servers/webrtc" />
-      <recent name="$PROJECT_DIR$/scripts/server/instructions" />
-      <recent name="$PROJECT_DIR$/scripts/server" />
-      <recent name="$PROJECT_DIR$" />
-    </key>
-  </component>
-  <component name="RunManager" selected="Go Build.go build github.com/bluenviron/mediamtx">
-    <configuration name="go build github.com/bluenviron/mediamtx" type="GoApplicationRunConfiguration" factoryName="Go Application" temporary="true" nameIsGenerated="true">
-      <module name="orbit-launch" />
-      <working_directory value="$PROJECT_DIR$" />
-      <kind value="PACKAGE" />
-      <package value="github.com/bluenviron/mediamtx" />
-      <directory value="$PROJECT_DIR$" />
-      <filePath value="$PROJECT_DIR$/main.go" />
-      <method v="2" />
-    </configuration>
-    <configuration name="binaries" type="MAKEFILE_TARGET_RUN_CONFIGURATION" factoryName="Makefile" temporary="true">
-      <makefile filename="$PROJECT_DIR$/scripts/binaries.mk" target="binaries" workingDirectory="" arguments="">
-        <envs />
-      </makefile>
-      <method v="2" />
-    </configuration>
-    <configuration name="dockerhub (1)" type="MAKEFILE_TARGET_RUN_CONFIGURATION" factoryName="Makefile" temporary="true">
-      <makefile filename="$PROJECT_DIR$/linux-amd64-publish.mk" target="dockerhub" workingDirectory="" arguments="">
-        <envs />
-      </makefile>
-      <method v="2" />
-    </configuration>
-    <configuration name="dockerhub" type="MAKEFILE_TARGET_RUN_CONFIGURATION" factoryName="Makefile" temporary="true">
-      <makefile filename="$PROJECT_DIR$/scripts/linux-amd64-publish.mk" target="dockerhub" workingDirectory="" arguments="">
-        <envs />
-      </makefile>
-      <method v="2" />
-    </configuration>
-    <configuration name="Mediamtx" type="docker-deploy" factoryName="dockerfile" temporary="true" server-name="Docker">
-      <deployment type="dockerfile">
-        <settings>
-          <option name="containerName" value="" />
-          <option name="sourceFilePath" value="Dockerfile" />
-        </settings>
-      </deployment>
-      <method v="2" />
-    </configuration>
-    <configuration default="true" type="docker-deploy" factoryName="dockerfile" temporary="true">
-      <deployment type="dockerfile">
-        <settings />
-      </deployment>
-      <method v="2" />
-    </configuration>
-    <list>
-      <item itemvalue="Docker.Mediamtx" />
-      <item itemvalue="Go Build.go build github.com/bluenviron/mediamtx" />
-      <item itemvalue="Makefile Target.binaries" />
-      <item itemvalue="Makefile Target.dockerhub (1)" />
-      <item itemvalue="Makefile Target.dockerhub" />
-    </list>
-    <recent_temporary>
-      <list>
-        <item itemvalue="Makefile Target.dockerhub" />
-        <item itemvalue="Makefile Target.dockerhub (1)" />
-        <item itemvalue="Makefile Target.binaries" />
-        <item itemvalue="Go Build.go build github.com/bluenviron/mediamtx" />
-        <item itemvalue="Docker.Mediamtx" />
-      </list>
-    </recent_temporary>
-  </component>
+}</component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
@@ -202,14 +68,13 @@
       </set>
     </attachedChunks>
   </component>
-  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
-      <changelist id="62dc1b71-8045-4dc7-9650-c7e911b7b4ff" name="Changes" comment="feat(scripts): updated domain" />
-      <created>1744980627290</created>
+      <changelist id="61e4aedf-65b2-4fd3-bf81-1c8f2fc9ed3d" name="Changes" comment="feat(config): updated config to record for 15 mins" />
+      <created>1776423905786</created>
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
-      <updated>1744980627290</updated>
+      <updated>1776423905786</updated>
     </task>
     <servers />
   </component>
@@ -217,114 +82,18 @@
     <option name="version" value="3" />
   </component>
   <component name="Vcs.Log.Tabs.Properties">
-    <option name="RECENT_FILTERS">
-      <map>
-        <entry key="User">
-          <value>
-            <list>
-              <RecentGroup>
-                <option name="FILTER_VALUES">
-                  <option value="*" />
-                </option>
-              </RecentGroup>
-            </list>
-          </value>
-        </entry>
-      </map>
-    </option>
     <option name="TAB_STATES">
       <map>
         <entry key="MAIN">
           <value>
-            <State>
-              <option name="FILTERS">
-                <map>
-                  <entry key="user">
-                    <value>
-                      <list>
-                        <option value="*" />
-                      </list>
-                    </value>
-                  </entry>
-                </map>
-              </option>
-            </State>
+            <State />
           </value>
         </entry>
       </map>
     </option>
   </component>
   <component name="VcsManagerConfiguration">
-    <MESSAGE value="added remote ip on ready callback" />
-    <MESSAGE value="updated callback config" />
-    <MESSAGE value="added migration tasks" />
-    <MESSAGE value="added dependency service" />
-    <MESSAGE value="feat(system): added system stats api" />
-    <MESSAGE value="feat(system): added remote ip feature" />
-    <MESSAGE value="feat(config): updated config" />
-    <MESSAGE value="feat(config): stretch video to fill the video" />
-    <MESSAGE value="feat(webrtc): updated webrtc player" />
-    <MESSAGE value="feat(webrtc): added version file" />
-    <MESSAGE value="feat(scripts): added installation scripts" />
-    <MESSAGE value="feat(scripts):updated installation scripts" />
-    <MESSAGE value="feat(scripts):updated cpu libs" />
-    <MESSAGE value="feat(scripts): updated domain" />
-    <MESSAGE value="feat(git): added changes" />
-    <MESSAGE value="feat(git): added custom features" />
-    <MESSAGE value="feat(git): updated mediamtx file" />
-    <MESSAGE value="feat(git): updated recording path in mediamtx file" />
-    <MESSAGE value="feat(git): adjusted recording deletion time in mediamtx file" />
-    <MESSAGE value="feat(webrtc): redesigned interface and improved controls for video player" />
-    <MESSAGE value="feat(webrtc): enhanced responsiveness and redesigned controls with clamping adjustments" />
-    <MESSAGE value="feat(mediamtx): update configuration for enhanced recording, HLS settings, PTZ, and API controls" />
-    <MESSAGE value="docs: add CLAUDE.md for development guidelines, update runOn* configuration" />
-    <MESSAGE value="feat(mediamtx): enable HLS encryption in configuration" />
-    <MESSAGE value="feat(mediamtx): enable WebRTC encryption and update recording upload command" />
-    <option name="LAST_COMMIT_MESSAGE" value="feat(mediamtx): enable WebRTC encryption and update recording upload command" />
-  </component>
-  <component name="VgoModernizerVersionTracker">
-    <upgrades>
-      <map>
-        <entry key="$PROJECT_DIR$/go.mod">
-          <value>
-            <VersionUpgradeInfo>
-              <version>1.26.0</version>
-              <timestamp>1772367149057</timestamp>
-            </VersionUpgradeInfo>
-          </value>
-        </entry>
-      </map>
-    </upgrades>
-  </component>
-  <component name="XDebuggerManager">
-    <breakpoint-manager>
-      <breakpoints>
-        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
-          <url>file://$PROJECT_DIR$/internal/staticsources/rtsp/source.go</url>
-          <line>287</line>
-          <option name="timeStamp" value="12" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
-          <url>file://$PROJECT_DIR$/internal/servers/rtsp/session.go</url>
-          <line>155</line>
-          <option name="timeStamp" value="22" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
-          <url>file://$PROJECT_DIR$/internal/servers/rtsp/session.go</url>
-          <line>161</line>
-          <option name="timeStamp" value="23" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
-          <url>file://$PROJECT_DIR$/internal/servers/rtsp/conn.go</url>
-          <line>78</line>
-          <option name="timeStamp" value="24" />
-        </line-breakpoint>
-        <line-breakpoint enabled="true" type="DlvLineBreakpoint">
-          <url>file://$PROJECT_DIR$/internal/servers/rtsp/conn.go</url>
-          <line>142</line>
-          <option name="timeStamp" value="25" />
-        </line-breakpoint>
-      </breakpoints>
-    </breakpoint-manager>
+    <MESSAGE value="feat(config): updated config to record for 15 mins" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat(config): updated config to record for 15 mins" />
   </component>
 </project>

@@ -375,7 +375,7 @@ func (pm *pathManager) doSetPathNotReady(pa *path) {
 	if pm.activePublishers > 0 {
 		pm.activePublishers--
 	}
-	if pm.publisherLimitHit && pm.activePublishers < pm.maxPublishers-pm.publisherHysteresis {
+	if pm.maxPublishers > 0 && pm.publisherLimitHit && pm.activePublishers < pm.maxPublishers-pm.publisherHysteresis {
 		pm.publisherLimitHit = false
 	}
 }

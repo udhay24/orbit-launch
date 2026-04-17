@@ -350,6 +350,11 @@ func (pm *pathManager) doSetPathReady(pa *path) {
 	if pm.streamRegistry != nil {
 		pm.streamRegistry.Register(pa.name)
 	}
+
+	pm.activePublishers++
+	if pm.maxPublishers > 0 && pm.activePublishers >= pm.maxPublishers {
+		pm.publisherLimitHit = true
+	}
 }
 
 func (pm *pathManager) doSetPathNotReady(pa *path) {

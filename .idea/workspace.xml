@@ -6,8 +6,7 @@
   <component name="ChangeListManager">
     <list default="true" id="61e4aedf-65b2-4fd3-bf81-1c8f2fc9ed3d" name="Changes" comment="feat(config): updated config to record for 15 mins">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mediamtx" beforeDir="false" afterPath="$PROJECT_DIR$/mediamtx" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/mediamtx.yml" beforeDir="false" afterPath="$PROJECT_DIR$/mediamtx.yml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/release.sh" beforeDir="false" afterPath="$PROJECT_DIR$/release.sh" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />

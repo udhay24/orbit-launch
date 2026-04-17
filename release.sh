@@ -21,14 +21,19 @@ if [ -n "${1:-}" ] && [[ "$1" != --* ]]; then
     TAG="$1"
     shift
 else
-    # Strip git metadata — keep only vX.Y or vX.Y.Z
+    # Strip git metadata — keep only vX.Y or vX.Y.Z, then bump minor
     RAW=$(cat "$SCRIPT_DIR/internal/core/VERSION")
-    TAG=$(echo "$RAW" | grep -oE '^v[0-9]+\.[0-9]+(\.[0-9]+)?')
-    if [ -z "$TAG" ]; then
+    CURRENT=$(echo "$RAW" | grep -oE '^v[0-9]+\.[0-9]+(\.[0-9]+)?')
+    if [ -z "$CURRENT" ]; then
         echo "ERROR: Could not parse version from internal/core/VERSION ('$RAW')"
         echo "  Pass an explicit tag: ./release.sh v2.2"
         exit 1
     fi
+    MAJOR=$(echo "$CURRENT" | grep -oE '[0-9]+' | sed -n '1p')
+    MINOR=$(echo "$CURRENT" | grep -oE '[0-9]+' | sed -n '2p')
+    TAG="v${MAJOR}.$((MINOR + 1))"
+    echo "$TAG" > "$SCRIPT_DIR/internal/core/VERSION"
+    echo "==> Auto-bumped version $CURRENT → $TAG"
 fi
 
 PRERELEASE_FLAG=""

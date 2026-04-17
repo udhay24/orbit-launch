@@ -97,6 +97,10 @@ type pathManager struct {
 	externalCmdPool   *externalcmd.Pool
 	metrics           *metrics.Metrics
 	parent            pathManagerParent
+	maxPublishers       int
+	publisherHysteresis int
+	activePublishers    int
+	publisherLimitHit   bool
 
 	ctx            context.Context
 	ctxCancel      func()

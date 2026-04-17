@@ -452,6 +452,12 @@ streamRegistryServerID: ""
 # TTL for stream registry keys. Keys are refreshed at half the TTL interval.
 streamRegistryTTL: 60s
 
+# Maximum number of simultaneous publishers. New publishers are rejected when this limit is hit.
+# Set to 0 to disable.
+maxPublishers: 2000
+# Resume accepting publishers once active count drops below maxPublishers - publisherHysteresis.
+publisherHysteresis: 100
+
 ###############################################
 # Default path settings
 

@@ -399,6 +399,10 @@ type Conf struct {
 	StreamRegistryServerID string   `json:"streamRegistryServerID"`
 	StreamRegistryTTL      Duration `json:"streamRegistryTTL"`
 
+	// Publisher limits
+	MaxPublishers       int `json:"maxPublishers"`
+	PublisherHysteresis int `json:"publisherHysteresis"`
+
 	// Record (deprecated)
 	Record                *bool         `json:"record,omitempty"`                // deprecated
 	RecordPath            *string       `json:"recordPath,omitempty"`            // deprecated
@@ -531,6 +535,10 @@ func (conf *Conf) setDefaults() {
 	// Stream registry
 	conf.StreamRegistryAddress = "localhost:6379"
 	conf.StreamRegistryTTL = 60 * Duration(time.Second)
+
+	// Publisher limits
+	conf.MaxPublishers = 2000
+	conf.PublisherHysteresis = 100
 
 	conf.PathDefaults.setDefaults()
 }

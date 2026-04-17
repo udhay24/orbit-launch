@@ -928,6 +928,13 @@ func (conf *Conf) Validate(l logger.Writer) error {
 		}
 	}
 
+	// Publisher limits
+
+	if conf.MaxPublishers > 0 && conf.PublisherHysteresis >= conf.MaxPublishers {
+		return fmt.Errorf("'publisherHysteresis' (%d) must be less than 'maxPublishers' (%d)",
+			conf.PublisherHysteresis, conf.MaxPublishers)
+	}
+
 	// HLS (deprecated params)
 
 	if conf.HLSDisable != nil {

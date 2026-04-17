@@ -468,6 +468,11 @@ func (pm *pathManager) doAddPublisher(req defs.PathAddPublisherReq) {
 		}
 	}
 
+	if pm.maxPublishers > 0 && pm.publisherLimitHit {
+		req.Res <- defs.PathAddPublisherRes{Err: fmt.Errorf("maximum publisher count reached")}
+		return
+	}
+
 	// create path if it doesn't exist
 	if _, ok := pm.paths[req.AccessRequest.Name]; !ok {
 		pm.createPath(pathConf, req.AccessRequest.Name, pathMatches)

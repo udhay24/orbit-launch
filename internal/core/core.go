@@ -442,6 +442,8 @@ func (p *Core) createResources(initial bool) error {
 			authManager:       p.authManager,
 			externalCmdPool:   p.externalCmdPool,
 			metrics:           p.metrics,
+			maxPublishers:       p.conf.MaxPublishers,
+			publisherHysteresis: p.conf.PublisherHysteresis,
 			parent:            p,
 		}
 		p.pathManager.initialize()

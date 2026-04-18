@@ -4,9 +4,8 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="61e4aedf-65b2-4fd3-bf81-1c8f2fc9ed3d" name="Changes" comment="feat(config): updated config to record for 15 mins">
+    <list default="true" id="61e4aedf-65b2-4fd3-bf81-1c8f2fc9ed3d" name="Changes" comment="feat(config): update HLS settings and auto-bump release version&#10;&#10;- Change `hlsVariant` in `mediamtx.yml` from `lowLatency` to `fmp4`.&#10;- Reduce `hlsSegmentDuration` from 6s to 2s.&#10;- Increase `publisherHysteresis` from 100 to 300.&#10;- Add auto-version bump logic in `release.sh`.">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/release.sh" beforeDir="false" afterPath="$PROJECT_DIR$/release.sh" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -14,7 +13,7 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="EmbeddingIndexingInfo">
-    <option name="cachedIndexableFilesCount" value="796" />
+    <option name="cachedIndexableFilesCount" value="798" />
     <option name="fileBasedEmbeddingIndicesEnabled" value="true" />
   </component>
   <component name="GOROOT" url="file://$USER_HOME$/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.26.0.darwin-arm64" />
@@ -93,6 +92,7 @@
   </component>
   <component name="VcsManagerConfiguration">
     <MESSAGE value="feat(config): updated config to record for 15 mins" />
-    <option name="LAST_COMMIT_MESSAGE" value="feat(config): updated config to record for 15 mins" />
+    <MESSAGE value="feat(config): update HLS settings and auto-bump release version&#10;&#10;- Change `hlsVariant` in `mediamtx.yml` from `lowLatency` to `fmp4`.&#10;- Reduce `hlsSegmentDuration` from 6s to 2s.&#10;- Increase `publisherHysteresis` from 100 to 300.&#10;- Add auto-version bump logic in `release.sh`." />
+    <option name="LAST_COMMIT_MESSAGE" value="feat(config): update HLS settings and auto-bump release version&#10;&#10;- Change `hlsVariant` in `mediamtx.yml` from `lowLatency` to `fmp4`.&#10;- Reduce `hlsSegmentDuration` from 6s to 2s.&#10;- Increase `publisherHysteresis` from 100 to 300.&#10;- Add auto-version bump logic in `release.sh`." />
   </component>
 </project>

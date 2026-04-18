@@ -343,7 +343,7 @@ hlsAlwaysRemux: true
 # * mpegts - uses MPEG-TS segments, for maximum compatibility.
 # * fmp4 - uses fragmented MP4 segments, more efficient.
 # * lowLatency - uses Low-Latency HLS.
-hlsVariant: fmp4
+hlsVariant: mpegts
 # Number of HLS segments to keep on the server.
 # Segments allow to seek through the stream.
 # Their number doesn't influence latency.
@@ -353,23 +353,23 @@ hlsSegmentCount: 7
 # The final segment duration is also influenced by the interval between IDR frames,
 # since the server changes the duration in order to include at least one IDR frame
 # in each segment.
-hlsSegmentDuration: 2s
+hlsSegmentDuration: 1s
 # Minimum duration of each part.
 # A player usually puts 3 parts in a buffer before reproducing the stream.
 # Parts are used in Low-Latency HLS in place of segments.
 # Part duration is influenced by the distance between video/audio samples
 # and is adjusted in order to produce segments with a similar duration.
-hlsPartDuration: 500ms
+hlsPartDuration: 200ms
 # Maximum size of each segment.
 # This prevents RAM exhaustion.
-hlsSegmentMaxSize: 100M
+hlsSegmentMaxSize: 50M
 # Directory in which to save segments, instead of keeping them in the RAM.
 # This decreases performance, since reading from disk is less performant than
 # reading from RAM, but allows to save RAM.
 hlsDirectory: ''
 # The muxer will be closed when there are no
 # reader requests and this amount of time has passed.
-hlsMuxerCloseAfter: 300s
+hlsMuxerCloseAfter: 60s
 
 ###############################################
 # Global settings -> WebRTC server

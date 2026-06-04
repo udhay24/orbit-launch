@@ -21,6 +21,15 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	schemeRTMP  = "rtmp"
+	schemeRTMPS = "rtmps"
+)
+
+const (
+	encodingAMF0 = 0
+)
+
 // RTMP 1.0 spec, section 7.2.1.1
 const (
 	supportSndNone  = 0x0001
@@ -28,10 +37,7 @@ const (
 	supportSndG711A = 0x0080
 	supportSndG711U = 0x0100
 	supportSndAAV   = 0x0400
-
-	supportVidH264 = 0x0080
-
-	encodingAMF0 = 0
+	supportVidH264  = 0x0080
 )
 
 var errAuth = errors.New("auth")
@@ -177,6 +183,10 @@ type Client struct {
 	// function used to initialize the TCP client.
 	// It defaults to (&net.Dialer{}).DialContext.
 	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
+	// function used to initialize a TLS connection.
+	// When nil, DialContext and tls.Client are used in its place.
+	// It defaults to nil.
+	DialTLSContext func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 	nconn         net.Conn
 	bc            *bytecounter.ReadWriter
@@ -193,14 +203,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 	}
 
 	switch c.URL.Scheme {
-	case "rtmp":
-	case "rtmps":
-		if c.TLSConfig == nil {
-			c.TLSConfig = &tls.Config{
-				ServerName: c.URL.Hostname(),
-			}
-		}
-
+	case schemeRTMP, schemeRTMPS:
 	default:
 		return fmt.Errorf("unsupported scheme: %s", c.URL.Scheme)
 	}
@@ -216,14 +219,39 @@ func (c *Client) Initialize(ctx context.Context) error {
 }
 
 func (c *Client) initialize2(ctx context.Context) error {
-	var err error
-	c.nconn, err = c.DialContext(ctx, "tcp", c.URL.Host)
-	if err != nil {
-		return err
-	}
+	if c.DialTLSContext != nil {
+		var err error
+		c.nconn, err = c.DialTLSContext(ctx, "tcp", c.URL.Host)
+		if err != nil {
+			return err
+		}
+	} else {
+		var err error
+		c.nconn, err = c.DialContext(ctx, "tcp", c.URL.Host)
+		if err != nil {
+			return err
+		}
 
-	if c.URL.Scheme == "rtmps" {
-		c.nconn = tls.Client(c.nconn, c.TLSConfig)
+		if c.URL.Scheme == schemeRTMPS {
+			// clone TLS config and fill ServerName if empty.
+			// this is the same behavior of http.Client.
+			// https://cs.opensource.google/go/go/+/master:src/net/http/transport.go;l=1754;drc=a4b534f5e42fe58d58c0ff0562d76680cedb0466
+
+			tlsConfig := c.TLSConfig
+
+			if tlsConfig == nil {
+				tlsConfig = &tls.Config{}
+			} else {
+				tlsConfig = tlsConfig.Clone()
+			}
+
+			if tlsConfig.ServerName == "" {
+				host, _, _ := net.SplitHostPort(c.URL.Host)
+				tlsConfig.ServerName = host
+			}
+
+			c.nconn = tls.Client(c.nconn, tlsConfig)
+		}
 	}
 
 	closerDone := make(chan struct{})
@@ -243,7 +271,7 @@ func (c *Client) initialize2(ctx context.Context) error {
 		}
 	}()
 
-	err = c.initialize3()
+	err := c.initialize3()
 	if err != nil {
 		c.nconn.Close()
 		return err
@@ -355,6 +383,7 @@ func (c *Client) initialize3() error {
 					fourCCToString(message.FourCCHEVC),
 					fourCCToString(message.FourCCAVC),
 					fourCCToString(message.FourCCOpus),
+					fourCCToString(message.FourCCFLAC),
 					fourCCToString(message.FourCCAC3),
 					fourCCToString(message.FourCCMP4A),
 					fourCCToString(message.FourCCMP3),

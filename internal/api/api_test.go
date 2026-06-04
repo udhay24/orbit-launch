@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
@@ -31,9 +30,7 @@ func (p testParent) Log(l logger.Level, s string, a ...any) {
 func (testParent) APIConfigSet(_ *conf.Conf) {}
 
 func tempConf(t *testing.T, cnt string) *conf.Conf {
-	fi, err := test.CreateTempFile([]byte(cnt))
-	require.NoError(t, err)
-	defer os.Remove(fi)
+	fi := test.CreateTempFile(t, []byte(cnt))
 
 	cnf, _, err := conf.Load(fi, nil, nil)
 	require.NoError(t, err)
@@ -162,8 +159,8 @@ func TestAuthJWKSRefresh(t *testing.T) {
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(_ *auth.Request) *auth.Error {
-				return nil
+			AuthenticateImpl: func(_ *auth.Request) (string, *auth.Error) {
+				return "", nil
 			},
 			RefreshJWTJWKSImpl: func() {
 				ok = true
@@ -197,11 +194,11 @@ func TestAuthError(t *testing.T) {
 		WriteTimeout: conf.Duration(10 * time.Second),
 		Conf:         cnf,
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) *auth.Error {
+			AuthenticateImpl: func(req *auth.Request) (string, *auth.Error) {
 				if req.Credentials.User == "" {
-					return &auth.Error{AskCredentials: true}
+					return "", &auth.Error{AskCredentials: true, Wrapped: fmt.Errorf("auth error")}
 				}
-				return &auth.Error{Wrapped: fmt.Errorf("auth error")}
+				return "", &auth.Error{Wrapped: fmt.Errorf("auth error")}
 			},
 		},
 		Parent: &testParent{

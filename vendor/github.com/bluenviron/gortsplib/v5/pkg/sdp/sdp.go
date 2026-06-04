@@ -4,6 +4,7 @@ package sdp
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"slices"
 	"strconv"
@@ -84,6 +85,8 @@ func stringsReverseIndexByte(s string, b byte) int {
 // implementations.
 func (s *SessionDescription) unmarshalOrigin(value string) error {
 	value = strings.Replace(value, " IN IPV4 ", " IN IP4 ", 1)
+	value = strings.Replace(value, " IP IP4 ", " IN IP4 ", 1)
+	value = strings.Replace(value, " IP IP6 ", " IN IP6 ", 1)
 
 	if strings.HasSuffix(value, " IN") {
 		value += " IP4"
@@ -202,6 +205,19 @@ func unmarshalConnectionInformation(value string) (*psdp.ConnectionInformation, 
 	fields := strings.Fields(value)
 	if len(fields) < 2 {
 		return nil, fmt.Errorf("%w `c=%v`", errSDPInvalidSyntax, fields)
+	}
+
+	// Tolerate malformed lines like:
+	// c=IN 192.168.4.232
+	// c=IN fe80::1234
+	if len(fields) == 2 && strings.EqualFold(fields[0], "IN") {
+		if ip := net.ParseIP(fields[1]); ip != nil {
+			addrType := "IP6"
+			if ip.To4() != nil {
+				addrType = "IP4"
+			}
+			fields = []string{"IN", addrType, fields[1]}
+		}
 	}
 
 	// Set according to currently registered with IANA
@@ -438,6 +454,7 @@ func (s *SessionDescription) unmarshalMediaDescription(value string) error {
 		fields[0] != "application" &&
 		!strings.HasPrefix(fields[0], "application/") &&
 		fields[0] != "metadata" &&
+		fields[0] != "meta" &&
 		fields[0] != "text" {
 		return fmt.Errorf("%w `%v`", errSDPInvalidValue, fields[0])
 	}

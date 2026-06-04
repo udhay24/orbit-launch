@@ -44,6 +44,7 @@ const (
 	StatusUnsupportedTransport               StatusCode = 461
 	StatusDestinationUnreachable             StatusCode = 462
 	StatusDestinationProhibited              StatusCode = 463
+	StatusKeyManagementFailure               StatusCode = 463
 	StatusDataTransportNotReadyYet           StatusCode = 464
 	StatusNotificationReasonUnknown          StatusCode = 465
 	StatusKeyManagementError                 StatusCode = 466
@@ -144,7 +145,7 @@ func (res *Response) Unmarshal(br *bufio.Reader) error {
 		return fmt.Errorf("expected '%s', got %v", rtspProtocol10, proto)
 	}
 
-	byts, err = readBytesLimited(br, ' ', 4)
+	byts, err = readBytesLimitedUntilSpaceOrCarriage(br, 4)
 	if err != nil {
 		return err
 	}
@@ -156,11 +157,15 @@ func (res *Response) Unmarshal(br *bufio.Reader) error {
 	}
 	res.StatusCode = StatusCode(tmp)
 
-	byts, err = readBytesLimited(br, '\r', 255)
-	if err != nil {
-		return err
+	if byts[len(byts)-1] == ' ' {
+		byts, err = readBytesLimited(br, '\r', 255)
+		if err != nil {
+			return err
+		}
+		res.StatusMessage = string(byts[:len(byts)-1])
+	} else {
+		res.StatusMessage = ""
 	}
-	res.StatusMessage = string(byts[:len(byts)-1])
 
 	err = readByteEqual(br, '\n')
 	if err != nil {

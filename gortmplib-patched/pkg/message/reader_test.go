@@ -10,7 +10,9 @@ import (
 
 	"github.com/bluenviron/gortmplib/pkg/amf0"
 	"github.com/bluenviron/gortmplib/pkg/bytecounter"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
 )
 
 var readWriterCases = []struct {
@@ -26,6 +28,16 @@ var readWriterCases = []struct {
 		[]byte{
 			0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x03,
 			0x00, 0x00, 0x00, 0x00, 0x02, 0xbd, 0x33, 0xb0,
+		},
+	},
+	{
+		"abort message",
+		&AbortMessage{
+			ChunkStreamID: 7,
+		},
+		[]byte{
+			0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
 		},
 	},
 	{
@@ -112,7 +124,7 @@ var readWriterCases = []struct {
 			ChunkStreamID:   0x4,
 			MessageStreamID: 0x1000000,
 			FourCC:          FourCCOpus,
-			OpusConfig: &OpusIDHeader{
+			OpusConfig: &opus.IDHeader{
 				Version:             0x1,
 				ChannelCount:        0x2,
 				PreSkip:             0x3801,
@@ -158,6 +170,30 @@ var readWriterCases = []struct {
 			0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x08,
 			0x01, 0x00, 0x00, 0x00, 0x90, 0x61, 0x63, 0x2d,
 			0x33,
+		},
+	},
+	{
+		"audio ex sequence start flac",
+		&AudioExSequenceStart{
+			ChunkStreamID:   0x4,
+			MessageStreamID: 0x1000000,
+			FourCC:          FourCCFLAC,
+			FlacConfig: &flac.StreamInfo{
+				MinBlockSize: 16,
+				MaxBlockSize: 65535,
+				SampleRate:   44100,
+				ChannelCount: 2,
+				BitDepth:     16,
+			},
+		},
+		[]byte{
+			0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x27, 0x08,
+			0x01, 0x00, 0x00, 0x00, 0x90, 0x66, 0x4c, 0x61,
+			0x43, 0x00, 0x10, 0xff, 0xff, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x0a, 0xc4, 0x42, 0xf0, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x00,
 		},
 	},
 	{
@@ -854,6 +890,36 @@ func TestReaderNonStandardControlChunkStreamID(t *testing.T) {
 	require.Equal(t, &UserControlStreamDry{
 		StreamID: 35534,
 	}, dec)
+}
+
+func TestReaderUserControlUndocumented(t *testing.T) {
+	for _, ca := range []struct {
+		name string
+		buf  []byte
+	}{
+		{
+			"type 31",
+			[]byte{
+				0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x04,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x1f,
+			},
+		},
+		{
+			"type 32",
+			[]byte{
+				0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x04,
+				0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
+			},
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			bc := bytecounter.NewReader(bytes.NewReader(ca.buf))
+			r := NewReader(bc, bc, nil)
+			dec, err := r.Read()
+			require.NoError(t, err)
+			require.Equal(t, &UserControlUndocumented{}, dec)
+		})
+	}
 }
 
 func FuzzReader(f *testing.F) {

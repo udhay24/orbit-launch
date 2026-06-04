@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"github.com/abema/go-mp4"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/gortmplib/pkg/amf0"
@@ -1398,7 +1400,13 @@ func TestReadTracks(t *testing.T) {
 			"opus, ffmpeg",
 			[]*Track{
 				{Codec: &codecs.Opus{
-					ChannelCount: 2,
+					IDHeader: &opus.IDHeader{
+						Version:             0x1,
+						ChannelCount:        2,
+						PreSkip:             14337,
+						InputSampleRate:     3227320320,
+						ChannelMappingTable: []uint8{},
+					},
 				}},
 			},
 			[]message.Message{
@@ -1424,7 +1432,7 @@ func TestReadTracks(t *testing.T) {
 					ChunkStreamID:   0x4,
 					MessageStreamID: 0x1000000,
 					FourCC:          0x4f707573,
-					OpusConfig: &message.OpusIDHeader{
+					OpusConfig: &opus.IDHeader{
 						Version:              0x1,
 						ChannelCount:         0x2,
 						PreSkip:              0x3801,
@@ -1521,6 +1529,66 @@ func TestReadTracks(t *testing.T) {
 			},
 		},
 		{
+			"flac, ffmpeg",
+			[]*Track{
+				{Codec: &codecs.FLAC{
+					StreamInfo: &flac.StreamInfo{
+						MinBlockSize: 4096,
+						MaxBlockSize: 4096,
+						SampleRate:   44100,
+						ChannelCount: 2,
+						BitDepth:     16,
+					},
+				}},
+			},
+			[]message.Message{
+				&message.DataAMF0{
+					ChunkStreamID:   4,
+					MessageStreamID: 0x1000000,
+					Payload: []any{
+						"@setDataFrame",
+						"onMetaData",
+						amf0.ECMAArray{
+							{Key: "duration", Value: float64(0)},
+							{Key: "audiodatarate", Value: float64(0)},
+							{Key: "audiosamplerate", Value: float64(44100)},
+							{Key: "audiosamplesize", Value: float64(16)},
+							{Key: "stereo", Value: true},
+							{Key: "audiocodecid", Value: float64(message.FourCCFLAC)},
+							{Key: "encoder", Value: "Lavf61.9.102"},
+							{Key: "filesize", Value: float64(0)},
+						},
+					},
+				},
+				&message.AudioExSequenceStart{
+					ChunkStreamID:   message.AudioChunkStreamID,
+					MessageStreamID: 0x1000000,
+					FourCC:          message.FourCCFLAC,
+					FlacConfig: &flac.StreamInfo{
+						MinBlockSize: 4096,
+						MaxBlockSize: 4096,
+						SampleRate:   44100,
+						ChannelCount: 2,
+						BitDepth:     16,
+					},
+				},
+				&message.AudioExCodedFrames{
+					ChunkStreamID:   message.AudioChunkStreamID,
+					DTS:             0,
+					MessageStreamID: 0x1000000,
+					FourCC:          message.FourCCFLAC,
+					Payload:         []byte{1, 2, 3, 4},
+				},
+				&message.AudioExCodedFrames{
+					ChunkStreamID:   message.AudioChunkStreamID,
+					DTS:             2 * time.Second,
+					MessageStreamID: 0x1000000,
+					FourCC:          message.FourCCFLAC,
+					Payload:         []byte{1, 2, 3, 4},
+				},
+			},
+		},
+		{
 			"issue mediamtx/3802 (double video config)",
 			[]*Track{
 				{Codec: &codecs.H264{
@@ -1605,6 +1673,93 @@ func TestReadTracks(t *testing.T) {
 
 			tracks := r.Tracks()
 			require.Equal(t, ca.tracks, tracks)
+		})
+	}
+}
+
+func TestReadTracksErrors(t *testing.T) {
+	for _, ca := range []struct {
+		name     string
+		errMsg   string
+		messages []message.Message
+	}{
+		{
+			"video multitrack coded frames without sequence start",
+			"video track 1 not configured",
+			[]message.Message{
+				&message.VideoExMultitrack{
+					MultitrackType: 0,
+					TrackID:        1,
+					Wrapped: &message.VideoExCodedFrames{
+						ChunkStreamID:   message.VideoChunkStreamID,
+						MessageStreamID: 0x1000000,
+						FourCC:          message.FourCCAVC,
+						DTS:             0,
+					},
+				},
+				&message.VideoExMultitrack{
+					MultitrackType: 0,
+					TrackID:        1,
+					Wrapped: &message.VideoExCodedFrames{
+						ChunkStreamID:   message.VideoChunkStreamID,
+						MessageStreamID: 0x1000000,
+						FourCC:          message.FourCCAVC,
+						DTS:             2 * time.Second,
+					},
+				},
+			},
+		},
+		{
+			"audio multitrack sequence start without coded frames",
+			"audio track 1 not configured",
+			[]message.Message{
+				&message.Video{
+					ChunkStreamID:   message.VideoChunkStreamID,
+					MessageStreamID: 0x1000000,
+					Codec:           message.CodecH264,
+					Type:            message.VideoTypeAU,
+					DTS:             0,
+				},
+				&message.AudioExMultitrack{
+					MultitrackType: 0,
+					TrackID:        1,
+					Wrapped: &message.AudioExSequenceStart{
+						ChunkStreamID:   message.AudioChunkStreamID,
+						MessageStreamID: 0x1000000,
+						FourCC:          message.FourCCMP4A,
+						AACConfig: &mpeg4audio.AudioSpecificConfig{
+							Type:         mpeg4audio.ObjectTypeAACLC,
+							SampleRate:   48000,
+							ChannelCount: 2,
+						},
+					},
+				},
+				&message.Video{
+					ChunkStreamID:   message.VideoChunkStreamID,
+					MessageStreamID: 0x1000000,
+					Codec:           message.CodecH264,
+					Type:            message.VideoTypeAU,
+					DTS:             2 * time.Second,
+				},
+			},
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			bc := bytecounter.NewReadWriter(&buf)
+			mrw := message.NewReadWriter(bc, bc, true)
+
+			for _, msg := range ca.messages {
+				err := mrw.Write(msg)
+				require.NoError(t, err)
+			}
+
+			c := &dummyConn{rw: &buf}
+			c.initialize()
+
+			r := &Reader{Conn: c}
+			err := r.Initialize()
+			require.EqualError(t, err, ca.errMsg)
 		})
 	}
 }

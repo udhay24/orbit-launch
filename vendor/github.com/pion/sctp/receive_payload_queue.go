@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package sctp
@@ -6,6 +6,7 @@ package sctp
 import (
 	"fmt"
 	"math/bits"
+	"strings"
 )
 
 type receivePayloadQueue struct {
@@ -102,6 +103,50 @@ func (q *receivePayloadQueue) pop(force bool) bool {
 	return false
 }
 
+// advanceCumulativeTSN moves the cumulative TSN forward and removes any queued
+// TSNs that are now covered by the cumulative point.
+func (q *receivePayloadQueue) advanceCumulativeTSN(cumulativeTSN uint32) {
+	if !sna32LT(q.cumulativeTSN, cumulativeTSN) {
+		return
+	}
+
+	if q.chunkSize == 0 || sna32LTE(q.tailTSN, cumulativeTSN) {
+		for i := range q.tsnBitmask {
+			q.tsnBitmask[i] = 0
+		}
+		q.chunkSize = 0
+		q.cumulativeTSN = cumulativeTSN
+		q.tailTSN = cumulativeTSN
+
+		return
+	}
+
+	q.clearTSNRange(q.cumulativeTSN+1, cumulativeTSN)
+	q.cumulativeTSN = cumulativeTSN
+	if q.chunkSize == 0 {
+		q.tailTSN = cumulativeTSN
+	}
+}
+
+func (q *receivePayloadQueue) clearTSNRange(startTSN, endTSN uint32) {
+	for remaining := endTSN - startTSN + 1; remaining > 0; {
+		offset := startTSN % 64
+		n := min(remaining, 64-offset)
+		mask := ^uint64(0)
+		if n < 64 {
+			mask = ((uint64(1) << n) - 1) << offset
+		}
+
+		index := int(startTSN/64) % len(q.tsnBitmask)
+		cleared := q.tsnBitmask[index] & mask
+		q.tsnBitmask[index] &^= mask
+		q.chunkSize -= bits.OnesCount64(cleared)
+
+		startTSN += n
+		remaining -= n
+	}
+}
+
 // popDuplicates returns an array of TSN values that were duplicated.
 func (q *receivePayloadQueue) popDuplicates() []uint32 {
 	dups := q.dupTSN
@@ -168,12 +213,13 @@ func (q *receivePayloadQueue) getGapAckBlocks() (gapAckBlocks []gapAckBlock) {
 
 func (q *receivePayloadQueue) getGapAckBlocksString() string {
 	gapAckBlocks := q.getGapAckBlocks()
-	str := fmt.Sprintf("cumTSN=%d", q.cumulativeTSN)
+	var str strings.Builder
+	fmt.Fprintf(&str, "cumTSN=%d", q.cumulativeTSN)
 	for _, b := range gapAckBlocks {
-		str += fmt.Sprintf(",%d-%d", b.start, b.end)
+		fmt.Fprintf(&str, ",%d-%d", b.start, b.end)
 	}
 
-	return str
+	return str.String()
 }
 
 func (q *receivePayloadQueue) getLastTSNReceived() (uint32, bool) {

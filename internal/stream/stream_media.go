@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -11,16 +12,16 @@ import (
 )
 
 type streamMedia struct {
-	media             *description.Media
-	alwaysAvailable   bool
-	rtpMaxPayloadSize int
-	replaceNTP        bool
-	addBytesReceived  func(uint64)
-	addBytesSent      func(uint64)
-	updateLastTime    func(time.Duration)
-	writeRTSP         func(*description.Media, []*rtp.Packet, time.Time)
-	processingErrors  *errordumper.Dumper
-	parent            logger.Writer
+	media                *description.Media
+	alwaysAvailable      bool
+	rtpMaxPayloadSize    int
+	replaceNTP           bool
+	inboundBytes         *atomic.Uint64
+	outboundBytes        *atomic.Uint64
+	updateLastTime       func(time.Duration)
+	writeRTSP            func(*description.Media, []*rtp.Packet, time.Time)
+	inboundFramesInError *errordumper.Dumper
+	parent               logger.Writer
 
 	formats map[format.Format]*streamFormat
 }
@@ -30,17 +31,17 @@ func (sm *streamMedia) initialize() error {
 
 	for _, forma := range sm.media.Formats {
 		sf := &streamFormat{
-			format:            forma,
-			media:             sm.media,
-			alwaysAvailable:   sm.alwaysAvailable,
-			rtpMaxPayloadSize: sm.rtpMaxPayloadSize,
-			replaceNTP:        sm.replaceNTP,
-			processingErrors:  sm.processingErrors,
-			addBytesReceived:  sm.addBytesReceived,
-			addBytesSent:      sm.addBytesSent,
-			updateLastTime:    sm.updateLastTime,
-			writeRTSP:         sm.writeRTSP,
-			parent:            sm.parent,
+			format:               forma,
+			media:                sm.media,
+			alwaysAvailable:      sm.alwaysAvailable,
+			rtpMaxPayloadSize:    sm.rtpMaxPayloadSize,
+			replaceNTP:           sm.replaceNTP,
+			inboundFramesInError: sm.inboundFramesInError,
+			inboundBytes:         sm.inboundBytes,
+			outboundBytes:        sm.outboundBytes,
+			updateLastTime:       sm.updateLastTime,
+			writeRTSP:            sm.writeRTSP,
+			parent:               sm.parent,
 		}
 		err := sf.initialize()
 		if err != nil {

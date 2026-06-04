@@ -24,17 +24,15 @@ import (
 	"github.com/pion/rtp"
 
 	"github.com/bluenviron/gortsplib/v5/internal/asyncprocessor"
+	"github.com/bluenviron/gortsplib/v5/internal/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/auth"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
-	"github.com/bluenviron/gortsplib/v5/pkg/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/conn"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/headers"
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
 	"github.com/bluenviron/gortsplib/v5/pkg/mikey"
-	"github.com/bluenviron/gortsplib/v5/pkg/rtpreceiver"
-	"github.com/bluenviron/gortsplib/v5/pkg/rtpsender"
 	"github.com/bluenviron/gortsplib/v5/pkg/rtptime"
 	"github.com/bluenviron/gortsplib/v5/pkg/sdp"
 )
@@ -109,7 +107,7 @@ func canonicalAddr(u *base.URL) string {
 
 	port := u.Port()
 	if port == "" {
-		if u.Scheme == "rtsp" {
+		if u.Scheme == schemeRTSP {
 			port = "554"
 		} else { // rtsps
 			port = "322"
@@ -245,6 +243,16 @@ func generateAnnounceData(
 	return data, nil
 }
 
+func announceDataFormatSSRCs(formats map[uint8]*clientAnnounceDataFormat) []uint32 {
+	ssrcs := make([]uint32, len(formats))
+	n := 0
+	for _, af := range formats {
+		ssrcs[n] = af.localSSRC
+		n++
+	}
+	return ssrcs
+}
+
 func prepareForAnnounce(
 	desc *description.Session,
 	announceData map[*description.Media]*clientAnnounceDataMedia,
@@ -257,26 +265,19 @@ func prepareForAnnounce(
 			m.Profile = headers.TransportProfileSAVP
 			announceDataMedia := announceData[m]
 
-			ssrcs := make([]uint32, len(m.Formats))
-			n := 0
-			for _, af := range announceDataMedia.formats {
-				ssrcs[n] = af.localSSRC
-				n++
-			}
-
 			// create a temporary Context.
 			// Context is needed to extract ROC, but since client has not started streaming,
 			// ROC is always zero, therefore a temporary Context can be used.
 			srtpCtx := &wrappedSRTPContext{
 				key:   announceDataMedia.srtpOutKey,
-				ssrcs: ssrcs,
+				ssrcs: announceDataFormatSSRCs(announceDataMedia.formats),
 			}
 			err := srtpCtx.initialize()
 			if err != nil {
 				return err
 			}
 
-			mikeyMsg, err := mikeyGenerate(srtpCtx)
+			mikeyMsg, err := contextToMikey(srtpCtx)
 			if err != nil {
 				return err
 			}
@@ -483,10 +484,10 @@ type Client struct {
 	// This can be increased to reduce packet losses.
 	// It defaults to the operating system default value.
 	UDPReadBufferSize int
-	// Size of the queue of outgoing packets.
+	// Size of the queue of outbound packets.
 	// It defaults to 256.
 	WriteQueueSize int
-	// maximum size of outgoing RTP / RTCP packets.
+	// maximum size of outbound RTP / RTCP packets.
 	// This must be less than the IPv4/UDP MTU (1472 bytes).
 	// It defaults to 1472.
 	MaxPacketSize int
@@ -497,7 +498,7 @@ type Client struct {
 	DisableRTCPSenderReports bool
 	// explicitly request back channels to the server.
 	RequestBackChannels bool
-	// Range of ports used as source port in outgoing UDP packets.
+	// Range of ports used as source port in outbound UDP packets.
 	// It defaults to [10000, 65535].
 	UDPSourcePortRange [2]uint16
 
@@ -510,6 +511,13 @@ type Client struct {
 	// function used to initialize UDP listeners.
 	// It defaults to net.ListenPacket.
 	ListenPacket func(network, address string) (net.PacketConn, error)
+	// function used to resolve IP addresses.
+	// It defaults to net.ResolveIPAddr.
+	ResolveIPAddr func(network, address string) (*net.IPAddr, error)
+	// function used to initialize a TLS connection.
+	// When nil, DialContext and tls.Client are used in its place.
+	// It defaults to nil.
+	DialTLSContext func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 	//
 	// Callbacks (all optional)
@@ -538,42 +546,43 @@ type Client struct {
 	receiverReportPeriod time.Duration
 	checkTimeoutPeriod   time.Duration
 
-	ctx                  context.Context
-	ctxCancel            func()
-	propsMutex           sync.RWMutex
-	state                clientState
-	nconn                net.Conn
-	conn                 *conn.Conn
-	session              string
-	sender               *auth.Sender
-	cseq                 int
-	optionsSent          bool
-	useGetParameter      bool
-	lastDescribeURL      *base.URL
-	lastDescribeDesc     *description.Session
-	baseURL              *base.URL
-	announceData         map[*description.Media]*clientAnnounceDataMedia // record
-	setuppedTransport    *SessionTransport
-	backChannelSetupped  bool
-	stdChannelSetupped   bool
-	setuppedMedias       map[*description.Media]*clientMedia
-	tcpCallbackByChannel map[int]readFunc
-	lastRange            *headers.Range
-	checkTimeoutTimer    *time.Timer
-	checkTimeoutInitial  bool
-	tcpLastFrameTime     *int64
-	keepAlivePeriod      time.Duration
-	keepAliveTimer       *time.Timer
-	closeError           error
-	writerMutex          sync.RWMutex
-	writer               *asyncprocessor.Processor
-	reader               *clientReader
-	timeDecoder          *rtptime.GlobalDecoder
-	mustClose            bool
-	tcpFrame             *base.InterleavedFrame
-	tcpBuffer            []byte
-	bytesReceived        *uint64
-	bytesSent            *uint64
+	ctx                   context.Context
+	ctxCancel             func()
+	propsMutex            sync.RWMutex
+	state                 clientState
+	nconn                 net.Conn
+	conn                  *conn.Conn
+	session               string
+	sender                *auth.Sender
+	cseq                  int
+	optionsSent           bool
+	useGetParameter       bool
+	lastDescribeURL       *base.URL
+	lastDescribeDesc      *description.Session
+	baseURL               *base.URL
+	announceData          map[*description.Media]*clientAnnounceDataMedia // record
+	setuppedTransport     *SessionTransport
+	axisClientManagedKeys bool
+	backChannelSetupped   bool
+	stdChannelSetupped    bool
+	setuppedMedias        map[*description.Media]*clientMedia
+	tcpCallbackByChannel  map[int]readFunc
+	lastRange             *headers.Range
+	checkTimeoutTimer     *time.Timer
+	checkTimeoutInitial   bool
+	tcpLastInboundTime    atomic.Int64
+	keepAlivePeriod       time.Duration
+	keepAliveTimer        *time.Timer
+	closeError            error
+	writerMutex           sync.RWMutex
+	writer                *asyncprocessor.Processor
+	reader                *clientReader
+	timeDecoder           *rtptime.GlobalDecoder
+	mustClose             bool
+	tcpFrame              *base.InterleavedFrame
+	tcpBuffer             []byte
+	bytesReceived         atomic.Uint64
+	bytesSent             atomic.Uint64
 
 	// in
 	chOptions     chan optionsReq
@@ -627,6 +636,9 @@ func (c *Client) Start() error {
 	}
 	if c.ListenPacket == nil {
 		c.ListenPacket = net.ListenPacket
+	}
+	if c.ResolveIPAddr == nil {
+		c.ResolveIPAddr = net.ResolveIPAddr
 	}
 
 	// callbacks
@@ -691,8 +703,6 @@ func (c *Client) Start() error {
 	c.checkTimeoutTimer = emptyTimer()
 	c.keepAlivePeriod = 30 * time.Second
 	c.keepAliveTimer = emptyTimer()
-	c.bytesReceived = new(uint64)
-	c.bytesSent = new(uint64)
 
 	c.chOptions = make(chan optionsReq)
 	c.chDescribe = make(chan describeReq)
@@ -1002,11 +1012,13 @@ func (c *Client) trySwitchingProtocol() error {
 
 	prevBaseURL := c.baseURL
 	prevMedias := c.setuppedMedias
+	prevProfile := c.setuppedTransport.Profile
 
 	c.reset()
 
 	c.setuppedTransport = &SessionTransport{
 		Protocol: ProtocolTCP,
+		Profile:  prevProfile,
 	}
 
 	// some Hikvision cameras require a describe before a setup
@@ -1064,7 +1076,6 @@ func (c *Client) startTransportRoutines() {
 
 		default: // TCP
 			c.checkTimeoutTimer = time.NewTimer(c.checkTimeoutPeriod)
-			c.tcpLastFrameTime = ptrOf(c.timeNow().Unix())
 		}
 	}
 
@@ -1127,12 +1138,12 @@ func (c *Client) destroyWriter() {
 	c.writerMutex.Unlock()
 }
 
-func (c *Client) connOpen() error {
+func (c *Client) connOpen(u *base.URL) error {
 	if c.nconn != nil {
 		return nil
 	}
 
-	if c.Scheme != "rtsp" && c.Scheme != "rtsps" {
+	if c.Scheme != schemeRTSP && c.Scheme != schemeRTSPS {
 		return liberrors.ErrClientUnsupportedScheme{Scheme: c.Scheme}
 	}
 
@@ -1144,48 +1155,64 @@ func (c *Client) connOpen() error {
 		Host:   c.Host,
 	})
 
-	var tlsConfig *tls.Config
-	if c.Scheme == "rtsps" {
-		tlsConfig = c.TLSConfig
-		if tlsConfig == nil {
-			host, _, _ := net.SplitHostPort(addr)
-			tlsConfig = &tls.Config{
-				ServerName: host,
-			}
-		}
-	}
-
 	var nconn net.Conn
 
 	switch c.Tunnel {
 	case TunnelHTTP:
 		var err error
-		nconn, err = newClientTunnelHTTP(dialCtx, c.DialContext, addr, tlsConfig)
+		nconn, err = newClientTunnelHTTP(dialCtx, addr, (c.Scheme == schemeRTSPS),
+			c.TLSConfig, c.DialContext, c.DialTLSContext, u)
 		if err != nil {
 			return err
 		}
 
 	case TunnelWebSocket:
 		var err error
-		nconn, err = newClientTunnelWebSocket(dialCtx, c.DialContext, addr, tlsConfig)
+		nconn, err = newClientTunnelWebSocket(dialCtx, addr, (c.Scheme == schemeRTSPS),
+			c.TLSConfig, c.DialContext, c.DialTLSContext)
 		if err != nil {
 			return err
 		}
 
 	default:
-		var err error
-		nconn, err = c.DialContext(dialCtx, "tcp", addr)
-		if err != nil {
-			return err
-		}
+		if c.Scheme == schemeRTSPS && c.DialTLSContext != nil {
+			var err error
+			nconn, err = c.DialTLSContext(dialCtx, "tcp", addr)
+			if err != nil {
+				return err
+			}
+		} else {
+			var err error
+			nconn, err = c.DialContext(dialCtx, "tcp", addr)
+			if err != nil {
+				return err
+			}
 
-		if tlsConfig != nil {
-			nconn = tls.Client(nconn, tlsConfig)
+			if c.Scheme == schemeRTSPS {
+				// clone TLS config and fill ServerName if empty.
+				// this is the same behavior of http.Client.
+				// https://cs.opensource.google/go/go/+/master:src/net/http/transport.go;l=1754;drc=a4b534f5e42fe58d58c0ff0562d76680cedb0466
+
+				tlsConfig := c.TLSConfig
+
+				if tlsConfig == nil {
+					tlsConfig = &tls.Config{}
+				} else {
+					tlsConfig = tlsConfig.Clone()
+				}
+
+				if tlsConfig.ServerName == "" {
+					host, _, _ := net.SplitHostPort(addr)
+					tlsConfig.ServerName = host
+				}
+
+				nconn = tls.Client(nconn, tlsConfig)
+			}
 		}
 	}
 
 	c.nconn = nconn
-	bc := bytecounter.New(c.nconn, c.bytesReceived, c.bytesSent)
+	bc := bytecounter.New(c.nconn, &c.bytesReceived, &c.bytesSent)
 	c.conn = conn.NewConn(bufio.NewReader(bc), bc)
 	c.reader = &clientReader{
 		c: c,
@@ -1280,12 +1307,12 @@ func (c *Client) do(req *base.Request, skipResponse bool) (*base.Response, error
 
 func (c *Client) atLeastOneUDPPacketHasBeenReceived() bool {
 	for _, ct := range c.setuppedMedias {
-		lft := atomic.LoadInt64(ct.udpRTPListener.lastPacketTime)
+		lft := ct.udpRTPListener.lastPacketTime.Load()
 		if lft != 0 {
 			return true
 		}
 
-		lft = atomic.LoadInt64(ct.udpRTCPListener.lastPacketTime)
+		lft = ct.udpRTCPListener.lastPacketTime.Load()
 		if lft != 0 {
 			return true
 		}
@@ -1296,12 +1323,12 @@ func (c *Client) atLeastOneUDPPacketHasBeenReceived() bool {
 func (c *Client) isInUDPTimeout() bool {
 	now := c.timeNow()
 	for _, ct := range c.setuppedMedias {
-		lft := time.Unix(atomic.LoadInt64(ct.udpRTPListener.lastPacketTime), 0)
+		lft := time.Unix(ct.udpRTPListener.lastPacketTime.Load(), 0)
 		if now.Sub(lft) < c.ReadTimeout {
 			return false
 		}
 
-		lft = time.Unix(atomic.LoadInt64(ct.udpRTCPListener.lastPacketTime), 0)
+		lft = time.Unix(ct.udpRTCPListener.lastPacketTime.Load(), 0)
 		if now.Sub(lft) < c.ReadTimeout {
 			return false
 		}
@@ -1311,7 +1338,7 @@ func (c *Client) isInUDPTimeout() bool {
 
 func (c *Client) isInTCPTimeout() bool {
 	now := c.timeNow()
-	lft := time.Unix(atomic.LoadInt64(c.tcpLastFrameTime), 0)
+	lft := time.Unix(c.tcpLastInboundTime.Load(), 0)
 	return now.Sub(lft) >= c.ReadTimeout
 }
 
@@ -1363,7 +1390,7 @@ func (c *Client) doOptions(u *base.URL) (*base.Response, error) {
 		return nil, err
 	}
 
-	err = c.connOpen()
+	err = c.connOpen(u)
 	if err != nil {
 		return nil, err
 	}
@@ -1414,7 +1441,7 @@ func (c *Client) doDescribe(u *base.URL) (*description.Session, *base.Response, 
 		return nil, nil, err
 	}
 
-	err = c.connOpen()
+	err = c.connOpen(u)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1449,7 +1476,7 @@ func (c *Client) doDescribe(u *base.URL) (*description.Session, *base.Response, 
 				return nil, nil, err
 			}
 
-			if c.Scheme == "rtsps" && ru.Scheme != "rtsps" {
+			if c.Scheme == schemeRTSPS && ru.Scheme != schemeRTSPS {
 				return nil, nil, fmt.Errorf("connection cannot be downgraded from RTSPS to RTSP")
 			}
 
@@ -1527,7 +1554,7 @@ func (c *Client) doAnnounce(u *base.URL, desc *description.Session) (*base.Respo
 		return nil, fmt.Errorf("recording with UDP multicast is not supported")
 	}
 
-	err = c.connOpen()
+	err = c.connOpen(u)
 	if err != nil {
 		return nil, err
 	}
@@ -1536,7 +1563,7 @@ func (c *Client) doAnnounce(u *base.URL, desc *description.Session) (*base.Respo
 	var secure bool
 
 	// Determine secure flag: TCP+RTSPS depends on media profile, others depend on scheme
-	if c.Protocol != nil && *c.Protocol == ProtocolTCP && c.Scheme == "rtsps" {
+	if c.Protocol != nil && *c.Protocol == ProtocolTCP && c.Scheme == schemeRTSPS {
 		// Check for all medias: if any media uses a secure profile, then secure is true
 		for _, medi := range desc.Medias {
 			if isSecure(medi.Profile) {
@@ -1545,7 +1572,7 @@ func (c *Client) doAnnounce(u *base.URL, desc *description.Session) (*base.Respo
 			}
 		}
 	} else {
-		secure = c.Scheme == "rtsps"
+		secure = (c.Scheme == schemeRTSPS)
 	}
 
 	announceData, err := generateAnnounceData(desc, secure)
@@ -1616,7 +1643,7 @@ func (c *Client) doSetup(
 		return nil, err
 	}
 
-	err = c.connOpen()
+	err = c.connOpen(baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1643,14 +1670,14 @@ func (c *Client) doSetup(
 	// use transport from config, secure flag from server
 	case c.Protocol != nil:
 		protocol = *c.Protocol
-		if isSecure(medi.Profile) && c.Scheme == "rtsps" {
+		if isSecure(medi.Profile) && c.Scheme == schemeRTSPS {
 			th.Profile = headers.TransportProfileSAVP
 		} else {
 			th.Profile = headers.TransportProfileAVP
 		}
 
 	default:
-		if isSecure(medi.Profile) && c.Scheme == "rtsps" {
+		if isSecure(medi.Profile) && c.Scheme == schemeRTSPS {
 			th.Profile = headers.TransportProfileSAVP
 		} else {
 			th.Profile = headers.TransportProfileAVP
@@ -1659,7 +1686,7 @@ func (c *Client) doSetup(
 		// try
 		// - UDP if unencrypted or secure is supported by server
 		// - otherwise, TCP
-		if c.Tunnel == TunnelNone && (th.Profile == headers.TransportProfileSAVP || c.Scheme == "rtsp") {
+		if c.Tunnel == TunnelNone && (th.Profile == headers.TransportProfileSAVP || c.Scheme == schemeRTSP) {
 			protocol = ProtocolUDP
 		} else {
 			protocol = ProtocolTCP
@@ -1700,7 +1727,7 @@ func (c *Client) doSetup(
 
 	switch protocol {
 	case ProtocolUDP, ProtocolUDPMulticast:
-		if c.Scheme == "rtsps" && !isSecure(th.Profile) {
+		if c.Scheme == schemeRTSPS && !isSecure(th.Profile) {
 			return nil, fmt.Errorf("unable to setup secure UDP")
 		}
 
@@ -1770,8 +1797,19 @@ func (c *Client) doSetup(
 			}
 		}
 
+		var srtpOutMki []byte
+
+		if c.axisClientManagedKeys {
+			srtpOutMki = make([]byte, mkiLength)
+			_, err = rand.Read(srtpOutMki)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		srtpOutCtx = &wrappedSRTPContext{
 			key:   srtpOutKey,
+			mki:   srtpOutMki,
 			ssrcs: ssrcsMapToList(localSSRCs),
 		}
 		err = srtpOutCtx.initialize()
@@ -1780,7 +1818,7 @@ func (c *Client) doSetup(
 		}
 
 		var mikeyMsg *mikey.Message
-		mikeyMsg, err = mikeyGenerate(srtpOutCtx)
+		mikeyMsg, err = contextToMikey(srtpOutCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -1809,7 +1847,8 @@ func (c *Client) doSetup(
 	if res.StatusCode != base.StatusOK {
 		// switch transport automatically
 		if res.StatusCode == base.StatusUnsupportedTransport &&
-			c.setuppedTransport == nil && c.Protocol == nil {
+			c.setuppedTransport == nil &&
+			c.Protocol == nil {
 			c.OnTransportSwitch(liberrors.ErrClientSwitchToTCP2{})
 			c.setuppedTransport = &SessionTransport{
 				Protocol: ProtocolTCP,
@@ -1817,6 +1856,13 @@ func (c *Client) doSetup(
 			}
 
 			return c.doSetup(baseURL, medi, 0, 0)
+		}
+
+		if res.StatusCode == base.StatusKeyManagementFailure &&
+			strings.ToLower(res.StatusMessage) == "key management failure" &&
+			!c.axisClientManagedKeys {
+			c.axisClientManagedKeys = true
+			return c.doSetup(baseURL, medi, rtpPort, rtcpPort)
 		}
 
 		return nil, liberrors.ErrClientBadStatusCode{Code: res.StatusCode, Message: res.StatusMessage}
@@ -1874,8 +1920,8 @@ func (c *Client) doSetup(
 			if ip := net.ParseIP(*thRes.Source2); ip != nil {
 				remoteIP = ip
 			} else {
-				var addr *net.UDPAddr
-				addr, err = net.ResolveUDPAddr("udp", *thRes.Source2)
+				var addr *net.IPAddr
+				addr, err = c.ResolveIPAddr("ip", *thRes.Source2)
 				if err != nil {
 					return nil, fmt.Errorf("unable to solve source host: %w", err)
 				}
@@ -1919,8 +1965,8 @@ func (c *Client) doSetup(
 			if ip := net.ParseIP(*thRes.Source2); ip != nil {
 				remoteIP = ip
 			} else {
-				var addr *net.UDPAddr
-				addr, err = net.ResolveUDPAddr("udp", *thRes.Source2)
+				var addr *net.IPAddr
+				addr, err = c.ResolveIPAddr("ip", *thRes.Source2)
 				if err != nil {
 					return nil, fmt.Errorf("unable to solve source host: %w", err)
 				}
@@ -1937,8 +1983,8 @@ func (c *Client) doSetup(
 		if ip := net.ParseIP(*thRes.Destination2); ip != nil {
 			destIP = ip
 		} else {
-			var addr *net.UDPAddr
-			addr, err = net.ResolveUDPAddr("udp", *thRes.Destination2)
+			var addr *net.IPAddr
+			addr, err = c.ResolveIPAddr("ip", *thRes.Destination2)
 			if err != nil {
 				return nil, fmt.Errorf("unable to solve destination host: %w", err)
 			}
@@ -2011,34 +2057,45 @@ func (c *Client) doSetup(
 	}
 
 	if isSecure(th.Profile) {
-		var mikeyMsg *mikey.Message
-
-		// extract key-mgmt from (in order of priority):
-		// - response
-		// - media SDP attributes
-		// - session SDP attributes
-		switch {
-		case res.Header["KeyMgmt"] != nil:
-			var keyMgmt headers.KeyMgmt
-			err = keyMgmt.Unmarshal(res.Header["KeyMgmt"])
+		if c.axisClientManagedKeys {
+			srtpInCtx = &wrappedSRTPContext{
+				key: srtpOutCtx.key,
+				mki: srtpOutCtx.mki,
+			}
+			err = srtpInCtx.initialize()
 			if err != nil {
 				return nil, err
 			}
-			mikeyMsg = keyMgmt.MikeyMessage
+		} else {
+			var mikeyMsg *mikey.Message
 
-		case medi.KeyMgmtMikey != nil:
-			mikeyMsg = medi.KeyMgmtMikey
+			// extract key-mgmt from (in order of priority):
+			// - response
+			// - media SDP attributes
+			// - session SDP attributes
+			switch {
+			case res.Header["KeyMgmt"] != nil:
+				var keyMgmt headers.KeyMgmt
+				err = keyMgmt.Unmarshal(res.Header["KeyMgmt"])
+				if err != nil {
+					return nil, err
+				}
+				mikeyMsg = keyMgmt.MikeyMessage
 
-		case c.lastDescribeDesc.KeyMgmtMikey != nil:
-			mikeyMsg = c.lastDescribeDesc.KeyMgmtMikey
+			case medi.KeyMgmtMikey != nil:
+				mikeyMsg = medi.KeyMgmtMikey
 
-		default:
-			return nil, fmt.Errorf("server did not provide key-mgmt data in any supported way")
-		}
+			case c.lastDescribeDesc.KeyMgmtMikey != nil:
+				mikeyMsg = c.lastDescribeDesc.KeyMgmtMikey
 
-		srtpInCtx, err = mikeyToContext(mikeyMsg)
-		if err != nil {
-			return nil, err
+			default:
+				return nil, fmt.Errorf("server did not provide key-mgmt data in any supported way")
+			}
+
+			srtpInCtx, err = mikeyToContext(mikeyMsg)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -2420,7 +2477,7 @@ func (c *Client) WritePacketRTCP(medi *description.Media, pkt rtcp.Packet) error
 	return cm.writePacketRTCP(pkt)
 }
 
-// PacketPTS returns the PTS (presentation timestamp) of an incoming RTP packet.
+// PacketPTS returns the PTS (presentation timestamp) of an inbound RTP packet.
 // It is computed by decoding the packet timestamp and sychronizing it with other tracks.
 func (c *Client) PacketPTS(medi *description.Media, pkt *rtp.Packet) (int64, bool) {
 	cm := c.setuppedMedias[medi]
@@ -2428,7 +2485,7 @@ func (c *Client) PacketPTS(medi *description.Media, pkt *rtp.Packet) (int64, boo
 	return c.timeDecoder.Decode(ct.format, pkt)
 }
 
-// PacketNTP returns the NTP (absolute timestamp) of an incoming RTP packet.
+// PacketNTP returns the NTP (absolute timestamp) of an inbound RTP packet.
 // The NTP is computed from RTCP sender reports.
 func (c *Client) PacketNTP(medi *description.Media, pkt *rtp.Packet) (time.Time, bool) {
 	cm := c.setuppedMedias[medi]
@@ -2456,192 +2513,19 @@ func (c *Client) Stats() *ClientStats {
 
 	mediaStats := func() map[*description.Media]SessionStatsMedia { //nolint:dupl
 		ret := make(map[*description.Media]SessionStatsMedia, len(c.setuppedMedias))
-
 		for med, sm := range c.setuppedMedias {
-			ret[med] = SessionStatsMedia{
-				BytesReceived:       atomic.LoadUint64(sm.bytesReceived),
-				BytesSent:           atomic.LoadUint64(sm.bytesSent),
-				RTPPacketsInError:   atomic.LoadUint64(sm.rtpPacketsInError),
-				RTCPPacketsReceived: atomic.LoadUint64(sm.rtcpPacketsReceived),
-				RTCPPacketsSent:     atomic.LoadUint64(sm.rtcpPacketsSent),
-				RTCPPacketsInError:  atomic.LoadUint64(sm.rtcpPacketsInError),
-				Formats: func() map[format.Format]SessionStatsFormat {
-					ret := make(map[format.Format]SessionStatsFormat, len(sm.formats))
-
-					for _, fo := range sm.formats {
-						recvStats := func() *rtpreceiver.Stats {
-							if fo.rtpReceiver != nil {
-								return fo.rtpReceiver.Stats()
-							}
-							return nil
-						}()
-						sentStats := func() *rtpsender.Stats {
-							if fo.rtpSender != nil {
-								return fo.rtpSender.Stats()
-							}
-							return nil
-						}()
-
-						ret[fo.format] = SessionStatsFormat{ //nolint:dupl
-							RTPPacketsReceived: func() uint64 {
-								if recvStats != nil {
-									return recvStats.TotalReceived
-								}
-								return 0
-							}(),
-							RTPPacketsSent: func() uint64 {
-								if sentStats != nil {
-									return sentStats.TotalSent
-								}
-								return 0
-							}(),
-							RTPPacketsLost: func() uint64 {
-								if recvStats != nil {
-									return recvStats.TotalLost
-								}
-								return 0
-							}(),
-							LocalSSRC: fo.localSSRC,
-							RemoteSSRC: func() uint32 {
-								if v, ok := fo.remoteSSRC(); ok {
-									return v
-								}
-								return 0
-							}(),
-							RTPPacketsLastSequenceNumber: func() uint16 {
-								if recvStats != nil {
-									return recvStats.LastSequenceNumber
-								}
-								if sentStats != nil {
-									return sentStats.LastSequenceNumber
-								}
-								return 0
-							}(),
-							RTPPacketsLastRTP: func() uint32 {
-								if recvStats != nil {
-									return recvStats.LastRTP
-								}
-								if sentStats != nil {
-									return sentStats.LastRTP
-								}
-								return 0
-							}(),
-							RTPPacketsLastNTP: func() time.Time {
-								if recvStats != nil {
-									return recvStats.LastNTP
-								}
-								if sentStats != nil {
-									return sentStats.LastNTP
-								}
-								return time.Time{}
-							}(),
-							RTPPacketsJitter: func() float64 {
-								if recvStats != nil {
-									return recvStats.Jitter
-								}
-								return 0
-							}(),
-						}
-					}
-
-					return ret
-				}(),
-			}
+			ret[med] = sm.stats()
 		}
-
 		return ret
 	}()
 
 	return &ClientStats{
 		Conn: ConnStats{
-			BytesReceived: atomic.LoadUint64(c.bytesReceived),
-			BytesSent:     atomic.LoadUint64(c.bytesSent),
+			InboundBytes:  c.bytesReceived.Load(),
+			OutboundBytes: c.bytesSent.Load(),
+			BytesReceived: c.bytesReceived.Load(),
+			BytesSent:     c.bytesSent.Load(),
 		},
-		Session: SessionStats{ //nolint:dupl
-			BytesReceived: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					v += ms.BytesReceived
-				}
-				return v
-			}(),
-			BytesSent: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					v += ms.BytesSent
-				}
-				return v
-			}(),
-			RTPPacketsReceived: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					for _, f := range ms.Formats {
-						v += f.RTPPacketsReceived
-					}
-				}
-				return v
-			}(),
-			RTPPacketsSent: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					for _, f := range ms.Formats {
-						v += f.RTPPacketsSent
-					}
-				}
-				return v
-			}(),
-			RTPPacketsLost: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					for _, f := range ms.Formats {
-						v += f.RTPPacketsLost
-					}
-				}
-				return v
-			}(),
-			RTPPacketsInError: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					v += ms.RTPPacketsInError
-				}
-				return v
-			}(),
-			RTPPacketsJitter: func() float64 {
-				v := float64(0)
-				n := float64(0)
-				for _, ms := range mediaStats {
-					for _, f := range ms.Formats {
-						v += f.RTPPacketsJitter
-						n++
-					}
-				}
-				if n != 0 {
-					return v / n
-				}
-				return 0
-			}(),
-			RTCPPacketsReceived: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					v += ms.RTCPPacketsReceived
-				}
-				return v
-			}(),
-			RTCPPacketsSent: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					v += ms.RTCPPacketsSent
-				}
-				return v
-			}(),
-			RTCPPacketsInError: func() uint64 {
-				v := uint64(0)
-				for _, ms := range mediaStats {
-					v += ms.RTCPPacketsInError
-				}
-				return v
-			}(),
-			Medias: mediaStats,
-		},
+		Session: sessionStatsFromMedias(mediaStats),
 	}
 }

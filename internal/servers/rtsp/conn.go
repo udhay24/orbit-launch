@@ -54,7 +54,7 @@ type connParent interface {
 }
 
 type conn struct {
-	isTLS               bool
+	encryption          bool
 	rtspAddress         string
 	authMethods         []rtspauth.VerifyMethod
 	readTimeout         conf.Duration
@@ -86,11 +86,11 @@ func (c *conn) initialize() {
 		RunOnDisconnect:     c.runOnDisconnect,
 		RTSPAddress:         c.rtspAddress,
 		Desc: defs.APIPathReader{
-			Type: func() string {
-				if c.isTLS {
-					return "rtspsConn"
+			Type: func() defs.APIPathReaderType {
+				if c.encryption {
+					return defs.APIPathReaderTypeRTSPSConn
 				}
-				return "rtspConn"
+				return defs.APIPathReaderTypeRTSPConn
 			}(),
 			ID: c.uuid.String(),
 		},
@@ -170,7 +170,7 @@ func (c *conn) onDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx,
 			return res, nil, err2
 		}
 
-		var terr2 defs.PathNoStreamAvailableError
+		var terr2 *defs.PathNoStreamAvailableError
 		if errors.As(res.Err, &terr2) {
 			return &base.Response{
 				StatusCode: base.StatusNotFound,
@@ -184,7 +184,7 @@ func (c *conn) onDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx,
 
 	if res.Redirect != "" {
 		return &base.Response{
-			StatusCode: base.StatusMovedPermanently,
+			StatusCode: base.StatusFound,
 			Header: base.Header{
 				"Location": base.HeaderValue{absoluteURL(ctx.Request, res.Redirect)},
 			},
@@ -192,7 +192,7 @@ func (c *conn) onDescribe(ctx *gortsplib.ServerHandlerOnDescribeCtx,
 	}
 
 	var strm *gortsplib.ServerStream
-	if !c.isTLS {
+	if !c.encryption {
 		strm = res.Stream.RTSPStream(c.rserver)
 	} else {
 		strm = res.Stream.RTSPSStream(c.rserver)
@@ -233,7 +233,9 @@ func (c *conn) apiItem() *defs.APIRTSPConn {
 			return nil
 		}(),
 		Tunnel:        tunnelLabel(c.rconn.Transport().Tunnel),
-		BytesReceived: stats.BytesReceived,
-		BytesSent:     stats.BytesSent,
+		InboundBytes:  stats.InboundBytes,
+		OutboundBytes: stats.OutboundBytes,
+		BytesReceived: stats.InboundBytes,
+		BytesSent:     stats.OutboundBytes,
 	}
 }

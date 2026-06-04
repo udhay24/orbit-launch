@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/bluenviron/gortsplib/v5/pkg/base"
 )
 
 type clientTunnelHTTP struct {
@@ -56,20 +58,48 @@ func (c *clientTunnelHTTP) SetWriteDeadline(t time.Time) error {
 
 func newClientTunnelHTTP(
 	ctx context.Context,
-	dialContext func(ctx context.Context, network, address string) (net.Conn, error),
 	addr string,
+	secure bool,
 	tlsConfig *tls.Config,
+	dialContext func(ctx context.Context, network, address string) (net.Conn, error),
+	dialTLSContext func(ctx context.Context, network string, addr string) (net.Conn, error),
+	u *base.URL,
 ) (net.Conn, error) {
 	c := &clientTunnelHTTP{}
 
-	var err error
-	c.readChan, err = dialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
+	if secure {
+		// clone TLS config and fill ServerName if empty.
+		// this is the same behavior of http.Client.
+		// https://cs.opensource.google/go/go/+/master:src/net/http/transport.go;l=1754;drc=a4b534f5e42fe58d58c0ff0562d76680cedb0466
+
+		if tlsConfig == nil {
+			tlsConfig = &tls.Config{}
+		} else {
+			tlsConfig = tlsConfig.Clone()
+		}
+
+		if tlsConfig.ServerName == "" {
+			host, _, _ := net.SplitHostPort(addr)
+			tlsConfig.ServerName = host
+		}
 	}
 
-	if tlsConfig != nil {
-		c.readChan = tls.Client(c.readChan, tlsConfig)
+	if secure && dialTLSContext != nil {
+		var err error
+		c.readChan, err = dialTLSContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var err error
+		c.readChan, err = dialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+
+		if secure {
+			c.readChan = tls.Client(c.readChan, tlsConfig)
+		}
 	}
 
 	ok := false
@@ -96,11 +126,12 @@ func newClientTunnelHTTP(
 	}()
 
 	tunnelID := strings.ReplaceAll(uuid.New().String(), "-", "")
+	requestTarget := clientTunnelHTTPRequestTarget(u)
 
 	// do not use http.Request
 	// since Content-Length requires a Body of same size
-	_, err = c.readChan.Write([]byte(
-		"GET / HTTP/1.1\r\n" +
+	_, err := c.readChan.Write([]byte(
+		"GET " + requestTarget + " HTTP/1.1\r\n" +
 			"Host: " + addr + "\r\n" +
 			"X-Sessioncookie: " + tunnelID + "\r\n" +
 			"Accept: application/x-rtsp-tunnelled\r\n" +
@@ -122,13 +153,20 @@ func newClientTunnelHTTP(
 		return nil, fmt.Errorf("bad status code: %v", res.StatusCode)
 	}
 
-	c.writeChan, err = dialContext(ctx, "tcp", addr)
-	if err != nil {
-		return nil, err
-	}
+	if secure && dialTLSContext != nil {
+		c.writeChan, err = dialTLSContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		c.writeChan, err = dialContext(ctx, "tcp", addr)
+		if err != nil {
+			return nil, err
+		}
 
-	if tlsConfig != nil {
-		c.writeChan = tls.Client(c.writeChan, tlsConfig)
+		if secure {
+			c.writeChan = tls.Client(c.writeChan, tlsConfig)
+		}
 	}
 
 	defer func() {
@@ -155,7 +193,7 @@ func newClientTunnelHTTP(
 	// do not use http.Request
 	// since Content-Length requires a Body of same size
 	_, err = c.writeChan.Write([]byte(
-		"POST / HTTP/1.1\r\n" +
+		"POST " + requestTarget + " HTTP/1.1\r\n" +
 			"Host: " + addr + "\r\n" +
 			"X-Sessioncookie: " + tunnelID + "\r\n" +
 			"Content-Type: application/x-rtsp-tunnelled\r\n" +
@@ -166,17 +204,25 @@ func newClientTunnelHTTP(
 		return nil, err
 	}
 
-	writeBuf := bufio.NewReader(c.writeChan)
-	res, err = http.ReadResponse(writeBuf, nil)
-	if err != nil {
-		return nil, err
-	}
-	res.Body.Close()
-
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status code: %v", res.StatusCode)
-	}
+	// do not wait for writeChan response, since some servers don't send it.
 
 	ok = true
 	return c, nil
+}
+
+func clientTunnelHTTPRequestTarget(u *base.URL) string {
+	if u == nil {
+		return "/"
+	}
+
+	ret := u.Path
+	if ret == "" {
+		ret = "/"
+	}
+
+	if u.RawQuery != "" {
+		ret += "?" + u.RawQuery
+	}
+
+	return ret
 }

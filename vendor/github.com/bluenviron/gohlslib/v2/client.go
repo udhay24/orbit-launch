@@ -17,9 +17,13 @@ import (
 )
 
 const (
-	clientMaxTracksPerStream    = 10
-	clientMPEGTSSampleQueueSize = 100
-	clientMaxDTSSystemDiff      = 10 * time.Second
+	clientMaxTracksPerStream     = 10
+	clientMPEGTSSampleQueueSize  = 100
+	clientMaxMPEGTSQueuedSamples = 1000
+	clientMaxDTSSystemDiff       = 10 * time.Second
+	clientMaxInboundPlaylistSize = 1 * 1024 * 1024
+	clientMaxInboundSegmentSize  = 100 * 1024 * 1024
+	clientMaxInboundPartSize     = 10 * 1024 * 1024
 )
 
 // ErrClientEOS is returned by Wait() when the stream has ended.
@@ -60,6 +64,12 @@ type ClientOnDataMPEG4AudioFunc func(pts int64, aus [][]byte)
 
 // ClientOnDataOpusFunc is the prototype of the function passed to OnDataOpus().
 type ClientOnDataOpusFunc func(pts int64, packets [][]byte)
+
+// ClientOnDataFLACFunc is the prototype of the function passed to OnDataFLAC().
+type ClientOnDataFLACFunc func(pts int64, frame []byte)
+
+// ClientOnDataKLVFunc is the prototype of the function passed to OnDataKLV().
+type ClientOnDataKLVFunc func(pts int64, uni []byte)
 
 func clientAbsoluteURL(base *url.URL, relative string) (*url.URL, error) {
 	u, err := url.Parse(relative)
@@ -114,13 +124,13 @@ type Client struct {
 	ctxCancel         func()
 	playlistURL       *url.URL
 	primaryDownloader *clientPrimaryDownloader
-	leadingTimeConv   clientTimeConv
+	timeConv          clientTimeConv
 	tracks            map[*Track]*clientTrack
 	closeError        error
 
 	// out
-	done                 chan struct{}
-	leadingTimeConvReady chan struct{}
+	done          chan struct{}
+	timeConvReady chan struct{}
 }
 
 // Start starts the client.
@@ -180,7 +190,7 @@ func (c *Client) Start() error {
 	c.ctx, c.ctxCancel = context.WithCancel(context.Background())
 
 	c.done = make(chan struct{})
-	c.leadingTimeConvReady = make(chan struct{})
+	c.timeConvReady = make(chan struct{})
 
 	go c.run()
 
@@ -247,6 +257,20 @@ func (c *Client) OnDataOpus(track *Track, cb ClientOnDataOpusFunc) {
 	}
 }
 
+// OnDataFLAC sets a callback that is called when data from a FLAC track is received.
+func (c *Client) OnDataFLAC(track *Track, cb ClientOnDataFLACFunc) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data[0])
+	}
+}
+
+// OnDataKLV sets a callback that is called when data from an KLV track is received.
+func (c *Client) OnDataKLV(track *Track, cb ClientOnDataKLVFunc) {
+	c.tracks[track].onData = func(pts int64, _ int64, data [][]byte) {
+		cb(pts, data[0])
+	}
+}
+
 var zero time.Time
 
 // AbsoluteTime returns the absolute timestamp of the last sample.
@@ -308,8 +332,8 @@ func (c *Client) setTracks(tracks []*Track) (map[*Track]*clientTrack, error) {
 	return c.tracks, nil
 }
 
-func (c *Client) setLeadingTimeConv(ts clientTimeConv) {
-	c.leadingTimeConv = ts
+func (c *Client) setTimeConv(ts clientTimeConv) {
+	c.timeConv = ts
 
 	startSystem := time.Now()
 
@@ -317,18 +341,14 @@ func (c *Client) setLeadingTimeConv(ts clientTimeConv) {
 		track.startSystem = startSystem
 	}
 
-	close(c.leadingTimeConvReady)
+	close(c.timeConvReady)
 }
 
-func (c *Client) waitLeadingTimeConv(ctx context.Context) bool {
+func (c *Client) waitTimeConv(ctx context.Context) (clientTimeConv, bool) {
 	select {
-	case <-c.leadingTimeConvReady:
+	case <-c.timeConvReady:
+		return c.timeConv, true
 	case <-ctx.Done():
-		return false
+		return nil, false
 	}
-	return true
-}
-
-func (c *Client) getLeadingTimeConv() clientTimeConv {
-	return c.leadingTimeConv
 }

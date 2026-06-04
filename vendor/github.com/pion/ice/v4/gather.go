@@ -6,11 +6,11 @@ package ice
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,7 +20,7 @@ import (
 	"github.com/pion/logging"
 	"github.com/pion/stun/v3"
 	"github.com/pion/transport/v4/stdnet"
-	"github.com/pion/turn/v4"
+	"github.com/pion/turn/v5"
 )
 
 type turnClient interface {
@@ -31,6 +31,71 @@ type turnClient interface {
 
 func defaultTurnClient(cfg *turn.ClientConfig) (turnClient, error) {
 	return turn.NewClient(cfg)
+}
+
+func configuredNetworkTypes(networkTypes []NetworkType) []NetworkType {
+	if len(networkTypes) == 0 {
+		return supportedNetworkTypes()
+	}
+
+	return networkTypes
+}
+
+func effectiveURLProtoType(url stun.URI) stun.ProtoType {
+	if url.Proto != stun.ProtoTypeUnknown {
+		return url.Proto
+	}
+
+	switch url.Scheme {
+	case stun.SchemeTypeSTUN, stun.SchemeTypeTURN:
+		return stun.ProtoTypeUDP
+	case stun.SchemeTypeSTUNS, stun.SchemeTypeTURNS:
+		return stun.ProtoTypeTCP
+	default:
+		return stun.ProtoTypeUnknown
+	}
+}
+
+func urlSupportsSrflxGathering(url stun.URI) bool {
+	if effectiveURLProtoType(url) != stun.ProtoTypeUDP {
+		return false
+	}
+
+	return url.Scheme == stun.SchemeTypeSTUN || url.Scheme == stun.SchemeTypeTURN
+}
+
+func relayNetworkTypesForConfiguredCandidates(networkTypes []NetworkType) []NetworkType {
+	// Relay allocations currently produce UDP relay endpoints, so relay candidate
+	// publication must be gated by configured UDP candidate network types.
+	res := []NetworkType{}
+	for _, networkType := range configuredNetworkTypes(networkTypes) {
+		if networkType.IsUDP() {
+			res = append(res, networkType)
+		}
+	}
+
+	return res
+}
+
+func turnNetworkTypesForURL(url stun.URI, networkTypes []NetworkType) []NetworkType {
+	proto := effectiveURLProtoType(url)
+	res := []NetworkType{}
+
+	for _, networkType := range configuredNetworkTypes(networkTypes) {
+		switch proto {
+		case stun.ProtoTypeUDP:
+			if networkType.IsUDP() {
+				res = append(res, networkType)
+			}
+		case stun.ProtoTypeTCP:
+			if networkType.IsTCP() {
+				res = append(res, networkType)
+			}
+		default:
+		}
+	}
+
+	return res
 }
 
 // Close a net.Conn and log if we have a failure.
@@ -279,7 +344,7 @@ func (a *Agent) gatherCandidatesLocal(ctx context.Context, networkTypes []Networ
 			}
 		}
 
-		for mappedIdx, mappedIP := range mappedAddrs {
+		for _, mappedIP := range mappedAddrs {
 			address := mappedIP.String()
 			var isLocationTracked bool
 			if a.mDNSMode == MulticastDNSModeQueryAndGather {
@@ -292,12 +357,6 @@ func (a *Agent) gatherCandidatesLocal(ctx context.Context, networkTypes []Networ
 			}
 
 			for network := range networks {
-				// TCPMux maintains a single listener per interface. Avoid duplicating passive TCP candidates
-				// for additional mapped IPs until connection sharing is supported.
-				if network == tcp && mappedIdx > 0 {
-					continue
-				}
-
 				type connAndPort struct {
 					conn net.PacketConn
 					port int
@@ -353,7 +412,12 @@ func (a *Agent) gatherCandidatesLocal(ctx context.Context, networkTypes []Networ
 						if tcpConn, ok := conn.LocalAddr().(*net.TCPAddr); ok {
 							conns = append(conns, connAndPort{conn, tcpConn.Port})
 						} else {
-							a.log.Warnf("Failed to get port of connection from TCPMux: %s %s %s", network, addr, a.localUfrag)
+							closeConnAndLog(
+								conn,
+								a.log,
+								"Failed to get port of connection from TCPMux: %s %s %s",
+								network, addr, a.localUfrag,
+							)
 						}
 					}
 					if len(conns) == 0 {
@@ -419,7 +483,12 @@ func (a *Agent) gatherCandidatesLocal(ctx context.Context, networkTypes []Networ
 						if closeErr := candidateHost.close(); closeErr != nil {
 							a.log.Warnf("Failed to close candidate: %v", closeErr)
 						}
-						a.log.Warnf("Failed to append to localCandidates and run onCandidateHdlr: %v", err)
+						closeConnAndLog(
+							connAndPort.conn,
+							a.log,
+							"Failed to append to localCandidates and run onCandidateHdlr: %v",
+							err,
+						)
 					}
 				}
 			}
@@ -662,6 +731,10 @@ func (a *Agent) gatherCandidatesSrflxUDPMux(ctx context.Context, urls []*stun.UR
 		}
 
 		for i := range urls {
+			if !urlSupportsSrflxGathering(*urls[i]) {
+				continue
+			}
+
 			for _, listenAddr := range a.udpMuxSrflx.GetListenAddresses() {
 				udpAddr, ok := listenAddr.(*net.UDPAddr)
 				if !ok {
@@ -673,7 +746,7 @@ func (a *Agent) gatherCandidatesSrflxUDPMux(ctx context.Context, urls []*stun.UR
 				go func(url stun.URI, network string, localAddr *net.UDPAddr) {
 					defer wg.Done()
 
-					hostPort := fmt.Sprintf("%s:%d", url.Host, url.Port)
+					hostPort := net.JoinHostPort(url.Host, strconv.Itoa(url.Port))
 					serverAddr, err := a.net.ResolveUDPAddr(network, hostPort)
 					if err != nil {
 						a.log.Debugf("Failed to resolve STUN host: %s %s: %v", network, hostPort, err)
@@ -723,7 +796,12 @@ func (a *Agent) gatherCandidatesSrflxUDPMux(ctx context.Context, urls []*stun.UR
 						if closeErr := c.close(); closeErr != nil {
 							a.log.Warnf("Failed to close candidate: %v", closeErr)
 						}
-						a.log.Warnf("Failed to append to localCandidates and run onCandidateHdlr: %v", err)
+						closeConnAndLog(
+							conn,
+							a.log,
+							"Failed to append srflx mux candidate to localCandidates: %v",
+							err,
+						)
 					}
 				}(*urls[i], networkType.String(), udpAddr)
 			}
@@ -736,89 +814,127 @@ func (a *Agent) gatherCandidatesSrflx(ctx context.Context, urls []*stun.URI, net
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	useFilteredLocalAddrs := a.interfaceFilter != nil || a.ipFilter != nil
+	localAddrs := []ifaceAddr{}
+	if useFilteredLocalAddrs {
+		_, addrs, err := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, networkTypes, a.includeLoopback)
+		if err != nil {
+			a.log.Warnf("Failed to iterate local interfaces, srflx candidates will not be gathered %s", err)
+
+			return
+		}
+		localAddrs = addrs
+	}
+
+	gatherForURL := func(url stun.URI, network string, listenAddr *net.UDPAddr) {
+		defer wg.Done()
+
+		hostPort := net.JoinHostPort(url.Host, strconv.Itoa(url.Port))
+		serverAddr, err := a.net.ResolveUDPAddr(network, hostPort)
+		if err != nil {
+			a.log.Debugf("Failed to resolve STUN host: %s %s: %v", network, hostPort, err)
+
+			return
+		}
+
+		if shouldFilterLocationTracked(serverAddr.IP) {
+			a.log.Warnf("STUN host %s is somehow filtered for location tracking reasons", hostPort)
+
+			return
+		}
+
+		conn, err := listenUDPInPortRange(
+			a.net,
+			a.log,
+			int(a.portMax),
+			int(a.portMin),
+			network,
+			listenAddr,
+		)
+		if err != nil {
+			closeConnAndLog(conn, a.log, "failed to listen for %s: %v", serverAddr.String(), err)
+
+			return
+		}
+		// If the agent closes midway through the connection
+		// we end it early to prevent close delay.
+		cancelCtx, cancelFunc := context.WithCancel(ctx)
+		defer cancelFunc()
+		go func() {
+			select {
+			case <-cancelCtx.Done():
+				return
+			case <-a.loop.Done():
+				_ = conn.Close()
+			}
+		}()
+
+		xorAddr, err := stunx.GetXORMappedAddr(conn, serverAddr, a.stunGatherTimeout)
+		if err != nil {
+			closeConnAndLog(conn, a.log, "failed to get server reflexive address %s %s: %v", network, url, err)
+
+			return
+		}
+
+		ip := xorAddr.IP
+		port := xorAddr.Port
+
+		lAddr := conn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
+		srflxConfig := CandidateServerReflexiveConfig{
+			Network:   network,
+			Address:   ip.String(),
+			Port:      port,
+			Component: ComponentRTP,
+			RelAddr:   lAddr.IP.String(),
+			RelPort:   lAddr.Port,
+		}
+		c, err := NewCandidateServerReflexive(&srflxConfig)
+		if err != nil {
+			closeConnAndLog(conn, a.log, "failed to create server reflexive candidate: %s %s %d: %v", network, ip, port, err)
+
+			return
+		}
+
+		if err := a.addCandidate(ctx, c, conn); err != nil {
+			if closeErr := c.close(); closeErr != nil {
+				a.log.Warnf("Failed to close candidate: %v", closeErr)
+			}
+			a.log.Warnf("Failed to append to localCandidates and run onCandidateHdlr: %v", err)
+		}
+	}
+
 	for _, networkType := range networkTypes {
 		if networkType.IsTCP() {
 			continue
 		}
 
 		for i := range urls {
-			wg.Add(1)
-			go func(url stun.URI, network string) {
-				defer wg.Done()
+			if !urlSupportsSrflxGathering(*urls[i]) {
+				continue
+			}
 
-				hostPort := fmt.Sprintf("%s:%d", url.Host, url.Port)
-				serverAddr, err := a.net.ResolveUDPAddr(network, hostPort)
-				if err != nil {
-					a.log.Debugf("Failed to resolve STUN host: %s %s: %v", network, hostPort, err)
+			if !useFilteredLocalAddrs {
+				wg.Add(1)
+				go gatherForURL(*urls[i], networkType.String(), &net.UDPAddr{IP: nil, Port: 0})
 
-					return
+				continue
+			}
+
+			for j := range localAddrs {
+				if networkType.IsIPv4() && localAddrs[j].addr.Is6() {
+					continue
+				}
+				if networkType.IsIPv6() && !localAddrs[j].addr.Is6() {
+					continue
 				}
 
-				if shouldFilterLocationTracked(serverAddr.IP) {
-					a.log.Warnf("STUN host %s is somehow filtered for location tracking reasons", hostPort)
-
-					return
-				}
-
-				conn, err := listenUDPInPortRange(
-					a.net,
-					a.log,
-					int(a.portMax),
-					int(a.portMin),
-					network,
-					&net.UDPAddr{IP: nil, Port: 0},
+				wg.Add(1)
+				go gatherForURL(
+					*urls[i],
+					networkType.String(),
+					&net.UDPAddr{IP: localAddrs[j].addr.AsSlice(), Zone: localAddrs[j].addr.Zone(), Port: 0},
 				)
-				if err != nil {
-					closeConnAndLog(conn, a.log, "failed to listen for %s: %v", serverAddr.String(), err)
-
-					return
-				}
-				// If the agent closes midway through the connection
-				// we end it early to prevent close delay.
-				cancelCtx, cancelFunc := context.WithCancel(ctx)
-				defer cancelFunc()
-				go func() {
-					select {
-					case <-cancelCtx.Done():
-						return
-					case <-a.loop.Done():
-						_ = conn.Close()
-					}
-				}()
-
-				xorAddr, err := stunx.GetXORMappedAddr(conn, serverAddr, a.stunGatherTimeout)
-				if err != nil {
-					closeConnAndLog(conn, a.log, "failed to get server reflexive address %s %s: %v", network, url, err)
-
-					return
-				}
-
-				ip := xorAddr.IP
-				port := xorAddr.Port
-
-				lAddr := conn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
-				srflxConfig := CandidateServerReflexiveConfig{
-					Network:   network,
-					Address:   ip.String(),
-					Port:      port,
-					Component: ComponentRTP,
-					RelAddr:   lAddr.IP.String(),
-					RelPort:   lAddr.Port,
-				}
-				c, err := NewCandidateServerReflexive(&srflxConfig)
-				if err != nil {
-					closeConnAndLog(conn, a.log, "failed to create server reflexive candidate: %s %s %d: %v", network, ip, port, err)
-
-					return
-				}
-
-				if err := a.addCandidate(ctx, c, conn); err != nil {
-					if closeErr := c.close(); closeErr != nil {
-						a.log.Warnf("Failed to close candidate: %v", closeErr)
-					}
-					a.log.Warnf("Failed to append to localCandidates and run onCandidateHdlr: %v", err)
-				}
-			}(*urls[i], networkType.String())
+			}
 		}
 	}
 }
@@ -827,9 +943,20 @@ func (a *Agent) gatherCandidatesSrflx(ctx context.Context, urls []*stun.URI, net
 func (a *Agent) gatherCandidatesRelay(ctx context.Context, urls []*stun.URI) {
 	var wg sync.WaitGroup
 	defer wg.Wait()
-
-	network := NetworkTypeUDP4.String()
 	_, ifaces, _ := localInterfaces(a.net, a.interfaceFilter, a.ipFilter, a.networkTypes, a.includeLoopback)
+
+	useFilteredLocalAddrs := a.interfaceFilter != nil || a.ipFilter != nil
+	localAddrs := []ifaceAddr{}
+	if useFilteredLocalAddrs {
+		localAddrs = append(localAddrs, ifaces...)
+		if len(localAddrs) == 0 {
+			return
+		}
+	}
+
+	if len(relayNetworkTypesForConfiguredCandidates(a.networkTypes)) == 0 {
+		return
+	}
 
 	for _, url := range urls {
 		switch {
@@ -845,204 +972,254 @@ func (a *Agent) gatherCandidatesRelay(ctx context.Context, urls []*stun.URI) {
 			return
 		}
 
-		wg.Add(1)
-		go func(url stun.URI) {
-			defer wg.Done()
-			turnServerAddr := fmt.Sprintf("%s:%d", url.Host, url.Port)
-			var (
-				locConn       net.PacketConn
-				err           error
-				relAddr       string
-				relPort       int
-				relayProtocol string
-			)
+		urlProto := effectiveURLProtoType(*url)
 
-			switch {
-			case url.Proto == stun.ProtoTypeUDP && url.Scheme == stun.SchemeTypeTURN:
-				if locConn, err = a.net.ListenPacket(network, "0.0.0.0:0"); err != nil {
-					a.log.Warnf("Failed to listen %s: %v", network, err)
+		networkTypes := turnNetworkTypesForURL(*url, a.turnTransportProtocols)
+		if len(networkTypes) == 0 {
+			continue
+		}
 
-					return
+		for _, networkType := range networkTypes {
+			// IPv6 TURN support is not finished yet, so skip for now.
+			if networkType.IsIPv6() {
+				continue
+			}
+
+			network := networkType.String()
+			bindAddrs := []string{}
+			if !useFilteredLocalAddrs { // nolint:nestif
+				if networkType.IsIPv6() {
+					bindAddrs = append(bindAddrs, "[::]:0")
+				} else {
+					bindAddrs = append(bindAddrs, "0.0.0.0:0")
 				}
-
-				relAddr = locConn.LocalAddr().(*net.UDPAddr).IP.String() //nolint:forcetypeassert
-				relPort = locConn.LocalAddr().(*net.UDPAddr).Port        //nolint:forcetypeassert
-				relayProtocol = udp
-			case a.proxyDialer != nil && url.Proto == stun.ProtoTypeTCP &&
-				(url.Scheme == stun.SchemeTypeTURN || url.Scheme == stun.SchemeTypeTURNS):
-				conn, connectErr := a.proxyDialer.Dial(NetworkTypeTCP4.String(), turnServerAddr)
-				if connectErr != nil {
-					a.log.Warnf("Failed to dial TCP address %s via proxy dialer: %v", turnServerAddr, connectErr)
-
-					return
-				}
-
-				relAddr = conn.LocalAddr().(*net.TCPAddr).IP.String() //nolint:forcetypeassert
-				relPort = conn.LocalAddr().(*net.TCPAddr).Port        //nolint:forcetypeassert
-				if url.Scheme == stun.SchemeTypeTURN {
-					relayProtocol = tcp
-				} else if url.Scheme == stun.SchemeTypeTURNS {
-					relayProtocol = "tls"
-				}
-				locConn = turn.NewSTUNConn(conn)
-
-			case url.Proto == stun.ProtoTypeTCP && url.Scheme == stun.SchemeTypeTURN:
-				tcpAddr, connectErr := a.net.ResolveTCPAddr(NetworkTypeTCP4.String(), turnServerAddr)
-				if connectErr != nil {
-					a.log.Warnf("Failed to resolve TCP address %s: %v", turnServerAddr, connectErr)
-
-					return
-				}
-
-				conn, connectErr := a.net.DialTCP(NetworkTypeTCP4.String(), nil, tcpAddr)
-				if connectErr != nil {
-					a.log.Warnf("Failed to dial TCP address %s: %v", turnServerAddr, connectErr)
-
-					return
-				}
-
-				relAddr = conn.LocalAddr().(*net.TCPAddr).IP.String() //nolint:forcetypeassert
-				relPort = conn.LocalAddr().(*net.TCPAddr).Port        //nolint:forcetypeassert
-				relayProtocol = tcp
-				locConn = turn.NewSTUNConn(conn)
-			case url.Proto == stun.ProtoTypeUDP && url.Scheme == stun.SchemeTypeTURNS:
-				udpAddr, connectErr := a.net.ResolveUDPAddr(network, turnServerAddr)
-				if connectErr != nil {
-					a.log.Warnf("Failed to resolve UDP address %s: %v", turnServerAddr, connectErr)
-
-					return
-				}
-
-				udpConn, dialErr := a.net.DialUDP("udp", nil, udpAddr)
-				if dialErr != nil {
-					a.log.Warnf("Failed to dial DTLS address %s: %v", turnServerAddr, dialErr)
-
-					return
-				}
-
-				conn, connectErr := dtls.Client(&fakenet.PacketConn{Conn: udpConn}, udpConn.RemoteAddr(), &dtls.Config{
-					ServerName:         url.Host,
-					InsecureSkipVerify: a.insecureSkipVerify, //nolint:gosec
-					LoggerFactory:      a.loggerFactory,
-				})
-				if connectErr != nil {
-					a.log.Warnf("Failed to create DTLS client: %v", turnServerAddr, connectErr)
-
-					return
-				}
-
-				if connectErr = conn.HandshakeContext(ctx); connectErr != nil {
-					a.log.Warnf("Failed to create DTLS client: %v", turnServerAddr, connectErr)
-
-					return
-				}
-
-				relAddr = conn.LocalAddr().(*net.UDPAddr).IP.String() //nolint:forcetypeassert
-				relPort = conn.LocalAddr().(*net.UDPAddr).Port        //nolint:forcetypeassert
-				relayProtocol = relayProtocolDTLS
-				locConn = &fakenet.PacketConn{Conn: conn}
-			case url.Proto == stun.ProtoTypeTCP && url.Scheme == stun.SchemeTypeTURNS:
-				tcpAddr, resolvErr := a.net.ResolveTCPAddr(NetworkTypeTCP4.String(), turnServerAddr)
-				if resolvErr != nil {
-					a.log.Warnf("Failed to resolve relay address %s: %v", turnServerAddr, resolvErr)
-
-					return
-				}
-
-				tcpConn, dialErr := a.net.DialTCP(NetworkTypeTCP4.String(), nil, tcpAddr)
-				if dialErr != nil {
-					a.log.Warnf("Failed to connect to relay: %v", dialErr)
-
-					return
-				}
-
-				conn := tls.Client(tcpConn, &tls.Config{
-					ServerName:         url.Host,
-					InsecureSkipVerify: a.insecureSkipVerify, //nolint:gosec
-				})
-
-				if hsErr := conn.HandshakeContext(ctx); hsErr != nil {
-					if closeErr := tcpConn.Close(); closeErr != nil {
-						a.log.Errorf("Failed to close relay connection: %v", closeErr)
+			} else {
+				for i := range localAddrs {
+					if networkType.IsIPv4() && localAddrs[i].addr.Is6() {
+						continue
 					}
-					a.log.Warnf("Failed to connect to relay: %v", hsErr)
-
-					return
-				}
-
-				relAddr = conn.LocalAddr().(*net.TCPAddr).IP.String() //nolint:forcetypeassert
-				relPort = conn.LocalAddr().(*net.TCPAddr).Port        //nolint:forcetypeassert
-				relayProtocol = relayProtocolTLS
-				locConn = turn.NewSTUNConn(conn)
-			default:
-				a.log.Warnf("Unable to handle URL in gatherCandidatesRelay %v", url)
-
-				return
-			}
-
-			factory := a.turnClientFactory
-			if factory == nil {
-				factory = defaultTurnClient
-			}
-
-			client, err := factory(&turn.ClientConfig{
-				TURNServerAddr: turnServerAddr,
-				Conn:           locConn,
-				Username:       url.Username,
-				Password:       url.Password,
-				LoggerFactory:  a.loggerFactory,
-				Net:            a.net,
-			})
-			if err != nil {
-				closeConnAndLog(locConn, a.log, "failed to create new TURN client %s %s", turnServerAddr, err)
-
-				return
-			}
-
-			if err = client.Listen(); err != nil {
-				client.Close()
-				closeConnAndLog(locConn, a.log, "failed to listen on TURN client %s %s", turnServerAddr, err)
-
-				return
-			}
-
-			relayConn, err := client.Allocate()
-			if err != nil {
-				client.Close()
-				closeConnAndLog(locConn, a.log, "failed to allocate on TURN client %s %s", turnServerAddr, err)
-
-				return
-			}
-
-			rAddr := relayConn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
-
-			if shouldFilterLocationTracked(rAddr.IP) {
-				a.log.Warnf("TURN address %s is somehow filtered for location tracking reasons", rAddr.IP)
-
-				return
-			}
-
-			a.addRelayCandidates(ctx, relayEndpoint{
-				network:  network,
-				address:  rAddr.IP,
-				port:     rAddr.Port,
-				relAddr:  relAddr,
-				relPort:  relPort,
-				iface:    findIfaceForIP(ifaces, net.ParseIP(relAddr)),
-				protocol: relayProtocol,
-				conn:     relayConn,
-				onClose: func() error {
-					client.Close()
-
-					return locConn.Close()
-				},
-				closeConn: func() {
-					if relayConErr := relayConn.Close(); relayConErr != nil {
-						a.log.Warnf("Failed to close relay %v", relayConErr)
+					if networkType.IsIPv6() && !localAddrs[i].addr.Is6() {
+						continue
 					}
-				},
-			})
-		}(*url)
+
+					bindAddrs = append(bindAddrs, net.JoinHostPort(localAddrs[i].addr.String(), "0"))
+				}
+			}
+
+			for _, localBindAddr := range bindAddrs {
+				wg.Add(1)
+				go func(url stun.URI, network string, urlProto stun.ProtoType, localBindAddr string) {
+					defer wg.Done()
+
+					turnServerAddr := net.JoinHostPort(url.Host, strconv.Itoa(url.Port))
+					var (
+						locConn       net.PacketConn
+						err           error
+						relAddr       string
+						relPort       int
+						relayProtocol string
+					)
+
+					switch {
+					case urlProto == stun.ProtoTypeUDP && url.Scheme == stun.SchemeTypeTURN:
+						if locConn, err = a.net.ListenPacket(network, localBindAddr); err != nil {
+							a.log.Warnf("Failed to listen %s: %v", network, err)
+
+							return
+						}
+
+						relAddr = locConn.LocalAddr().(*net.UDPAddr).IP.String() //nolint:forcetypeassert
+						relPort = locConn.LocalAddr().(*net.UDPAddr).Port        //nolint:forcetypeassert
+						relayProtocol = udp
+					case a.proxyDialer != nil && urlProto == stun.ProtoTypeTCP &&
+						(url.Scheme == stun.SchemeTypeTURN || url.Scheme == stun.SchemeTypeTURNS):
+						conn, connectErr := a.proxyDialer.Dial(network, turnServerAddr)
+						if connectErr != nil {
+							a.log.Warnf("Failed to dial TCP address %s via proxy dialer: %v", turnServerAddr, connectErr)
+
+							return
+						}
+
+						relAddr = conn.LocalAddr().(*net.TCPAddr).IP.String() //nolint:forcetypeassert
+						relPort = conn.LocalAddr().(*net.TCPAddr).Port        //nolint:forcetypeassert
+						if url.Scheme == stun.SchemeTypeTURN {
+							relayProtocol = tcp
+						} else if url.Scheme == stun.SchemeTypeTURNS {
+							relayProtocol = "tls"
+						}
+						locConn = turn.NewSTUNConn(conn)
+
+					case urlProto == stun.ProtoTypeTCP && url.Scheme == stun.SchemeTypeTURN:
+						tcpAddr, connectErr := a.net.ResolveTCPAddr(network, turnServerAddr)
+						if connectErr != nil {
+							a.log.Warnf("Failed to resolve TCP address %s: %v", turnServerAddr, connectErr)
+
+							return
+						}
+
+						conn, connectErr := a.net.DialTCP(network, nil, tcpAddr)
+						if connectErr != nil {
+							a.log.Warnf("Failed to dial TCP address %s: %v", turnServerAddr, connectErr)
+
+							return
+						}
+
+						relAddr = conn.LocalAddr().(*net.TCPAddr).IP.String() //nolint:forcetypeassert
+						relPort = conn.LocalAddr().(*net.TCPAddr).Port        //nolint:forcetypeassert
+						relayProtocol = tcp
+						locConn = turn.NewSTUNConn(conn)
+					case urlProto == stun.ProtoTypeUDP && url.Scheme == stun.SchemeTypeTURNS:
+						udpAddr, connectErr := a.net.ResolveUDPAddr(network, turnServerAddr)
+						if connectErr != nil {
+							a.log.Warnf("Failed to resolve UDP address %s: %v", turnServerAddr, connectErr)
+
+							return
+						}
+
+						udpConn, dialErr := a.net.DialUDP(network, nil, udpAddr)
+						if dialErr != nil {
+							a.log.Warnf("Failed to dial DTLS address %s: %v", turnServerAddr, dialErr)
+
+							return
+						}
+
+						conn, connectErr := dtls.ClientWithOptions(&fakenet.PacketConn{Conn: udpConn}, udpConn.RemoteAddr(),
+							dtls.WithServerName(url.Host),
+							dtls.WithInsecureSkipVerify(a.insecureSkipVerify), //nolint:gosec
+							dtls.WithLoggerFactory(a.loggerFactory),
+						)
+						if connectErr != nil {
+							a.log.Warnf("Failed to create DTLS client: %v", turnServerAddr, connectErr)
+							if closeErr := udpConn.Close(); closeErr != nil {
+								a.log.Errorf("Failed to close relay connection: %v", closeErr)
+							}
+
+							return
+						}
+
+						if connectErr = conn.HandshakeContext(ctx); connectErr != nil {
+							a.log.Warnf("Failed to create DTLS client: %v", turnServerAddr, connectErr)
+							if closeErr := conn.Close(); closeErr != nil {
+								a.log.Errorf("Failed to close relay connection: %v", closeErr)
+							}
+
+							return
+						}
+
+						relAddr = conn.LocalAddr().(*net.UDPAddr).IP.String() //nolint:forcetypeassert
+						relPort = conn.LocalAddr().(*net.UDPAddr).Port        //nolint:forcetypeassert
+						relayProtocol = relayProtocolDTLS
+						locConn = &fakenet.PacketConn{Conn: conn}
+					case urlProto == stun.ProtoTypeTCP && url.Scheme == stun.SchemeTypeTURNS:
+						tcpAddr, resolvErr := a.net.ResolveTCPAddr(network, turnServerAddr)
+						if resolvErr != nil {
+							a.log.Warnf("Failed to resolve relay address %s: %v", turnServerAddr, resolvErr)
+
+							return
+						}
+
+						tcpConn, dialErr := a.net.DialTCP(network, nil, tcpAddr)
+						if dialErr != nil {
+							a.log.Warnf("Failed to connect to relay: %v", dialErr)
+
+							return
+						}
+
+						conn := tls.Client(tcpConn, &tls.Config{
+							ServerName:         url.Host,
+							InsecureSkipVerify: a.insecureSkipVerify, //nolint:gosec
+						})
+
+						if hsErr := conn.HandshakeContext(ctx); hsErr != nil {
+							if closeErr := tcpConn.Close(); closeErr != nil {
+								a.log.Errorf("Failed to close relay connection: %v", closeErr)
+							}
+							a.log.Warnf("Failed to connect to relay: %v", hsErr)
+
+							return
+						}
+
+						relAddr = conn.LocalAddr().(*net.TCPAddr).IP.String() //nolint:forcetypeassert
+						relPort = conn.LocalAddr().(*net.TCPAddr).Port        //nolint:forcetypeassert
+						relayProtocol = relayProtocolTLS
+						locConn = turn.NewSTUNConn(conn)
+					default:
+						a.log.Warnf("Unable to handle URL in gatherCandidatesRelay %v", url)
+
+						return
+					}
+
+					factory := a.turnClientFactory
+					if factory == nil {
+						factory = defaultTurnClient
+					}
+
+					client, err := factory(&turn.ClientConfig{
+						TURNServerAddr: turnServerAddr,
+						Conn:           locConn,
+						Username:       url.Username,
+						Password:       url.Password,
+						LoggerFactory:  a.loggerFactory,
+						Net:            a.net,
+					})
+					if err != nil {
+						closeConnAndLog(locConn, a.log, "failed to create new TURN client %s %s", turnServerAddr, err)
+
+						return
+					}
+
+					if err = client.Listen(); err != nil {
+						client.Close()
+						closeConnAndLog(locConn, a.log, "failed to listen on TURN client %s %s", turnServerAddr, err)
+
+						return
+					}
+
+					relayConn, err := client.Allocate()
+					if err != nil {
+						client.Close()
+						closeConnAndLog(locConn, a.log, "failed to allocate on TURN client %s %s", turnServerAddr, err)
+
+						return
+					}
+
+					closeRelayConn := func() {
+						if relayConErr := relayConn.Close(); relayConErr != nil {
+							a.log.Warnf("Failed to close relay %v", relayConErr)
+						}
+					}
+
+					rAddr := relayConn.LocalAddr().(*net.UDPAddr) //nolint:forcetypeassert
+					if shouldFilterLocationTracked(rAddr.IP) {
+						closeRelayConn()
+						client.Close()
+						closeConnAndLog(locConn, a.log,
+							"TURN address %s is somehow filtered for location tracking reasons", rAddr.IP)
+
+						return
+					}
+
+					// Relay allocations currently produce UDP relay endpoints regardless of
+					// whether the TURN control connection uses UDP/TCP/TLS/DTLS.
+					a.addRelayCandidates(ctx, relayEndpoint{
+						network:  udp,
+						address:  rAddr.IP,
+						port:     rAddr.Port,
+						relAddr:  relAddr,
+						relPort:  relPort,
+						iface:    findIfaceForIP(ifaces, net.ParseIP(relAddr)),
+						protocol: relayProtocol,
+						conn:     relayConn,
+						onClose: func() error {
+							client.Close()
+
+							return locConn.Close()
+						},
+						closeConn: closeRelayConn,
+					})
+				}(*url, network, urlProto, localBindAddr)
+			}
+		}
 	}
 }
 

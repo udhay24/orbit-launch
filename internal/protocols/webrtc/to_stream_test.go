@@ -99,7 +99,7 @@ var toFromStreamCases = []struct {
 	{
 		"opus multichannel",
 		&format.Opus{
-			PayloadTyp:   112,
+			PayloadTyp:   96,
 			ChannelCount: 6,
 		},
 		webrtc.RTPCodecCapability{
@@ -116,7 +116,7 @@ var toFromStreamCases = []struct {
 	{
 		"opus stereo",
 		&format.Opus{
-			PayloadTyp:   111,
+			PayloadTyp:   96,
 			ChannelCount: 2,
 		},
 		webrtc.RTPCodecCapability{
@@ -133,7 +133,7 @@ var toFromStreamCases = []struct {
 	{
 		"opus mono",
 		&format.Opus{
-			PayloadTyp:   111,
+			PayloadTyp:   96,
 			ChannelCount: 1,
 		},
 		webrtc.RTPCodecCapability{
@@ -205,7 +205,7 @@ var toFromStreamCases = []struct {
 			Channels:  2,
 		},
 		&format.G711{
-			PayloadTyp:   119,
+			PayloadTyp:   96,
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
@@ -225,7 +225,7 @@ var toFromStreamCases = []struct {
 		},
 		&format.G711{
 			MULaw:        true,
-			PayloadTyp:   118,
+			PayloadTyp:   96,
 			SampleRate:   8000,
 			ChannelCount: 2,
 		},
@@ -338,7 +338,7 @@ func TestToStream(t *testing.T) {
 				LocalRandomUDP:    true,
 				IPsFromInterfaces: true,
 				Publish:           true,
-				OutgoingTracks: []*OutgoingTrack{{
+				OutboundTracks: []*OutboundTrack{{
 					Caps: ca.webrtcCaps,
 				}},
 				Log: test.NilLogger,
@@ -357,10 +357,10 @@ func TestToStream(t *testing.T) {
 			require.NoError(t, err)
 			defer pc2.Close()
 
-			offer, err := pc1.CreatePartialOffer()
+			offer, err := pc1.CreatePartialOffer(false)
 			require.NoError(t, err)
 
-			answer, err := pc2.CreateFullAnswer(offer)
+			answer, err := pc2.CreateFullAnswer(offer, false)
 			require.NoError(t, err)
 
 			err = pc1.SetAnswer(answer)
@@ -385,7 +385,7 @@ func TestToStream(t *testing.T) {
 			err = pc2.WaitUntilConnected(10 * time.Second)
 			require.NoError(t, err)
 
-			err = pc1.OutgoingTracks[0].WriteRTP(&rtp.Packet{
+			err = pc1.OutboundTracks[0].WriteRTP(&rtp.Packet{
 				Header: rtp.Header{
 					Version:        2,
 					Marker:         true,
@@ -398,7 +398,7 @@ func TestToStream(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			err = pc2.GatherIncomingTracks(2 * time.Second)
+			err = pc2.GatherInboundTracks(2 * time.Second)
 			require.NoError(t, err)
 
 			var subStream *stream.SubStream

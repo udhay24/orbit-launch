@@ -32,6 +32,9 @@ type OnDataH26xFunc func(pts time.Duration, dts time.Duration, au [][]byte)
 // OnDataOpusFunc is the prototype of the callback passed to OnDataOpus().
 type OnDataOpusFunc func(pts time.Duration, packet []byte)
 
+// OnDataFLACFunc is the prototype of the callback passed to OnDataFLAC().
+type OnDataFLACFunc func(pts time.Duration, frame []byte)
+
 // OnDataMPEG4AudioFunc is the prototype of the callback passed to OnDataMPEG4Audio().
 type OnDataMPEG4AudioFunc func(pts time.Duration, au []byte)
 
@@ -215,8 +218,21 @@ func audioTrackFromExtendedMessages(
 		}
 
 		return &Track{Codec: &codecs.Opus{
-			ChannelCount: int(sequenceStart.OpusConfig.ChannelCount),
+			IDHeader: sequenceStart.OpusConfig,
 		}}, nil
+
+	case message.FourCCFLAC:
+		return &Track{Codec: &codecs.FLAC{
+			StreamInfo: sequenceStart.FlacConfig,
+		}}, nil
+
+	case message.FourCCMP4A:
+		return &Track{Codec: &codecs.MPEG4Audio{
+			Config: sequenceStart.AACConfig,
+		}}, nil
+
+	case message.FourCCMP3:
+		return &Track{Codec: &codecs.MPEG1Audio{}}, nil
 
 	case message.FourCCAC3:
 		if len(frames.Payload) < 6 {
@@ -239,14 +255,6 @@ func audioTrackFromExtendedMessages(
 			SampleRate:   syncInfo.SampleRate(),
 			ChannelCount: bsi.ChannelCount(),
 		}}, nil
-
-	case message.FourCCMP4A:
-		return &Track{Codec: &codecs.MPEG4Audio{
-			Config: sequenceStart.AACConfig,
-		}}, nil
-
-	case message.FourCCMP3:
-		return &Track{Codec: &codecs.MPEG1Audio{}}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported audio FourCC: %v", frames.FourCC)
@@ -502,6 +510,18 @@ func (r *Reader) readTracks() (map[uint8]*Track, map[uint8]*Track, error) {
 		return nil, nil, fmt.Errorf("no tracks found")
 	}
 
+	for id, track := range videoTracks {
+		if track == nil {
+			return nil, nil, fmt.Errorf("video track %d not configured", id)
+		}
+	}
+
+	for id, track := range audioTracks {
+		if track == nil {
+			return nil, nil, fmt.Errorf("audio track %d not configured", id)
+		}
+	}
+
 	return videoTracks, audioTracks, nil
 }
 
@@ -719,6 +739,16 @@ func (r *Reader) OnDataH264(track *Track, cb OnDataH26xFunc) {
 
 // OnDataOpus sets a callback that is called when Opus data is received.
 func (r *Reader) OnDataOpus(track *Track, cb OnDataOpusFunc) {
+	r.onAudioData[r.audioTrackID(track)] = func(msg message.Message) error {
+		if msg, ok := msg.(*message.AudioExCodedFrames); ok {
+			cb(msg.DTS, msg.Payload)
+		}
+		return nil
+	}
+}
+
+// OnDataFLAC sets a callback that is called when FLAC data is received.
+func (r *Reader) OnDataFLAC(track *Track, cb OnDataFLACFunc) {
 	r.onAudioData[r.audioTrackID(track)] = func(msg message.Message) error {
 		if msg, ok := msg.(*message.AudioExCodedFrames); ok {
 			cb(msg.DTS, msg.Payload)

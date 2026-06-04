@@ -15,7 +15,7 @@ const (
 	// DefaultNominationAttribute represents the default STUN Nomination attribute.
 	// This is a custom attribute for ICE renomination support.
 	// This value can be overridden via AgentConfig.NominationAttribute.
-	DefaultNominationAttribute stun.AttrType = 0x0030 // Using a value in the reserved range
+	DefaultNominationAttribute stun.AttrType = 0xC001 // matching libwebrtc.
 )
 
 // NominationAttribute represents a STUN Nomination attribute.
@@ -53,9 +53,9 @@ func (a NominationAttribute) AddTo(m *stun.Message) error {
 func (a NominationAttribute) AddToWithType(m *stun.Message, attrType stun.AttrType) error {
 	// Store as 4 bytes with first byte as 0
 	v := make([]byte, 4)
-	v[1] = byte(a.Value >> 16)
-	v[2] = byte(a.Value >> 8)
-	v[3] = byte(a.Value)
+	v[1] = byte(a.Value >> 16) //nolint:gosec
+	v[2] = byte(a.Value >> 8)  //nolint:gosec
+	v[3] = byte(a.Value)       //nolint:gosec
 
 	m.Add(attrType, v)
 

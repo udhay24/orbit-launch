@@ -31,11 +31,9 @@ func TestOnList(t *testing.T) {
 		"start before first",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			dir, err := os.MkdirTemp("", "mediamtx-playback")
-			require.NoError(t, err)
-			defer os.RemoveAll(dir)
+			dir := t.TempDir()
 
-			err = os.Mkdir(filepath.Join(dir, "mypath"), 0o755)
+			err := os.Mkdir(filepath.Join(dir, "mypath"), 0o755)
 			require.NoError(t, err)
 
 			switch ca {
@@ -70,12 +68,12 @@ func TestOnList(t *testing.T) {
 					},
 				},
 				AuthManager: &test.AuthManager{
-					AuthenticateImpl: func(req *auth.Request) *auth.Error {
+					AuthenticateImpl: func(req *auth.Request) (string, *auth.Error) {
 						require.Equal(t, conf.AuthActionPlayback, req.Action)
 						require.Equal(t, "myuser", req.Credentials.User)
 						require.Equal(t, "mypass", req.Credentials.Pass)
 						checked = true
-						return nil
+						return req.Credentials.User, nil
 					},
 				},
 				Parent: test.NilLogger,
@@ -255,12 +253,43 @@ func writeDuration(f io.ReadWriteSeeker, d time.Duration) error {
 	return nil
 }
 
-func TestOnListCachedDuration(t *testing.T) {
-	dir, err := os.MkdirTemp("", "mediamtx-playback")
+func TestOnListInvalidPath(t *testing.T) {
+	s := &Server{
+		Address:      "127.0.0.1:9996",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		PathConfs: map[string]*conf.Path{
+			"all_others": {
+				Name:         "all_others",
+				RecordPath:   filepath.Join(t.TempDir(), "mypath/%Y-%m-%d_%H-%M-%S-%f"),
+				RecordFormat: conf.RecordFormatFMP4,
+			},
+		},
+		AuthManager: test.NilAuthManager,
+		Parent:      test.NilLogger,
+	}
+	err := s.Initialize()
 	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	defer s.Close()
 
-	err = os.Mkdir(filepath.Join(dir, "mypath"), 0o755)
+	u, err := url.Parse("http://localhost:9996/list")
+	require.NoError(t, err)
+
+	v := url.Values{}
+	v.Set("path", "group/../cam1")
+	u.RawQuery = v.Encode()
+
+	res, err := http.Get(u.String())
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	require.Equal(t, http.StatusBadRequest, res.StatusCode)
+}
+
+func TestOnListCachedDuration(t *testing.T) {
+	dir := t.TempDir()
+
+	err := os.Mkdir(filepath.Join(dir, "mypath"), 0o755)
 	require.NoError(t, err)
 
 	func() {
@@ -338,11 +367,9 @@ func TestOnListCachedDuration(t *testing.T) {
 }
 
 func TestOnListXForwardedProto(t *testing.T) {
-	dir, err := os.MkdirTemp("", "mediamtx-playback")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
-	err = os.Mkdir(filepath.Join(dir, "mypath"), 0o755)
+	err := os.Mkdir(filepath.Join(dir, "mypath"), 0o755)
 	require.NoError(t, err)
 
 	writeSegment1(t, filepath.Join(dir, "mypath", "2008-11-07_11-22-00-500000.mp4"))

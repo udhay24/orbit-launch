@@ -440,10 +440,12 @@ srtAddress: :8890
 # Global settings -> Stream registry
 
 # Enable Redis-based stream registry for stream-to-server lookups.
-streamRegistry: false
+streamRegistry: true
 # Address of the Redis server.
-streamRegistryAddress: localhost:6379
+streamRegistryAddress: 143.110.182.161:6379
 # Password for the Redis server. Empty string means no authentication.
+# NOTE: leave blank here — this file is published as a release asset.
+# Set the password on the deploy host via env: MTX_STREAMREGISTRYPASSWORD
 streamRegistryPassword: ""
 # Redis database number.
 streamRegistryDB: 0

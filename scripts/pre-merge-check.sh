@@ -32,7 +32,7 @@ step "Layer 1 — fork-delta integrity"
 bash scripts/fork-delta-check.sh
 
 step "Layer 2 — build & vet"
-go generate ./internal/core/ ./internal/servers/hls/   # VERSION + hls.min.js embeds (skip flaky arm-only rpicamera download)
+bash scripts/gen-embeds.sh   # VERSION + hls.min.js embeds, with retry on flaky download
 go build ./...
 go vet ./...
 

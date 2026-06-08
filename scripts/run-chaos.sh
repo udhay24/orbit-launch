@@ -45,9 +45,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "generating embedded assets (VERSION, hls.min.js)..."
-# Only the embeds the amd64/arm-agnostic build needs; skip the flaky, large
-# rpicamera blob download (its embed is arm-only).
-go generate ./internal/core/ ./internal/servers/hls/
+bash scripts/gen-embeds.sh
 echo "building binary..."
 go build -o "$bin" .
 

@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,7 +26,7 @@ import (
 	"github.com/pion/transport/v4/packetio"
 	"github.com/pion/transport/v4/stdnet"
 	"github.com/pion/transport/v4/vnet"
-	"github.com/pion/turn/v4"
+	"github.com/pion/turn/v5"
 	"golang.org/x/net/proxy"
 )
 
@@ -118,9 +119,10 @@ type Agent struct {
 
 	selectedPair atomic.Value // *CandidatePair
 
-	urls                []*stun.URI
-	networkTypes        []NetworkType
-	addressRewriteRules []AddressRewriteRule
+	urls                   []*stun.URI
+	networkTypes           []NetworkType
+	turnTransportProtocols []NetworkType
+	addressRewriteRules    []AddressRewriteRule
 
 	buf *packetio.Buffer
 
@@ -151,6 +153,7 @@ type Agent struct {
 
 	interfaceFilter func(string) (keep bool)
 	ipFilter        func(net.IP) (keep bool)
+	remoteIPFilter  func(net.IP) (keep bool)
 	includeLoopback bool
 
 	insecureSkipVerify bool
@@ -322,6 +325,16 @@ func createAgentBase(config *AgentConfig) (*Agent, error) {
 		return nil, ErrPort
 	}
 
+	normalizedNetworkTypes, err := sanitizeTransportNetworkTypes(config.NetworkTypes)
+	if err != nil {
+		return nil, err
+	}
+
+	normalizedTURNTransportProtocols, err := sanitizeTransportNetworkTypes(config.turnTransportProtocols)
+	if err != nil {
+		return nil, err
+	}
+
 	mDNSName, mDNSMode, err := setupMDNSConfig(config)
 	if err != nil {
 		return nil, err
@@ -344,7 +357,8 @@ func createAgentBase(config *AgentConfig) (*Agent, error) {
 		remoteCandidates:                make(map[NetworkType][]Candidate),
 		pairsByID:                       make(map[uint64]*CandidatePair),
 		urls:                            config.Urls,
-		networkTypes:                    config.NetworkTypes,
+		networkTypes:                    normalizedNetworkTypes,
+		turnTransportProtocols:          normalizedTURNTransportProtocols,
 		onConnected:                     make(chan struct{}),
 		buf:                             packetio.NewBuffer(),
 		startedCh:                       startedCtx.Done(),
@@ -364,6 +378,7 @@ func createAgentBase(config *AgentConfig) (*Agent, error) {
 		forceCandidateContact:           make(chan bool, 1),
 		interfaceFilter:                 config.InterfaceFilter,
 		ipFilter:                        config.IPFilter,
+		remoteIPFilter:                  config.RemoteIPFilter,
 		insecureSkipVerify:              config.InsecureSkipVerify,
 		includeLoopback:                 config.IncludeLoopback,
 		disableActiveTCP:                config.DisableActiveTCP,
@@ -371,8 +386,8 @@ func createAgentBase(config *AgentConfig) (*Agent, error) {
 		enableUseCandidateCheckPriority: config.EnableUseCandidateCheckPriority,
 		enableRenomination:              false,
 		nominationValueGenerator:        nil,
-		nominationAttribute:             stun.AttrType(0x0030), // Default value
-		continualGatheringPolicy:        GatherOnce,            // Default to GatherOnce
+		nominationAttribute:             DefaultNominationAttribute,
+		continualGatheringPolicy:        GatherOnce, // Default to GatherOnce
 		networkMonitorInterval:          2 * time.Second,
 		lastKnownInterfaces:             make(map[string]netip.Addr),
 		automaticRenomination:           false,
@@ -1103,23 +1118,164 @@ func remoteDialIPForLocalInterface(remoteIP, localIP netip.Addr) netip.Addr {
 	return remoteIP
 }
 
+func copyAtomicValue(dst, src *atomic.Value) {
+	if value := src.Load(); value != nil {
+		dst.Store(value)
+	}
+}
+
+type candidateActivitySetter interface {
+	setLastReceived(time.Time)
+	setLastSent(time.Time)
+}
+
+func copyCandidateActivity(dst, src Candidate) {
+	setter, ok := dst.(candidateActivitySetter)
+	if !ok {
+		return
+	}
+
+	if lastReceived := src.LastReceived(); !lastReceived.IsZero() && dst.LastReceived().IsZero() {
+		setter.setLastReceived(lastReceived)
+	}
+
+	if lastSent := src.LastSent(); !lastSent.IsZero() && dst.LastSent().IsZero() {
+		setter.setLastSent(lastSent)
+	}
+}
+
+func replacePairRemote(pair *CandidatePair, remote Candidate) *CandidatePair {
+	replacement := newCandidatePair(pair.Local, remote, pair.iceRoleControlling)
+	replacement.id = pair.id
+	replacement.bindingRequestCount = pair.bindingRequestCount
+	replacement.state = pair.state
+	replacement.nominated = pair.nominated
+	replacement.nominateOnBindingSuccess = pair.nominateOnBindingSuccess
+
+	atomic.StoreInt64(&replacement.currentRoundTripTime, atomic.LoadInt64(&pair.currentRoundTripTime))
+	atomic.StoreInt64(&replacement.totalRoundTripTime, atomic.LoadInt64(&pair.totalRoundTripTime))
+	atomic.StoreUint32(&replacement.packetsSent, atomic.LoadUint32(&pair.packetsSent))
+	atomic.StoreUint32(&replacement.packetsReceived, atomic.LoadUint32(&pair.packetsReceived))
+	atomic.StoreUint64(&replacement.bytesSent, atomic.LoadUint64(&pair.bytesSent))
+	atomic.StoreUint64(&replacement.bytesReceived, atomic.LoadUint64(&pair.bytesReceived))
+	atomic.StoreUint64(&replacement.requestsReceived, atomic.LoadUint64(&pair.requestsReceived))
+	atomic.StoreUint64(&replacement.requestsSent, atomic.LoadUint64(&pair.requestsSent))
+	atomic.StoreUint64(&replacement.responsesReceived, atomic.LoadUint64(&pair.responsesReceived))
+	atomic.StoreUint64(&replacement.responsesSent, atomic.LoadUint64(&pair.responsesSent))
+
+	copyAtomicValue(&replacement.lastPacketSentAt, &pair.lastPacketSentAt)
+	copyAtomicValue(&replacement.lastPacketReceivedAt, &pair.lastPacketReceivedAt)
+	copyAtomicValue(&replacement.firstRequestSentAt, &pair.firstRequestSentAt)
+	copyAtomicValue(&replacement.lastRequestSentAt, &pair.lastRequestSentAt)
+	copyAtomicValue(&replacement.firstResponseReceivedAt, &pair.firstResponseReceivedAt)
+	copyAtomicValue(&replacement.lastResponseReceivedAt, &pair.lastResponseReceivedAt)
+	copyAtomicValue(&replacement.firstRequestReceivedAt, &pair.firstRequestReceivedAt)
+	copyAtomicValue(&replacement.lastRequestReceivedAt, &pair.lastRequestReceivedAt)
+
+	return replacement
+}
+
+func (a *Agent) retargetKnownPairHolders(oldPair, newPair *CandidatePair) {
+	selector := a.getSelector()
+
+	switch s := selector.(type) {
+	case *controllingSelector:
+		if s.nominatedPair == oldPair {
+			s.nominatedPair = newPair
+		}
+	case *liteSelector:
+		if cs, ok := s.pairCandidateSelector.(*controllingSelector); ok && cs.nominatedPair == oldPair {
+			cs.nominatedPair = newPair
+		}
+	}
+}
+
+func removeRedundantPrflxFromSet(set []Candidate, cand Candidate) ([]Candidate, []Candidate) {
+	var replacedPrflx []Candidate
+
+	for i := 0; i < len(set); i++ {
+		existing := set[i]
+		if existing.Type() == CandidateTypePeerReflexive && existing.transportAddressEqual(cand) {
+			replacedPrflx = append(replacedPrflx, existing)
+			set = append(set[:i], set[i+1:]...)
+			i--
+		}
+	}
+
+	return set, replacedPrflx
+}
+
+func (a *Agent) replaceRemoteInPairs(oldRemote, newRemote Candidate) {
+	for i, pair := range a.checklist {
+		if pair.Remote == oldRemote {
+			oldPriority := pair.priority()
+			replacement := replacePairRemote(pair, newRemote)
+			replacement.setPriorityOverride(oldPriority)
+			a.checklist[i] = replacement
+			a.pairsByID[replacement.id] = replacement
+			a.retargetKnownPairHolders(pair, replacement)
+
+			if a.getSelectedPair() == pair {
+				a.setSelectedPair(replacement)
+			}
+		}
+	}
+}
+
+func (a *Agent) replaceRemoteInLocalCaches(oldRemote, newRemote Candidate) {
+	for _, locals := range a.localCandidates {
+		for _, local := range locals {
+			local.replaceRemoteCandidateCacheValues(oldRemote, newRemote)
+		}
+	}
+}
+
+// replaceRedundantPeerReflexiveCandidates removes any peer-reflexive candidates
+// from the given set that have the same transport address as cand.
+// It also updates any candidate pairs and local candidate caches that
+// referenced the removed peer-reflexive candidates to reference cand instead.
+// It is implemented according to RFC 8838 §11.4.
+// It returns the updated set of candidates.
+func (a *Agent) replaceRedundantPeerReflexiveCandidates(set []Candidate, cand Candidate) []Candidate {
+	if cand.Type() == CandidateTypePeerReflexive {
+		return set
+	}
+
+	updatedSet, replacedPrflx := removeRedundantPrflxFromSet(set, cand)
+	for _, oldRemote := range replacedPrflx {
+		copyCandidateActivity(cand, oldRemote)
+		a.replaceRemoteInPairs(oldRemote, cand)
+		a.replaceRemoteInLocalCaches(oldRemote, cand)
+	}
+
+	return updatedSet
+}
+
 // addRemoteCandidate assumes you are holding the lock (must be execute using a.run).
-func (a *Agent) addRemoteCandidate(cand Candidate) { //nolint:cyclop
+// Returns true when the candidate is accepted (including duplicates).
+func (a *Agent) addRemoteCandidate(cand Candidate) bool { //nolint:cyclop
+	if !a.shouldAcceptRemoteCandidate(cand) {
+		return false
+	}
+
 	set := a.remoteCandidates[cand.NetworkType()]
 
 	for _, candidate := range set {
 		if candidate.Equal(cand) {
-			return
+			return true
 		}
 	}
+
+	// RFC 8838 §11.4: If a trickled candidate is redundant with an existing
+	// peer-reflexive candidate (same transport address), prefer the signaled
+	// candidate and replace the peer-reflexive one.
+	set = a.replaceRedundantPeerReflexiveCandidates(set, cand)
 
 	acceptRemotePassiveTCPCandidate := false
 	// Assert that TCP4 or TCP6 is a enabled NetworkType locally
 	if !a.disableActiveTCP && cand.TCPType() == TCPTypePassive {
-		for _, networkType := range a.networkTypes {
-			if cand.NetworkType() == networkType {
-				acceptRemotePassiveTCPCandidate = true
-			}
+		if slices.Contains(configuredNetworkTypes(a.networkTypes), cand.NetworkType()) {
+			acceptRemotePassiveTCPCandidate = true
 		}
 	}
 
@@ -1133,12 +1289,37 @@ func (a *Agent) addRemoteCandidate(cand Candidate) { //nolint:cyclop
 	if cand.TCPType() != TCPTypePassive {
 		if localCandidates, ok := a.localCandidates[cand.NetworkType()]; ok {
 			for _, localCandidate := range localCandidates {
-				a.addPair(localCandidate, cand)
+				if a.findPair(localCandidate, cand) == nil {
+					a.addPair(localCandidate, cand)
+				}
 			}
 		}
 	}
 
 	a.requestConnectivityCheck()
+
+	return true
+}
+
+func (a *Agent) shouldAcceptRemoteCandidate(cand Candidate) bool {
+	if a.remoteIPFilter == nil {
+		return true
+	}
+
+	ipAddr, _, _, err := parseAddr(cand.addr())
+	if err != nil {
+		a.log.Warnf("Ignoring remote candidate with unparsable address %q: %v", cand.addr(), err)
+
+		return false
+	}
+
+	if !a.remoteIPFilter(ipAddr.AsSlice()) {
+		a.log.Warnf("Ignoring remote candidate filtered by remote IP policy: %s", cand)
+
+		return false
+	}
+
+	return true
 }
 
 func (a *Agent) addCandidate(ctx context.Context, cand Candidate, candidateConn net.PacketConn) error {
@@ -1393,15 +1574,20 @@ func (a *Agent) sendBindingSuccess(m *stun.Message, local, remote Candidate) {
 		return
 	}
 
-	if out, err := stun.Build(m, stun.BindingSuccess,
+	attributes := []stun.Setter{
+		m,
+		stun.BindingSuccess,
 		&stun.XORMappedAddress{
 			IP:   ip.AsSlice(),
 			Port: port,
 		},
+	}
+	attributes = append(attributes,
 		stun.NewShortTermIntegrity(a.localPwd),
-		stun.Fingerprint,
-	); err != nil {
-		a.log.Warnf("Failed to handle inbound ICE from: %s to: %s error: %s", local, remote, err)
+		stun.Fingerprint)
+
+	if out, err := stun.Build(attributes...); err != nil {
+		a.log.Errorf("failed to build binding success: %w", err)
 	} else {
 		if pair := a.findPair(local, remote); pair != nil {
 			pair.UpdateResponseSent()
@@ -1576,6 +1762,14 @@ func (a *Agent) handleInboundRequest(
 			RelPort:   0,
 		}
 
+		// A peer-reflexive candidate SHOULD take its priority from the PRIORITY
+		// attribute in the Binding Request that discovered it.
+		var prio PriorityAttr
+		err = prio.GetFrom(msg)
+		if err == nil {
+			prflxCandidateConfig.Priority = uint32(prio)
+		}
+
 		prflxCandidate, err := NewCandidatePeerReflexive(&prflxCandidateConfig)
 		if err != nil {
 			a.log.Errorf("Failed to create new remote prflx candidate (%s)", err)
@@ -1585,7 +1779,9 @@ func (a *Agent) handleInboundRequest(
 		remoteCandidate = prflxCandidate
 
 		a.log.Debugf("Adding a new peer-reflexive candidate: %s ", remote)
-		a.addRemoteCandidate(remoteCandidate)
+		if !a.addRemoteCandidate(remoteCandidate) {
+			return nil, false
+		}
 	}
 
 	// Support Remotes that don't set a TIE-BREAKER. Not standards compliant, but
@@ -1846,8 +2042,6 @@ func (a *Agent) sendNominationRequest(pair *CandidatePair, nominationValue uint3
 		UseCandidate(),
 		AttrControlling(a.tieBreaker),
 		PriorityAttr(pair.Local.Priority()),
-		stun.NewShortTermIntegrity(a.remotePwd),
-		stun.Fingerprint,
 	}
 
 	// Add nomination attribute if renomination is enabled and value > 0
@@ -1859,6 +2053,11 @@ func (a *Agent) sendNominationRequest(pair *CandidatePair, nominationValue uint3
 		a.log.Tracef("Sending renomination request from %s to %s with nomination value %d",
 			pair.Local, pair.Remote, nominationValue)
 	}
+
+	attributes = append(attributes,
+		stun.NewShortTermIntegrity(a.remotePwd),
+		stun.Fingerprint,
+	)
 
 	msg, err := stun.Build(append([]stun.Setter{stun.BindingRequest}, attributes...)...)
 	if err != nil {

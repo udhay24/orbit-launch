@@ -22,8 +22,8 @@ Features:
     * Read selected media streams
     * Pause or seek without disconnecting from the server
     * Write to ONVIF back channels
-    * Get PTS (presentation timestamp) of incoming packets
-    * Get NTP (absolute timestamp) of incoming packets
+    * Get PTS (presentation timestamp) of inbound packets
+    * Get NTP (absolute timestamp) of inbound packets
   * Write media streams to a server ("record")
     * Write streams with the UDP or TCP transport protocol
     * Switch transport protocol automatically
@@ -35,8 +35,8 @@ Features:
   * Validate client credentials
   * Read media streams from clients ("record")
     * Read streams with the UDP or TCP transport protocol
-    * Get PTS (presentation timestamp) of incoming packets
-    * Get NTP (absolute timestamp) of incoming packets
+    * Get PTS (presentation timestamp) of inbound packets
+    * Get NTP (absolute timestamp) of inbound packets
   * Serve media streams to clients ("play")
     * Write streams with the UDP, UDP-multicast or TCP transport protocol
     * Compute and provide SSRC, RTP-Info to clients
@@ -144,7 +144,7 @@ In RTSP, media streams are transmitted by using RTP packets, which are encoded i
 
 |format|documentation|encoder and decoder available|
 |------|-------------|-----------------------------|
-|MPEG-TS|[link](https://pkg.go.dev/github.com/bluenviron/gortsplib/v5/pkg/format#MPEGTS)||
+|MPEG-TS|[link](https://pkg.go.dev/github.com/bluenviron/gortsplib/v5/pkg/format#MPEGTS)|:heavy_check_mark:|
 |KLV|[link](https://pkg.go.dev/github.com/bluenviron/gortsplib/v5/pkg/format#KLV)|:heavy_check_mark:|
 
 ## Specifications
@@ -163,7 +163,7 @@ In RTSP, media streams are transmitted by using RTP packets, which are encoded i
 |[RFC7798, RTP Payload Format for High Efficiency Video Coding (HEVC)](https://datatracker.ietf.org/doc/html/rfc7798)|payload formats / H265|
 |[RFC6184, RTP Payload Format for H.264 Video](https://datatracker.ietf.org/doc/html/rfc6184)|payload formats / H264|
 |[RFC3640, RTP Payload Format for Transport of MPEG-4 Elementary Streams](https://datatracker.ietf.org/doc/html/rfc3640)|payload formats / MPEG-4 audio, MPEG-4 video|
-|[RFC2250, RTP Payload Format for MPEG1/MPEG2 Video](https://datatracker.ietf.org/doc/html/rfc2250)|payload formats / MPEG-1 video, MPEG-2 audio, MPEG-TS|
+|[RFC2250, RTP Payload Format for MPEG1/MPEG2 Video](https://datatracker.ietf.org/doc/html/rfc2250)|payload formats / MPEG-1/2 video, MPEG-1/2 audio, MPEG-TS|
 |[RFC2435, RTP Payload Format for JPEG-compressed Video](https://datatracker.ietf.org/doc/html/rfc2435)|payload formats / M-JPEG|
 |[RFC7587, RTP Payload Format for the Opus Speech and Audio Codec](https://datatracker.ietf.org/doc/html/rfc7587)|payload formats / Opus|
 |[Multiopus in libwebrtc](https://webrtc-review.googlesource.com/c/src/+/129768)|payload formats / Opus|

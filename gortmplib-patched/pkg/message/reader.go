@@ -13,6 +13,9 @@ func allocateMessage(raw *rawmessage.Message) (Message, error) {
 	case TypeSetChunkSize:
 		return &SetChunkSize{}, nil
 
+	case TypeAbortMessage:
+		return &AbortMessage{}, nil
+
 	case TypeAcknowledge:
 		return &Acknowledge{}, nil
 
@@ -50,6 +53,10 @@ func allocateMessage(raw *rawmessage.Message) (Message, error) {
 
 		case UserControlTypePingResponse:
 			return &UserControlPingResponse{}, nil
+
+		// undocumented messages sent by Flash Media Server
+		case userControlTypeUndocumented1, userControlTypeUndocumented2:
+			return &UserControlUndocumented{}, nil
 
 		default:
 			return nil, fmt.Errorf("invalid user control type: %v", userControlType)
@@ -169,6 +176,9 @@ func (r *Reader) Read() (Message, error) {
 		if err != nil {
 			return nil, err
 		}
+
+	case *AbortMessage:
+		r.r.AbortChunkStream(tmsg.ChunkStreamID)
 
 	case *SetWindowAckSize:
 		r.r.SetWindowAckSize(tmsg.Value)

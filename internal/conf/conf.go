@@ -248,7 +248,7 @@ type Conf struct {
 	DumpPackets         bool            `json:"dumpPackets"`
 	ReadTimeout         Duration        `json:"readTimeout"`
 	WriteTimeout        Duration        `json:"writeTimeout"`
-	ReadBufferCount     *int            `json:"readBufferCount,omitempty"` // deprecated
+	ReadBufferCount     *int            `json:"readBufferCount,omitempty" deprecated:"true"`
 	WriteQueueSize      int             `json:"writeQueueSize"`
 	UDPMaxPayloadSize   int             `json:"udpMaxPayloadSize"`
 	UDPReadBufferSize   uint            `json:"udpReadBufferSize"`
@@ -260,14 +260,16 @@ type Conf struct {
 	AuthMethod                AuthMethod                   `json:"authMethod"`
 	AuthInternalUsers         []AuthInternalUser           `json:"authInternalUsers"`
 	AuthHTTPAddress           string                       `json:"authHTTPAddress"`
-	ExternalAuthenticationURL *string                      `json:"externalAuthenticationURL,omitempty"` // deprecated
+	ExternalAuthenticationURL *string                      `json:"externalAuthenticationURL,omitempty" deprecated:"true"`
 	AuthHTTPFingerprint       string                       `json:"authHTTPFingerprint"`
 	AuthHTTPExclude           []AuthInternalUserPermission `json:"authHTTPExclude"`
 	AuthJWTJWKS               string                       `json:"authJWTJWKS"`
 	AuthJWTJWKSFingerprint    string                       `json:"authJWTJWKSFingerprint"`
 	AuthJWTClaimKey           string                       `json:"authJWTClaimKey"`
 	AuthJWTExclude            []AuthInternalUserPermission `json:"authJWTExclude"`
-	AuthJWTInHTTPQuery        bool                         `json:"authJWTInHTTPQuery"`
+	AuthJWTInHTTPQuery        *bool                        `json:"authJWTInHTTPQuery,omitempty" deprecated:"true"`
+	AuthJWTIssuer             string                       `json:"authJWTIssuer"`
+	AuthJWTAudience           string                       `json:"authJWTAudience"`
 
 	// Control API
 	API               bool       `json:"api"`
@@ -275,7 +277,7 @@ type Conf struct {
 	APIEncryption     bool       `json:"apiEncryption"`
 	APIServerKey      string     `json:"apiServerKey"`
 	APIServerCert     string     `json:"apiServerCert"`
-	APIAllowOrigin    *string    `json:"apiAllowOrigin,omitempty"` // deprecated
+	APIAllowOrigin    *string    `json:"apiAllowOrigin,omitempty" deprecated:"true"`
 	APIAllowOrigins   []string   `json:"apiAllowOrigins"`
 	APITrustedProxies IPNetworks `json:"apiTrustedProxies"`
 
@@ -285,7 +287,7 @@ type Conf struct {
 	MetricsEncryption     bool       `json:"metricsEncryption"`
 	MetricsServerKey      string     `json:"metricsServerKey"`
 	MetricsServerCert     string     `json:"metricsServerCert"`
-	MetricsAllowOrigin    *string    `json:"metricsAllowOrigin,omitempty"` // deprecated
+	MetricsAllowOrigin    *string    `json:"metricsAllowOrigin,omitempty" deprecated:"true"`
 	MetricsAllowOrigins   []string   `json:"metricsAllowOrigins"`
 	MetricsTrustedProxies IPNetworks `json:"metricsTrustedProxies"`
 
@@ -295,7 +297,7 @@ type Conf struct {
 	PPROFEncryption     bool       `json:"pprofEncryption"`
 	PPROFServerKey      string     `json:"pprofServerKey"`
 	PPROFServerCert     string     `json:"pprofServerCert"`
-	PPROFAllowOrigin    *string    `json:"pprofAllowOrigin,omitempty"` // deprecated
+	PPROFAllowOrigin    *string    `json:"pprofAllowOrigin,omitempty" deprecated:"true"`
 	PPROFAllowOrigins   []string   `json:"pprofAllowOrigins"`
 	PPROFTrustedProxies IPNetworks `json:"pprofTrustedProxies"`
 
@@ -305,16 +307,16 @@ type Conf struct {
 	PlaybackEncryption     bool       `json:"playbackEncryption"`
 	PlaybackServerKey      string     `json:"playbackServerKey"`
 	PlaybackServerCert     string     `json:"playbackServerCert"`
-	PlaybackAllowOrigin    *string    `json:"playbackAllowOrigin,omitempty"` // deprecated
+	PlaybackAllowOrigin    *string    `json:"playbackAllowOrigin,omitempty" deprecated:"true"`
 	PlaybackAllowOrigins   []string   `json:"playbackAllowOrigins"`
 	PlaybackTrustedProxies IPNetworks `json:"playbackTrustedProxies"`
 
 	// RTSP server
 	RTSP                  bool             `json:"rtsp"`
-	RTSPDisable           *bool            `json:"rtspDisable,omitempty"` // deprecated
-	Protocols             *RTSPTransports  `json:"protocols,omitempty"`   // deprecated
+	RTSPDisable           *bool            `json:"rtspDisable,omitempty" deprecated:"true"`
+	Protocols             *RTSPTransports  `json:"protocols,omitempty" deprecated:"true"`
 	RTSPTransports        RTSPTransports   `json:"rtspTransports"`
-	Encryption            *Encryption      `json:"encryption,omitempty"` // deprecated
+	Encryption            *Encryption      `json:"encryption,omitempty" deprecated:"true"`
 	RTSPEncryption        Encryption       `json:"rtspEncryption"`
 	RTSPAddress           string           `json:"rtspAddress"`
 	RTSPSAddress          string           `json:"rtspsAddress"`
@@ -331,13 +333,13 @@ type Conf struct {
 	ServerCert            *string          `json:"serverCert,omitempty"`
 	RTSPServerKey         string           `json:"rtspServerKey"`
 	RTSPServerCert        string           `json:"rtspServerCert"`
-	AuthMethods           *RTSPAuthMethods `json:"authMethods,omitempty"` // deprecated
+	AuthMethods           *RTSPAuthMethods `json:"authMethods,omitempty" deprecated:"true"`
 	RTSPAuthMethods       RTSPAuthMethods  `json:"rtspAuthMethods"`
-	RTSPUDPReadBufferSize *uint            `json:"rtspUDPReadBufferSize,omitempty"` // deprecated
+	RTSPUDPReadBufferSize *uint            `json:"rtspUDPReadBufferSize,omitempty" deprecated:"true"`
 
 	// RTMP server
 	RTMP           bool       `json:"rtmp"`
-	RTMPDisable    *bool      `json:"rtmpDisable,omitempty"` // deprecated
+	RTMPDisable    *bool      `json:"rtmpDisable,omitempty" deprecated:"true"`
 	RTMPEncryption Encryption `json:"rtmpEncryption"`
 	RTMPAddress    string     `json:"rtmpAddress"`
 	RTMPSAddress   string     `json:"rtmpsAddress"`
@@ -346,12 +348,12 @@ type Conf struct {
 
 	// HLS server
 	HLS                bool       `json:"hls"`
-	HLSDisable         *bool      `json:"hlsDisable,omitempty"` // deprecated
+	HLSDisable         *bool      `json:"hlsDisable,omitempty" deprecated:"true"`
 	HLSAddress         string     `json:"hlsAddress"`
 	HLSEncryption      bool       `json:"hlsEncryption"`
 	HLSServerKey       string     `json:"hlsServerKey"`
 	HLSServerCert      string     `json:"hlsServerCert"`
-	HLSAllowOrigin     *string    `json:"hlsAllowOrigin,omitempty"` // deprecated
+	HLSAllowOrigin     *string    `json:"hlsAllowOrigin,omitempty" deprecated:"true"`
 	HLSAllowOrigins    []string   `json:"hlsAllowOrigins"`
 	HLSTrustedProxies  IPNetworks `json:"hlsTrustedProxies"`
 	HLSAlwaysRemux     bool       `json:"hlsAlwaysRemux"`
@@ -362,15 +364,16 @@ type Conf struct {
 	HLSSegmentMaxSize  StringSize `json:"hlsSegmentMaxSize"`
 	HLSDirectory       string     `json:"hlsDirectory"`
 	HLSMuxerCloseAfter Duration   `json:"hlsMuxerCloseAfter"`
+	HLSCDNSecret       string     `json:"hlsCDNSecret"`
 
 	// WebRTC server
 	WebRTC                      bool              `json:"webrtc"`
-	WebRTCDisable               *bool             `json:"webrtcDisable,omitempty"` // deprecated
+	WebRTCDisable               *bool             `json:"webrtcDisable,omitempty" deprecated:"true"`
 	WebRTCAddress               string            `json:"webrtcAddress"`
 	WebRTCEncryption            bool              `json:"webrtcEncryption"`
 	WebRTCServerKey             string            `json:"webrtcServerKey"`
 	WebRTCServerCert            string            `json:"webrtcServerCert"`
-	WebRTCAllowOrigin           *string           `json:"webrtcAllowOrigin,omitempty"` // deprecated
+	WebRTCAllowOrigin           *string           `json:"webrtcAllowOrigin,omitempty" deprecated:"true"`
 	WebRTCAllowOrigins          []string          `json:"webrtcAllowOrigins"`
 	WebRTCTrustedProxies        IPNetworks        `json:"webrtcTrustedProxies"`
 	WebRTCLocalUDPAddress       string            `json:"webrtcLocalUDPAddress"`
@@ -382,10 +385,10 @@ type Conf struct {
 	WebRTCSTUNGatherTimeout     Duration          `json:"webrtcSTUNGatherTimeout"`
 	WebRTCHandshakeTimeout      Duration          `json:"webrtcHandshakeTimeout"`
 	WebRTCTrackGatherTimeout    Duration          `json:"webrtcTrackGatherTimeout"`
-	WebRTCICEUDPMuxAddress      *string           `json:"webrtcICEUDPMuxAddress,omitempty"`  // deprecated
-	WebRTCICETCPMuxAddress      *string           `json:"webrtcICETCPMuxAddress,omitempty"`  // deprecated
-	WebRTCICEHostNAT1To1IPs     *[]string         `json:"webrtcICEHostNAT1To1IPs,omitempty"` // deprecated
-	WebRTCICEServers            *[]string         `json:"webrtcICEServers,omitempty"`        // deprecated
+	WebRTCICEUDPMuxAddress      *string           `json:"webrtcICEUDPMuxAddress,omitempty" deprecated:"true"`
+	WebRTCICETCPMuxAddress      *string           `json:"webrtcICETCPMuxAddress,omitempty" deprecated:"true"`
+	WebRTCICEHostNAT1To1IPs     *[]string         `json:"webrtcICEHostNAT1To1IPs,omitempty" deprecated:"true"`
+	WebRTCICEServers            *[]string         `json:"webrtcICEServers,omitempty" deprecated:"true"`
 
 	// SRT server
 	SRT        bool   `json:"srt"`
@@ -403,13 +406,22 @@ type Conf struct {
 	MaxPublishers       int `json:"maxPublishers"`
 	PublisherHysteresis int `json:"publisherHysteresis"`
 
+	// MoQ server
+	MoQ               bool       `json:"moq"`
+	MoQHTTPS2Address  string     `json:"moqHTTPS2Address"`
+	MoQHTTPS3Address  string     `json:"moqHTTPS3Address"`
+	MoQServerKey      string     `json:"moqServerKey"`
+	MoQServerCert     string     `json:"moqServerCert"`
+	MoQAllowOrigins   []string   `json:"moqAllowOrigins"`
+	MoQTrustedProxies IPNetworks `json:"moqTrustedProxies"`
+
 	// Record (deprecated)
-	Record                *bool         `json:"record,omitempty"`                // deprecated
-	RecordPath            *string       `json:"recordPath,omitempty"`            // deprecated
-	RecordFormat          *RecordFormat `json:"recordFormat,omitempty"`          // deprecated
-	RecordPartDuration    *Duration     `json:"recordPartDuration,omitempty"`    // deprecated
-	RecordSegmentDuration *Duration     `json:"recordSegmentDuration,omitempty"` // deprecated
-	RecordDeleteAfter     *Duration     `json:"recordDeleteAfter,omitempty"`     // deprecated
+	Record                *bool         `json:"record,omitempty" deprecated:"true"`
+	RecordPath            *string       `json:"recordPath,omitempty" deprecated:"true"`
+	RecordFormat          *RecordFormat `json:"recordFormat,omitempty" deprecated:"true"`
+	RecordPartDuration    *Duration     `json:"recordPartDuration,omitempty" deprecated:"true"`
+	RecordSegmentDuration *Duration     `json:"recordSegmentDuration,omitempty" deprecated:"true"`
+	RecordDeleteAfter     *Duration     `json:"recordDeleteAfter,omitempty" deprecated:"true"`
 
 	// Path defaults
 	PathDefaults Path `json:"pathDefaults"`
@@ -446,7 +458,6 @@ func (conf *Conf) setDefaults() {
 		},
 	}
 	conf.AuthJWTClaimKey = "mediamtx_permissions"
-	conf.AuthJWTInHTTPQuery = true
 
 	// Control API
 	conf.APIAddress = ":9997"
@@ -539,6 +550,14 @@ func (conf *Conf) setDefaults() {
 	// Publisher limits
 	conf.MaxPublishers = 2000
 	conf.PublisherHysteresis = 100
+
+	// MoQ server
+	conf.MoQ = true
+	conf.MoQHTTPS2Address = ":8892"
+	conf.MoQHTTPS3Address = ":8892"
+	conf.MoQServerKey = "auto.key"
+	conf.MoQServerCert = "auto.crt"
+	conf.MoQAllowOrigins = []string{"*"}
 
 	conf.PathDefaults.setDefaults()
 }
@@ -642,6 +661,10 @@ func (conf *Conf) Validate(l logger.Writer) error {
 		return fmt.Errorf("'writeTimeout' must be greater than zero")
 	}
 
+	if conf.WriteQueueSize <= 0 {
+		return fmt.Errorf("'writeQueueSize' must be greater than zero")
+	}
+
 	if (conf.WriteQueueSize & (conf.WriteQueueSize - 1)) != 0 {
 		return fmt.Errorf("'writeQueueSize' must be a power of two")
 	}
@@ -738,6 +761,10 @@ func (conf *Conf) Validate(l logger.Writer) error {
 		if conf.AuthJWTClaimKey == "" {
 			return fmt.Errorf("'authJWTClaimKey' is empty")
 		}
+	}
+
+	if conf.AuthJWTInHTTPQuery != nil {
+		l.Log(logger.Warn, "parameter 'authJWTInHTTPQuery' is deprecated and will be removed in a future release")
 	}
 
 	// Control API (deprecated params)
@@ -952,6 +979,12 @@ func (conf *Conf) Validate(l logger.Writer) error {
 	if conf.HLS {
 		if conf.HLSAddress == "" {
 			return fmt.Errorf("'hlsAddress' must be set when HLS is enabled")
+		}
+	}
+
+	if conf.HLSCDNSecret != "" {
+		if !rePlainCredential.MatchString(conf.HLSCDNSecret) {
+			return fmt.Errorf("'hlsCDNSecret' contains unsupported characters. Supported are: %s", plainCredentialSupportedChars)
 		}
 	}
 

@@ -220,6 +220,7 @@ type Packet interface {
 
 type PacketHeader struct {
 	Addr            net.Addr
+	LocalAddr       net.Addr
 	IsControlPacket bool
 	PktTsbpdTime    uint64 // microseconds
 
@@ -257,7 +258,7 @@ type pool struct {
 func newPool() *pool {
 	return &pool{
 		pool: sync.Pool{
-			New: func() interface{} {
+			New: func() any {
 				return new(bytes.Buffer)
 			},
 		},
@@ -682,11 +683,15 @@ func (c *CIFHandshake) Unmarshal(data []byte) error {
 
 			c.CongestionCtl = strings.TrimRight(b.String(), "\x00")
 		} else if extensionType == EXTTYPE_FILTER || extensionType == EXTTYPE_GROUP {
+			// Skip unimplemented extensions
 			if len(pivot) < extensionLength {
 				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
 			}
 		} else {
-			return fmt.Errorf("unknown extension (%d)", extensionType)
+			// Skip unknown extensions
+			if len(pivot) < extensionLength {
+				return fmt.Errorf("invalid extension length of %d bytes (%s)", extensionLength, extensionType.String())
+			}
 		}
 
 		if len(pivot) > extensionLength {
@@ -788,7 +793,7 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 
 		missing := (4 - streamId.Len()%4)
 		if missing < 4 {
-			for i := 0; i < missing; i++ {
+			for range missing {
 				streamId.WriteByte(0)
 			}
 		}
@@ -815,7 +820,7 @@ func (c *CIFHandshake) Marshal(w io.Writer) error {
 
 		missing := (4 - congestion.Len()%4)
 		if missing < 4 {
-			for i := 0; i < missing; i++ {
+			for range missing {
 				congestion.WriteByte(0)
 			}
 		}

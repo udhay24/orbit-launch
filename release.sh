@@ -50,52 +50,43 @@ if ! command -v gh &>/dev/null; then
 fi
 gh auth status --hostname github.com >/dev/null
 
-# ── Build inside Docker (native Linux — no cross-compile surprises) ───────────
+# ── Build (native cross-compile, CGO disabled) ───────────────────────────────
+# Go cross-compiles to linux/amd64 natively with CGO disabled — no Docker
+# emulation. Emulating amd64 on Apple Silicon (Rosetta/qemu) segfaults the Go
+# toolchain on large builds, so we cross-compile on the host instead.
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-if ! command -v docker &>/dev/null; then
-    echo "ERROR: docker not found. Install Docker Desktop to build release binaries."
+if ! command -v go &>/dev/null; then
+    echo "ERROR: go not found in PATH."
     exit 1
 fi
 
 cd "$SCRIPT_DIR"
 
-# Detect Go version from go.mod for an exact match in the build image
-GO_VERSION=$(grep '^go ' go.mod | awk '{print $2}' | cut -d. -f1,2)
-GO_IMAGE="golang:${GO_VERSION}-alpine"
-echo "==> Building mediamtx inside Docker ($GO_IMAGE)..."
-
-docker run --rm \
-    --platform linux/amd64 \
-    -v "$SCRIPT_DIR":/src \
-    -v "$BUILD_DIR":/out \
-    -w /src \
-    -e CGO_ENABLED=0 \
-    -e GOOS=linux \
-    -e GOARCH=amd64 \
-    "$GO_IMAGE" \
-    sh -c 'go build -o /out/mediamtx .'
+echo "==> Building mediamtx (linux/amd64, native cross-compile)..."
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "$BUILD_DIR/mediamtx" .
 
 cp mediamtx.yml "$BUILD_DIR/mediamtx.yml"
 
-# Verify ELF binary is Linux x86-64 — catches ARM cross-compile from Apple Silicon
+# Verify ELF binary is Linux x86-64
 file "$BUILD_DIR/mediamtx" | grep -q "ELF 64-bit.*x86-64" \
     || { echo "ERROR: mediamtx is not a Linux x86-64 binary (got: $(file "$BUILD_DIR/mediamtx")) — aborting"; exit 1; }
 
 echo "==> Build complete: $(du -sh "$BUILD_DIR/mediamtx" | cut -f1) binary (ELF 64-bit x86-64 verified)"
 
-# Verify yml is compatible with the binary — catches version mismatch (e.g. unknown fields)
-# mediamtx exits immediately with an error if the config has unrecognised fields.
-# We run it with a 2s timeout; it will either print an ERR and exit 1 (bad yml)
-# or start listening and be killed by the timeout (good yml → exit 143, treated as success).
+# Verify yml is compatible with the binary — catches version mismatch (e.g. unknown fields).
+# Build a host-arch linux binary and parse the config in a clean native container
+# (no emulation, no host port conflicts). Same source => same config schema as the
+# released amd64 binary. mediamtx prints "ERR:" and exits if the config is invalid.
 echo "==> Validating mediamtx.yml against binary..."
+HOST_ARCH=$(go env GOARCH)
+CGO_ENABLED=0 GOOS=linux GOARCH="$HOST_ARCH" go build -o "$BUILD_DIR/mediamtx-validate" .
 VALIDATE_OUTPUT=$(docker run --rm \
-    --platform linux/amd64 \
     -v "$BUILD_DIR":/out \
     -w /out \
     alpine \
-    sh -c 'timeout 2 ./mediamtx mediamtx.yml 2>&1 || true')
+    sh -c 'timeout 2 ./mediamtx-validate mediamtx.yml 2>&1 || true')
 
 if echo "$VALIDATE_OUTPUT" | grep -q "^ERR:"; then
     echo "ERROR: mediamtx rejected the yml config:"

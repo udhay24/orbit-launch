@@ -50,9 +50,8 @@ func dateTimeOfPreloadHint(pl *playlist.Media) *time.Time {
 }
 
 type clientStreamDownloaderClient interface {
-	setLeadingTimeConv(ts clientTimeConv)
-	waitLeadingTimeConv(ctx context.Context) bool
-	getLeadingTimeConv() clientTimeConv
+	setTimeConv(ts clientTimeConv)
+	waitTimeConv(ctx context.Context) (clientTimeConv, bool)
 }
 
 type clientStreamDownloader struct {
@@ -220,10 +219,18 @@ func (d *clientStreamDownloader) downloadPlaylist(
 
 	d.onDownloadStreamPlaylist(ur.String())
 
-	pl, err := downloadPlaylist(ctx, d.httpClient, d.onRequest, ur)
+	finalURL, pl, err := downloadPlaylist(ctx, d.httpClient, d.onRequest, ur)
 	if err != nil {
 		return nil, err
 	}
+
+	if skipUntil {
+		q := finalURL.Query()
+		q.Del("_HLS_skip")
+		finalURL.RawQuery = q.Encode()
+	}
+
+	d.playlistURL = finalURL
 
 	plt, ok := pl.(*playlist.Media)
 	if !ok {
@@ -266,7 +273,7 @@ func (d *clientStreamDownloader) downloadPreloadHint(
 		return nil, fmt.Errorf("bad status code: %d", res.StatusCode)
 	}
 
-	byts, err := io.ReadAll(res.Body)
+	byts, err := io.ReadAll(&customLimitReader{res.Body, clientMaxInboundPartSize})
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +319,7 @@ func (d *clientStreamDownloader) downloadSegment(
 		return nil, fmt.Errorf("bad status code: %d", res.StatusCode)
 	}
 
-	byts, err := io.ReadAll(res.Body)
+	byts, err := io.ReadAll(&customLimitReader{res.Body, clientMaxInboundSegmentSize})
 	if err != nil {
 		return nil, err
 	}

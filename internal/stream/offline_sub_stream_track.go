@@ -28,8 +28,38 @@ var offlineVP9 []byte
 //go:embed offline_h265.mp4
 var offlineH265 []byte
 
+var offlineH265VPS = []byte{
+	0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x01, 0x60,
+	0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03,
+	0x00, 0x00, 0x03, 0x00, 0x78, 0xba, 0x02, 0x40,
+}
+
+var offlineH265SPS = []byte{
+	0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03,
+	0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+	0x00, 0x78, 0xa0, 0x03, 0xc0, 0x80, 0x11, 0x07,
+	0xcb, 0x96, 0xe9, 0x29, 0x30, 0xbc, 0x05, 0xa0,
+	0x20, 0x00, 0x00, 0x03, 0x00, 0x20, 0x00, 0x00,
+	0x03, 0x03, 0xc1,
+}
+
+var offlineH265PPS = []byte{
+	0x44, 0x01, 0xc0, 0x73, 0xc1, 0x89,
+}
+
 //go:embed offline_h264.mp4
 var offlineH264 []byte
+
+var offlineH264SPS = []byte{
+	0x67, 0x42, 0xc0, 0x28, 0xda, 0x01, 0xe0, 0x08,
+	0x9f, 0x97, 0x01, 0x10, 0x00, 0x00, 0x03, 0x00,
+	0x10, 0x00, 0x00, 0x03, 0x03, 0xc0, 0xf1, 0x83,
+	0x2a,
+}
+
+var offlineH264PPS = []byte{
+	0x68, 0xce, 0x3c, 0x80,
+}
 
 type offlineSubStreamTrack struct {
 	wg             *sync.WaitGroup
@@ -50,9 +80,6 @@ func (t *offlineSubStreamTrack) initialize() {
 func (t *offlineSubStreamTrack) run() {
 	defer t.wg.Done()
 
-	var pts int64
-	systemTime := time.Now()
-
 	if t.file != "" {
 		f, err := os.Open(t.file)
 		if err != nil {
@@ -60,7 +87,7 @@ func (t *offlineSubStreamTrack) run() {
 		}
 		defer f.Close()
 
-		err = t.runFile(pts, systemTime, f, t.pos)
+		err = t.runFile(f, t.pos)
 		if err != nil {
 			panic(err)
 		}
@@ -68,12 +95,13 @@ func (t *offlineSubStreamTrack) run() {
 	}
 
 	const audioWritesPerSecond = 10
+	var pts int64
+	startSystemTime := time.Now()
 
 	switch forma := t.format.(type) {
 	case *format.Opus:
 		unitsPerWrite := (forma.ClockRate() / 960) / audioWritesPerSecond
 		writeDuration := 960 * int64(unitsPerWrite)
-		writeDurationGo := multiplyAndDivide2(time.Duration(writeDuration), time.Second, 48000)
 
 		for {
 			payload := make(unit.PayloadOpus, unitsPerWrite)
@@ -88,7 +116,9 @@ func (t *offlineSubStreamTrack) run() {
 			})
 
 			pts += writeDuration
-			systemTime = systemTime.Add(writeDurationGo)
+
+			ptsGo := multiplyAndDivide2(time.Duration(pts), time.Second, 48000)
+			systemTime := startSystemTime.Add(ptsGo)
 
 			if !t.sleep(systemTime) {
 				return
@@ -98,7 +128,6 @@ func (t *offlineSubStreamTrack) run() {
 	case *format.MPEG4Audio:
 		unitsPerWrite := (forma.ClockRate() / mpeg4audio.SamplesPerAccessUnit) / audioWritesPerSecond
 		writeDuration := mpeg4audio.SamplesPerAccessUnit * int64(unitsPerWrite)
-		writeDurationGo := multiplyAndDivide2(time.Duration(writeDuration), time.Second, time.Duration(forma.ClockRate()))
 
 		for {
 			var frame []byte
@@ -122,7 +151,9 @@ func (t *offlineSubStreamTrack) run() {
 			})
 
 			pts += writeDuration
-			systemTime = systemTime.Add(writeDurationGo)
+
+			ptsGo := multiplyAndDivide2(time.Duration(pts), time.Second, time.Duration(forma.ClockRate()))
+			systemTime := startSystemTime.Add(ptsGo)
 
 			if !t.sleep(systemTime) {
 				return
@@ -132,7 +163,6 @@ func (t *offlineSubStreamTrack) run() {
 	case *format.G711:
 		samplesPerWrite := forma.ClockRate() / audioWritesPerSecond
 		writeDuration := samplesPerWrite
-		writeDurationGo := multiplyAndDivide2(time.Duration(writeDuration), time.Second, time.Duration(forma.ClockRate()))
 
 		for {
 			var sample byte
@@ -154,7 +184,9 @@ func (t *offlineSubStreamTrack) run() {
 			})
 
 			pts += int64(writeDuration)
-			systemTime = systemTime.Add(writeDurationGo)
+
+			ptsGo := multiplyAndDivide2(time.Duration(pts), time.Second, time.Duration(forma.ClockRate()))
+			systemTime := startSystemTime.Add(ptsGo)
 
 			if !t.sleep(systemTime) {
 				return
@@ -164,7 +196,6 @@ func (t *offlineSubStreamTrack) run() {
 	case *format.LPCM:
 		samplesPerWrite := forma.ClockRate() / audioWritesPerSecond
 		writeDuration := samplesPerWrite
-		writeDurationGo := multiplyAndDivide2(time.Duration(writeDuration), time.Second, time.Duration(forma.ClockRate()))
 
 		for {
 			payload := make(unit.PayloadLPCM, samplesPerWrite*forma.ChannelCount*(forma.BitDepth/8))
@@ -176,7 +207,9 @@ func (t *offlineSubStreamTrack) run() {
 			})
 
 			pts += int64(writeDuration)
-			systemTime = systemTime.Add(writeDurationGo)
+
+			ptsGo := multiplyAndDivide2(time.Duration(pts), time.Second, time.Duration(forma.ClockRate()))
+			systemTime := startSystemTime.Add(ptsGo)
 
 			if !t.sleep(systemTime) {
 				return
@@ -205,14 +238,14 @@ func (t *offlineSubStreamTrack) run() {
 
 		r := bytes.NewReader(buf)
 
-		err := t.runFile(pts, systemTime, r, 0)
+		err := t.runFile(r, 0)
 		if err != nil {
 			panic(err)
 		}
 	}
 }
 
-func (t *offlineSubStreamTrack) runFile(pts int64, systemTime time.Time, r io.ReadSeeker, pos int) error {
+func (t *offlineSubStreamTrack) runFile(r io.ReadSeeker, pos int) error {
 	var presentation pmp4.Presentation
 	err := presentation.Unmarshal(r)
 	if err != nil {
@@ -220,32 +253,10 @@ func (t *offlineSubStreamTrack) runFile(pts int64, systemTime time.Time, r io.Re
 	}
 
 	track := presentation.Tracks[pos]
+	var pts int64
+	startSystemTime := time.Now()
 
 	for {
-		// in case of the embedded video, codec parameters are not in the description
-		// and must be sent manually
-		if t.file == "" {
-			switch codec := track.Codec.(type) {
-			case *mcodecs.H265:
-				if codec.SPS != nil && codec.PPS != nil && codec.VPS != nil {
-					t.subStream.WriteUnit(t.media, t.format, &unit.Unit{
-						PTS:     pts,
-						NTP:     time.Time{},
-						Payload: unit.PayloadH265([][]byte{codec.SPS, codec.PPS, codec.VPS}),
-					})
-				}
-
-			case *mcodecs.H264:
-				if codec.SPS != nil && codec.PPS != nil {
-					t.subStream.WriteUnit(t.media, t.format, &unit.Unit{
-						PTS:     pts,
-						NTP:     time.Time{},
-						Payload: unit.PayloadH264([][]byte{codec.SPS, codec.PPS}),
-					})
-				}
-			}
-		}
-
 		for _, sample := range track.Samples {
 			var payload []byte
 			payload, err = sample.GetPayload()
@@ -299,13 +310,34 @@ func (t *offlineSubStreamTrack) runFile(pts int64, systemTime time.Time, r io.Re
 					NTP:     time.Time{},
 					Payload: unit.PayloadH264(avcc),
 				})
+
+			case *mcodecs.Opus:
+				t.subStream.WriteUnit(t.media, t.format, &unit.Unit{
+					PTS:     pts,
+					NTP:     time.Time{},
+					Payload: unit.PayloadOpus([][]byte{payload}),
+				})
+
+			case *mcodecs.MPEG4Audio:
+				t.subStream.WriteUnit(t.media, t.format, &unit.Unit{
+					PTS:     pts,
+					NTP:     time.Time{},
+					Payload: unit.PayloadMPEG4Audio([][]byte{payload}),
+				})
+
+			case *mcodecs.LPCM:
+				t.subStream.WriteUnit(t.media, t.format, &unit.Unit{
+					PTS:     pts,
+					NTP:     time.Time{},
+					Payload: unit.PayloadLPCM(payload),
+				})
 			}
 
 			pts += multiplyAndDivide(int64(sample.Duration)+int64(sample.PTSOffset),
 				int64(t.format.ClockRate()), int64(track.TimeScale))
-			durationGo := multiplyAndDivide2(time.Duration(int64(sample.Duration)+int64(sample.PTSOffset)),
-				time.Second, time.Duration(track.TimeScale))
-			systemTime = systemTime.Add(durationGo)
+
+			ptsGo := multiplyAndDivide2(time.Duration(pts), time.Second, time.Duration(t.format.ClockRate()))
+			systemTime := startSystemTime.Add(ptsGo)
 
 			if !t.sleep(systemTime) {
 				return nil

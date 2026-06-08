@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package sctp
@@ -12,6 +12,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,15 @@ const defaultSCTPSrcDstPort = 5000
 
 // Use global random generator to properly seed by crypto grade random.
 var globalMathRandomGenerator = randutil.NewMathRandomGenerator() // nolint:gochecknoglobals
+
+// Generates a non-zero Initiate tag.
+func generateInitiateTag() uint32 {
+	for {
+		if u := globalMathRandomGenerator.Uint32(); u != 0 {
+			return u
+		}
+	}
+}
 
 // Association errors.
 var (
@@ -64,8 +74,34 @@ const (
 	initialRecvBufSize    uint32 = 1024 * 1024
 	commonHeaderSize      uint32 = 12
 	dataChunkHeaderSize   uint32 = 16
+	iDataChunkHeaderSize  uint32 = 20
 	defaultMaxMessageSize uint32 = 65536
 )
+
+// PartialReliabilityMode indicates the negotiated partial reliability mode.
+type PartialReliabilityMode int
+
+// PartialReliabilityMode values.
+const (
+	PartialReliabilityModeNone PartialReliabilityMode = iota
+	PartialReliabilityModeForwardTSN
+	PartialReliabilityModeIForwardTSN
+)
+
+// AssociationMetadata describes negotiated association capabilities.
+type AssociationMetadata struct {
+	// MessageInterleavingEnabled indicates whether RFC 8260 user message interleaving was negotiated.
+	MessageInterleavingEnabled bool `json:"messageInterleavingEnabled"`
+
+	// PartialReliabilityMode indicates which FORWARD-TSN variant is active.
+	PartialReliabilityMode PartialReliabilityMode `json:"partialReliabilityMode"`
+
+	// ZeroChecksumSendingEnabled indicates whether outgoing packets use zero checksum.
+	ZeroChecksumSendingEnabled bool `json:"zeroChecksumSendingEnabled"`
+
+	// ZeroChecksumReceivingEnabled indicates whether incoming packets may use zero checksum.
+	ZeroChecksumReceivingEnabled bool `json:"zeroChecksumReceivingEnabled"`
+}
 
 // association state enums.
 const (
@@ -200,6 +236,8 @@ type Association struct {
 
 	willSendAbort      bool
 	willSendAbortCause errorCause
+	abortSentOnce      sync.Once
+	abortSentCh        chan struct{}
 
 	// Reconfig
 	myNextRSN        uint32
@@ -222,6 +260,12 @@ type Association struct {
 	cumulativeTSNAckPoint   uint32
 	advancedPeerTSNAckPoint uint32
 	useForwardTSN           bool
+	useIForwardTSN          bool
+	useInterleaving         bool
+	localInterleaving       bool
+	peerInterleaving        bool
+	peerForwardTSN          bool
+	peerIForwardTSN         bool
 	sendZeroChecksum        bool
 	recvZeroChecksum        bool
 
@@ -248,9 +292,9 @@ type Association struct {
 	ackTimer   *ackTimer
 
 	// RACK / TLP state
+	rack                        rackSettings  // rack configurable options
 	rackReoWnd                  time.Duration // dynamic reordering window
 	rackMinRTT                  time.Duration // min observed RTT
-	rackMinRTTWnd               *windowedMin  // the window used to determine minRTT, defaults to 30s
 	rackDeliveredTime           time.Time     // send time of most recently delivered original chunk
 	rackHighestDeliveredOrigTSN uint32
 	rackReorderingSeen          bool // ever observed reordering for this association
@@ -265,9 +309,6 @@ type Association struct {
 	timerUpdateCh chan struct{}
 	rackDeadline  time.Time
 	ptoDeadline   time.Time
-
-	rackWCDelAck    time.Duration // 200ms default
-	rackReoWndFloor time.Duration
 
 	// Chunks stored for retransmission
 	storedInit       *chunkInit
@@ -315,19 +356,25 @@ type Association struct {
 	tlrStartTime time.Time // time of first recovery RTT
 }
 
+type snapConfig struct {
+	// Local and remote SCTP init to use for SNAP
+	localInit  []byte
+	remoteInit []byte
+}
+
 // Config collects the arguments to createAssociation construction into
 // a single structure.
 type Config struct {
-	Name                 string
-	NetConn              net.Conn
-	MaxReceiveBufferSize uint32
-	MaxMessageSize       uint32
-	EnableZeroChecksum   bool
-	LoggerFactory        logging.LoggerFactory
-	BlockWrite           bool
-	MTU                  uint32
+	LoggerFactory      logging.LoggerFactory
+	Name               string
+	NetConn            net.Conn
+	BlockWrite         bool
+	EnableZeroChecksum bool
+	MTU                uint32
 
 	// congestion control configuration
+	MaxReceiveBufferSize uint32
+	MaxMessageSize       uint32
 	// RTOMax is the maximum retransmission timeout in milliseconds
 	RTOMax float64
 	// Minimum congestion window
@@ -337,41 +384,96 @@ type Config struct {
 	// Step of congestion window increase at Congestion Avoidance
 	CwndCAStep uint32
 
-	// The RACK configs are currently private as SCTP will be reworked to use the
-	// modern options pattern in a future release.
-	// Optional: size of window used to determine minimum RTT for RACK (defaults to 30s)
-	rackMinRTTWnd time.Duration
-	// Optional: cap the minimum reordering window: 0 = use quarter-RTT
-	rackReoWndFloor time.Duration
-	// Optional: receiver worst-case delayed-ACK for PTO when only one packet is in flight
-	rackWCDelAck time.Duration
+	// RACK config options
+	rack rackSettings
+
+	// User message interleaving config options
+	interleaving *interleavingSettings
+
+	// SNAP/sctp-init
+	snapConfig *snapConfig
+
+	enableInterleaving    bool
+	enableInterleavingSet bool
 }
 
 // Server accepts a SCTP stream over a conn.
+//
+// Deprecated: Use ServerWithOptions instead.
 func Server(config Config) (*Association, error) {
-	a := createAssociation(config)
-	a.init(false)
+	return ServerWithOptions(config)
+}
+
+// ServerWithOptions accepts a SCTP stream over a conn.
+func ServerWithOptions(opts ...ServerOption) (*Association, error) {
+	assoc, err := createServerAssociation(opts...)
+	if err != nil {
+		return nil, err
+	}
+	assoc.initServer()
 
 	select {
-	case err := <-a.handshakeCompletedCh:
+	case err := <-assoc.handshakeCompletedCh:
 		if err != nil {
 			return nil, err
 		}
 
-		return a, nil
-	case <-a.readLoopCloseCh:
+		return assoc, nil
+	case <-assoc.readLoopCloseCh:
 		return nil, ErrAssociationClosedBeforeConn
 	}
 }
 
 // Client opens a SCTP stream over a conn.
+//
+// Deprecated: Use ClientWithOptions instead.
 func Client(config Config) (*Association, error) {
-	return createClientWithContext(context.Background(), config)
+	return ClientWithOptions(config)
+}
+
+// ClientWithOptions opens a SCTP stream over a conn.
+func ClientWithOptions(opts ...ClientOption) (*Association, error) {
+	return createClientWithOptionsWithContext(context.Background(), opts...)
 }
 
 func createClientWithContext(ctx context.Context, config Config) (*Association, error) {
-	assoc := createAssociation(config)
-	assoc.init(true)
+	return createClientWithOptionsWithContext(ctx, config)
+}
+
+func createSNAPAssociation(config *Config) (*Association, error) {
+	// SNAP, aka sctp-init in the SDP.
+	remote := &chunkInit{}
+	err := remote.unmarshal(config.snapConfig.remoteInit)
+	if err != nil {
+		return nil, err
+	}
+	local := &chunkInit{}
+	err = local.unmarshal(config.snapConfig.localInit)
+	if err != nil {
+		return nil, err
+	}
+	assoc := createAssociationFromConfigWithTsn(config, local.initialTSN)
+	if err = assoc.initWithOutOfBandTokens(local, remote); err != nil {
+		return nil, err
+	}
+
+	return assoc, nil
+}
+
+func createClientWithOptionsWithContext(ctx context.Context, opts ...ClientOption) (*Association, error) {
+	config, err := buildClientConfig(opts...)
+	if err != nil {
+		return nil, err
+	}
+	if config.snapConfig != nil && len(config.snapConfig.remoteInit) != 0 && len(config.snapConfig.localInit) != 0 {
+		return createSNAPAssociation(config)
+	}
+	assoc, err := createClientAssociation(opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	assoc.initClient()
 
 	select {
 	case <-ctx.Done():
@@ -390,51 +492,285 @@ func createClientWithContext(ctx context.Context, config Config) (*Association, 
 	}
 }
 
-func createAssociation(config Config) *Association {
-	maxReceiveBufferSize := config.MaxReceiveBufferSize
+// applyDefaults applies default values to the config.
+func (c *Config) applyDefaults() {
+	if c.LoggerFactory == nil {
+		c.LoggerFactory = logging.NewDefaultLoggerFactory()
+	}
+	if c.MaxReceiveBufferSize == 0 {
+		c.MaxReceiveBufferSize = initialRecvBufSize
+	}
+	if c.MaxMessageSize == 0 {
+		c.MaxMessageSize = defaultMaxMessageSize
+	}
+	if c.MTU == 0 {
+		c.MTU = initialMTU
+	}
+	if !c.enableInterleavingSet {
+		c.enableInterleaving = true
+	}
+	if c.interleaving == nil {
+		c.interleaving = &interleavingSettings{}
+	}
+	if c.interleaving.newStreamScheduler == nil {
+		setWeightedFairQueueingStreamScheduler(c.interleaving)
+	}
+}
+
+func createServerAssociation(opts ...ServerOption) (*Association, error) {
+	cfg, err := buildServerConfig(opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return createAssociationFromConfig(cfg)
+}
+
+func (a *Association) initServer() {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	go a.readLoop()
+	go a.writeLoop()
+}
+
+// applyServer allows the exported Config to act as a ServerOption.
+func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
+	if c.LoggerFactory != nil {
+		cfg.LoggerFactory = c.LoggerFactory
+	}
+	if c.Name != "" {
+		cfg.Name = c.Name
+	}
+	if c.NetConn != nil {
+		cfg.NetConn = c.NetConn
+	}
+
+	cfg.BlockWrite = c.BlockWrite
+	cfg.EnableZeroChecksum = c.EnableZeroChecksum
+
+	if c.MTU != 0 {
+		cfg.MTU = c.MTU
+	}
+	if c.MaxReceiveBufferSize != 0 {
+		cfg.MaxReceiveBufferSize = c.MaxReceiveBufferSize
+	}
+	if c.MaxMessageSize != 0 {
+		cfg.MaxMessageSize = c.MaxMessageSize
+	}
+	if c.RTOMax != 0 {
+		cfg.RTOMax = c.RTOMax
+	}
+	if c.MinCwnd != 0 {
+		cfg.MinCwnd = c.MinCwnd
+	}
+	if c.FastRtxWnd != 0 {
+		cfg.FastRtxWnd = c.FastRtxWnd
+	}
+	if c.CwndCAStep != 0 {
+		cfg.CwndCAStep = c.CwndCAStep
+	}
+
+	cfg.rack = c.rack
+	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
+	if c.enableInterleavingSet {
+		cfg.enableInterleaving = c.enableInterleaving
+		cfg.enableInterleavingSet = true
+	}
+
+	return nil
+}
+
+func buildServerConfig(opts ...ServerOption) (*Config, error) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt.applyServer(cfg); err != nil {
+			return nil, err
+		}
+	}
+
+	cfg.applyDefaults()
+
+	if cfg.NetConn == nil {
+		return nil, errNilNetConn
+	}
+
+	return cfg, nil
+}
+
+func createClientAssociation(opts ...ClientOption) (*Association, error) {
+	cfg, err := buildClientConfig(opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return createAssociationFromConfig(cfg)
+}
+
+func (a *Association) initClient() {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	go a.readLoop()
+	go a.writeLoop()
+
+	init := &chunkInit{}
+	init.initialTSN = a.myNextTSN
+	init.numOutboundStreams = a.myMaxNumOutboundStreams
+	init.numInboundStreams = a.myMaxNumInboundStreams
+	init.initiateTag = a.myVerificationTag
+	init.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
+	setSupportedExtensions(&init.chunkInitCommon, a.localInterleaving)
+
+	if a.recvZeroChecksum {
+		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
+	}
+
+	a.storedInit = init
+
+	err := a.sendInit()
+	if err != nil {
+		a.log.Errorf("[%s] failed to send init: %s", a.name, err.Error())
+	}
+
+	// After sending the INIT chunk, "A" starts the T1-init timer and enters the COOKIE-WAIT state.
+	// Note: ideally we would set state after the timer starts but since we don't do this in an atomic
+	// set + timer-start, it's safer to just set the state first so that we don't have a timer expiration
+	// race.
+	a.setState(cookieWait)
+	a.t1Init.start(a.rtoMgr.getRTO())
+}
+
+// applyClient allows the exported Config to act as a ClientOption.
+// this is currently the same as applyServer.
+func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
+	if c.LoggerFactory != nil {
+		cfg.LoggerFactory = c.LoggerFactory
+	}
+	if c.Name != "" {
+		cfg.Name = c.Name
+	}
+	if c.NetConn != nil {
+		cfg.NetConn = c.NetConn
+	}
+
+	cfg.BlockWrite = c.BlockWrite
+	cfg.EnableZeroChecksum = c.EnableZeroChecksum
+
+	if c.MTU != 0 {
+		cfg.MTU = c.MTU
+	}
+	if c.MaxReceiveBufferSize != 0 {
+		cfg.MaxReceiveBufferSize = c.MaxReceiveBufferSize
+	}
+	if c.MaxMessageSize != 0 {
+		cfg.MaxMessageSize = c.MaxMessageSize
+	}
+	if c.RTOMax != 0 {
+		cfg.RTOMax = c.RTOMax
+	}
+	if c.MinCwnd != 0 {
+		cfg.MinCwnd = c.MinCwnd
+	}
+	if c.FastRtxWnd != 0 {
+		cfg.FastRtxWnd = c.FastRtxWnd
+	}
+	if c.CwndCAStep != 0 {
+		cfg.CwndCAStep = c.CwndCAStep
+	}
+
+	cfg.rack = c.rack
+	cfg.interleaving = cloneInterleavingSettings(c.interleaving)
+	if c.enableInterleavingSet {
+		cfg.enableInterleaving = c.enableInterleaving
+		cfg.enableInterleavingSet = true
+	}
+
+	cfg.snapConfig = c.snapConfig
+
+	return nil
+}
+
+func buildClientConfig(opts ...ClientOption) (*Config, error) {
+	cfg := &Config{}
+	cfg.applyDefaults()
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt.applyClient(cfg); err != nil {
+			return nil, err
+		}
+	}
+
+	cfg.applyDefaults()
+
+	if cfg.NetConn == nil {
+		return nil, errNilNetConn
+	}
+
+	return cfg, nil
+}
+
+func createAssociationFromConfig(cfg *Config) (*Association, error) {
+	tsn := globalMathRandomGenerator.Uint32()
+
+	return createAssociationFromConfigWithTsn(cfg, tsn), nil
+}
+
+func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
+	maxReceiveBufferSize := cfg.MaxReceiveBufferSize
 	if maxReceiveBufferSize == 0 {
 		maxReceiveBufferSize = initialRecvBufSize
 	}
 
-	maxMessageSize := config.MaxMessageSize
+	maxMessageSize := cfg.MaxMessageSize
 	if maxMessageSize == 0 {
 		maxMessageSize = defaultMaxMessageSize
 	}
 
-	mtu := config.MTU
+	mtu := cfg.MTU
 	if mtu == 0 {
 		mtu = initialMTU
 	}
 
-	tsn := globalMathRandomGenerator.Uint32()
+	rtoMax := cfg.RTOMax
+	interleaving := cfg.interleaving
+	if interleaving == nil {
+		interleaving = &interleavingSettings{}
+		setWeightedFairQueueingStreamScheduler(interleaving)
+	}
+
 	assoc := &Association{
-		netConn:              config.NetConn,
+		netConn:              cfg.NetConn,
 		maxReceiveBufferSize: maxReceiveBufferSize,
 		maxMessageSize:       maxMessageSize,
-		minCwnd:              config.MinCwnd,
-		fastRtxWnd:           config.FastRtxWnd,
-		cwndCAStep:           config.CwndCAStep,
+		minCwnd:              cfg.MinCwnd,
+		fastRtxWnd:           cfg.FastRtxWnd,
+		cwndCAStep:           cfg.CwndCAStep,
 
-		// These two max values have us not need to follow
-		// 5.1.1 where this peer may be incapable of supporting
-		// the requested amount of outbound streams from the other
-		// peer.
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
 
 		payloadQueue:            newReceivePayloadQueue(getMaxTSNOffset(maxReceiveBufferSize)),
 		inflightQueue:           newPayloadQueue(),
-		pendingQueue:            newPendingQueue(),
+		pendingQueue:            newPendingQueue(interleaving.newStreamScheduler),
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
 		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
-		myVerificationTag:       globalMathRandomGenerator.Uint32(),
+		myVerificationTag:       generateInitiateTag(),
 		initialTSN:              tsn,
 		myNextTSN:               tsn,
 		myNextRSN:               tsn,
 		minTSN2MeasureRTT:       tsn,
 		state:                   closed,
-		rtoMgr:                  newRTOManager(config.RTOMax),
+		rtoMgr:                  newRTOManager(rtoMax),
 		streams:                 map[uint16]*Stream{},
 		reconfigs:               map[uint32]*chunkReconfig{},
 		reconfigRequests:        map[uint32]*paramOutgoingResetRequest{},
@@ -445,13 +781,15 @@ func createAssociation(config Config) *Association {
 		handshakeCompletedCh:    make(chan error),
 		cumulativeTSNAckPoint:   tsn - 1,
 		advancedPeerTSNAckPoint: tsn - 1,
-		recvZeroChecksum:        config.EnableZeroChecksum,
+		recvZeroChecksum:        cfg.EnableZeroChecksum,
+		localInterleaving:       cfg.enableInterleaving,
 		silentError:             ErrSilentlyDiscard,
 		stats:                   &associationStats{},
-		log:                     config.LoggerFactory.NewLogger("sctp"),
-		name:                    config.Name,
-		blockWrite:              config.BlockWrite,
+		log:                     cfg.LoggerFactory.NewLogger("sctp"),
+		name:                    cfg.Name,
+		blockWrite:              cfg.BlockWrite,
 		writeNotify:             make(chan struct{}, 1),
+		abortSentCh:             make(chan struct{}),
 	}
 
 	// adaptive burst mitigation defaults
@@ -459,77 +797,108 @@ func createAssociation(config Config) *Association {
 	assoc.tlrBurstLaterRTTUnits = tlrBurstDefaultLaterRTT
 
 	// RACK defaults
-	assoc.rackWCDelAck = config.rackWCDelAck
-	if assoc.rackWCDelAck == 0 {
-		assoc.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
+	assoc.rack.rackWCDelAck = cfg.rack.rackWCDelAck
+	if assoc.rack.rackWCDelAck == 0 {
+		assoc.rack.rackWCDelAck = 200 * time.Millisecond // WCDelAckT, RACK for SCTP section 2C
 	}
 
-	// defaults to 30s window to determine minRTT
-	assoc.rackMinRTTWnd = newWindowedMin(config.rackMinRTTWnd)
+	assoc.rack.rackMinRTTWnd = cfg.rack.rackMinRTTWnd
+	if assoc.rack.rackMinRTTWnd == nil {
+		assoc.rack.rackMinRTTWnd = newWindowedMin(30 * time.Second)
+	}
 
 	assoc.timerUpdateCh = make(chan struct{}, 1)
 	go assoc.timerLoop()
 
-	assoc.rackReoWndFloor = config.rackReoWndFloor // optional floor; usually 0
+	assoc.rack.rackReoWndFloor = cfg.rack.rackReoWndFloor // optional floor; usually 0
 	assoc.rackKeepInflatedRecoveries = 0
 
 	if assoc.name == "" {
 		assoc.name = fmt.Sprintf("%p", assoc)
 	}
 
-	// RFC 4690 Sec 7.2.1
-	//  o  The initial cwnd before DATA transmission or after a sufficiently
-	//     long idle period MUST be set to min(4*MTU, max (2*MTU, 4380
-	//     bytes)).
 	assoc.setCWND(min32(4*assoc.MTU(), max32(2*assoc.MTU(), 4380)))
 	assoc.log.Tracef("[%s] updated cwnd=%d ssthresh=%d inflight=%d (INI)",
 		assoc.name, assoc.CWND(), assoc.ssthresh, assoc.inflightQueue.getNumBytes())
 
 	assoc.srtt.Store(float64(0))
-	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, config.RTOMax)
-	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, config.RTOMax)
-	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, config.RTOMax)
-	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, config.RTOMax)
-	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, config.RTOMax)
+	assoc.t1Init = newRTXTimer(timerT1Init, assoc, maxInitRetrans, rtoMax)
+	assoc.t1Cookie = newRTXTimer(timerT1Cookie, assoc, maxInitRetrans, rtoMax)
+	assoc.t2Shutdown = newRTXTimer(timerT2Shutdown, assoc, noMaxRetrans, rtoMax)
+	assoc.t3RTX = newRTXTimer(timerT3RTX, assoc, noMaxRetrans, rtoMax)
+	assoc.tReconfig = newRTXTimer(timerReconfig, assoc, noMaxRetrans, rtoMax)
 	assoc.ackTimer = newAckTimer(assoc)
 
 	return assoc
 }
 
-func (a *Association) init(isClient bool) {
+func (a *Association) initWithOutOfBandTokens(localInit *chunkInit, remoteInit *chunkInit) error {
 	a.lock.Lock()
 	defer a.lock.Unlock()
 
 	go a.readLoop()
 	go a.writeLoop()
 
-	if isClient {
-		init := &chunkInit{}
-		init.initialTSN = a.myNextTSN
-		init.numOutboundStreams = a.myMaxNumOutboundStreams
-		init.numInboundStreams = a.myMaxNumInboundStreams
-		init.initiateTag = a.myVerificationTag
-		init.advertisedReceiverWindowCredit = a.maxReceiveBufferSize
-		setSupportedExtensions(&init.chunkInitCommon)
+	a.payloadQueue.init(remoteInit.initialTSN - 1)
+	a.myMaxNumInboundStreams = min16(localInit.numInboundStreams, remoteInit.numInboundStreams)
+	a.myMaxNumOutboundStreams = min16(localInit.numOutboundStreams, remoteInit.numOutboundStreams)
+	a.setRWND(remoteInit.advertisedReceiverWindowCredit)
+	a.peerVerificationTag = remoteInit.initiateTag
+	a.sourcePort = defaultSCTPSrcDstPort
+	a.destinationPort = defaultSCTPSrcDstPort
 
-		if a.recvZeroChecksum {
-			init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
-		}
+	localExtensions := getSupportedExtensions(localInit.params)
+	a.localInterleaving = localExtensions.interleaving
+	a.setPeerSupportedExtensions(getSupportedExtensions(remoteInit.params))
+	a.setSendZeroChecksum(remoteInit.params)
 
-		a.storedInit = init
+	a.ssthresh = a.RWND()
 
-		err := a.sendInit()
-		if err != nil {
-			a.log.Errorf("[%s] failed to send init: %s", a.name, err.Error())
-		}
-
-		// After sending the INIT chunk, "A" starts the T1-init timer and enters the COOKIE-WAIT state.
-		// Note: ideally we would set state after the timer starts but since we don't do this in an atomic
-		// set + timer-start, it's safer to just set the state first so that we don't have a timer expiration
-		// race.
-		a.setState(cookieWait)
-		a.t1Init.start(a.rtoMgr.getRTO())
+	if err := a.establish("init"); err != nil {
+		return err
 	}
+
+	return nil
+}
+
+func (a *Association) setPeerSupportedExtensions(extensions supportedExtensions) {
+	a.peerForwardTSN = extensions.forwardTSN
+	a.peerInterleaving = extensions.interleaving
+	a.peerIForwardTSN = extensions.iForwardTSN
+}
+
+func (a *Association) setSendZeroChecksum(params []param) {
+	for _, param := range params {
+		if zeroChecksum, ok := param.(*paramZeroChecksumAcceptable); ok {
+			a.sendZeroChecksum = zeroChecksum.edmid == dtlsErrorDetectionMethod
+		}
+	}
+}
+
+func (a *Association) logNegotiatedExtensions(stage string) {
+	switch {
+	case a.useInterleaving:
+		a.log.Debugf("[%s] use interleaving (on %s)", a.name, stage)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on %s)", a.name, stage)
+		}
+	case a.useForwardTSN:
+		a.log.Debugf("[%s] use ForwardTSN (on %s)", a.name, stage)
+	default:
+		a.log.Warnf("[%s] not using ForwardTSN (on %s)", a.name, stage)
+	}
+}
+
+// establish finalizes negotiated options and transitions the association to ESTABLISHED.
+// The caller should hold the lock.
+func (a *Association) establish(stage string) error {
+	if err := a.updateInterleavingState(); err != nil {
+		return err
+	}
+	a.logNegotiatedExtensions(stage)
+	a.setState(established)
+
+	return nil
 }
 
 // caller must hold a.lock.
@@ -659,16 +1028,31 @@ func (a *Association) Abort(reason string) {
 
 	a.lock.Unlock()
 
+	flushTimeout := 200 * time.Millisecond
+
 	// short bound for abort flush.
-	_ = a.netConn.SetWriteDeadline(time.Now().Add(200 * time.Millisecond))
+	_ = a.netConn.SetWriteDeadline(time.Now().Add(flushTimeout))
 	a.awakeWriteLoop()
 
-	// unblock readLoop even if the underlying TCP connection is half-open.
+	// Give writeLoop a chance to write the ABORT before we force readLoop to exit
+	// (readLoop exit closes closeWriteLoopCh and can race the ABORT send).
+	select {
+	case <-a.abortSentCh:
+	case <-time.After(flushTimeout):
+	}
+
+	// unblock readLoop even if the underlying connection is half-open.
 	// We want Abort to return promptly during shutdown.
 	_ = a.netConn.SetReadDeadline(time.Now())
 
 	// Wait for readLoop to end
 	<-a.readLoopCloseCh
+
+	// Ensure ABORT write was at least attempted before returning (bounded).
+	select {
+	case <-a.abortSentCh:
+	case <-time.After(flushTimeout):
+	}
 }
 
 func (a *Association) closeAllTimers() {
@@ -695,6 +1079,7 @@ func (a *Association) readLoop() {
 		for _, s := range a.streams {
 			a.unregisterStream(s, closeErr)
 		}
+		a.unblockPendingWrites()
 		a.lock.Unlock()
 		close(a.acceptCh)
 		close(a.readLoopCloseCh)
@@ -734,7 +1119,7 @@ func (a *Association) readLoop() {
 	a.log.Debugf("[%s] readLoop exited %s", a.name, closeErr)
 }
 
-func (a *Association) writeLoop() {
+func (a *Association) writeLoop() { // nolint:cyclop
 	a.log.Debugf("[%s] writeLoop entered", a.name)
 	defer a.log.Debugf("[%s] writeLoop exited", a.name)
 
@@ -743,7 +1128,11 @@ loop:
 		rawPackets, ok := a.gatherOutbound()
 
 		for _, raw := range rawPackets {
+			isAbortPacket := len(raw) > int(commonHeaderSize) && raw[commonHeaderSize] == byte(ctAbort)
 			_, err := a.netConn.Write(raw)
+			if isAbortPacket {
+				a.abortSentOnce.Do(func() { close(a.abortSentCh) })
+			}
 			if err != nil {
 				if !errors.Is(err, io.EOF) {
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
@@ -767,6 +1156,15 @@ loop:
 		select {
 		case <-a.awakeWriteLoopCh:
 		case <-a.closeWriteLoopCh:
+			a.lock.Lock()
+			abortPending := a.willSendAbort
+			a.lock.Unlock()
+			if abortPending {
+				// If an ABORT is pending, prefer sending it even if readLoop has
+				// already ended and closed closeWriteLoopCh.
+				continue
+			}
+
 			break loop
 		}
 	}
@@ -794,6 +1192,18 @@ func (a *Association) notifyBlockWritable() {
 	case a.writeNotify <- struct{}{}:
 	default:
 	}
+}
+
+// unblockPendingWrites wakes all goroutines waiting on the blocked write.
+// Note: the caller should hold the association lock.
+func (a *Association) unblockPendingWrites() {
+	if !a.blockWrite {
+		return
+	}
+
+	a.writePending = false
+	close(a.writeNotify)
+	a.writeNotify = make(chan struct{}, 1)
 }
 
 // unregisterStream un-registers a stream from the association
@@ -984,9 +1394,17 @@ func (a *Association) gatherOutboundFastRetransmissionPackets( //nolint:gocognit
 			continue
 		}
 
-		// include padding for sizing.
-		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkBytes += getPadding(chunkBytes)
+		// RFC 4960 Sec 7.2.4 Fast Retransmit on Gap Reports
+		//  3)  Determine how many of the earliest (i.e., lowest TSN) DATA chunks
+		//      marked for retransmission will fit into a single packet, subject
+		//      to constraint of the path MTU of the destination transport
+		//      address to which the packet is being sent.  Call this value K.
+		//      Retransmit those K DATA chunks in a single packet.  When a Fast
+		//      Retransmit is being performed, the sender SHOULD ignore the value
+		//      of cwnd and SHOULD NOT delay retransmission for this single
+		//		packet.
+
+		chunkBytes := chunkPayload.chunkSizeInPacket()
 
 		// fast retransmit window cap
 		if fastRetransWnd < fastRetransSize+chunkBytes {
@@ -1082,10 +1500,18 @@ func (a *Association) gatherOutboundSackPackets(rawPackets [][]byte) [][]byte {
 
 // The caller should hold the lock.
 func (a *Association) gatherOutboundForwardTSNPackets(rawPackets [][]byte) [][]byte {
-	if a.willSendForwardTSN {
+	if a.willSendForwardTSN { //nolint:nestif
 		a.willSendForwardTSN = false
 		if sna32GT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
-			fwdtsn := a.createForwardTSN()
+			var fwdtsn chunk
+			if a.useIForwardTSN {
+				fwdtsn = a.createIForwardTSN()
+			} else if a.useForwardTSN {
+				fwdtsn = a.createForwardTSN()
+			}
+			if fwdtsn == nil {
+				return rawPackets
+			}
 			raw, err := a.marshalPacket(a.createPacket([]chunk{fwdtsn}))
 			if err != nil {
 				a.log.Warnf("[%s] failed to serialize a Forward TSN packet", a.name)
@@ -1172,6 +1598,10 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 		pkt, err := a.gatherAbortPacket()
 		if err != nil {
 			a.log.Warnf("[%s] failed to serialize an abort packet", a.name)
+			// If we can't marshal the ABORT, no write will occur, but Abort() may
+			// still be waiting on abortSentCh. Signal completion of the ABORT attempt
+			// (even though it failed) to avoid unnecessary delays.
+			a.abortSentOnce.Do(func() { close(a.abortSentCh) })
 
 			return nil, false
 		}
@@ -1354,28 +1784,133 @@ func (a *Association) SRTT() float64 {
 	return a.srtt.Load().(float64) //nolint:forcetypeassert
 }
 
+// Metadata returns negotiated association metadata. The ok return value is false
+// until the SCTP handshake has completed.
+func (a *Association) Metadata() (AssociationMetadata, bool) {
+	a.lock.RLock()
+	defer a.lock.RUnlock()
+
+	if a.getState() != established {
+		return AssociationMetadata{}, false
+	}
+
+	partialReliabilityMode := PartialReliabilityModeNone
+	switch {
+	case a.useIForwardTSN:
+		partialReliabilityMode = PartialReliabilityModeIForwardTSN
+	case a.useForwardTSN:
+		partialReliabilityMode = PartialReliabilityModeForwardTSN
+	}
+
+	return AssociationMetadata{
+		MessageInterleavingEnabled:   a.useInterleaving,
+		PartialReliabilityMode:       partialReliabilityMode,
+		ZeroChecksumSendingEnabled:   a.sendZeroChecksum,
+		ZeroChecksumReceivingEnabled: a.recvZeroChecksum,
+	}, true
+}
+
 // getMaxTSNOffset returns the maximum offset over the current cummulative TSN that
 // we are willing to enqueue. This ensures that we keep the bytes utilized in the receive
 // buffer within a small multiple of the user provided max receive buffer size.
 func getMaxTSNOffset(maxReceiveBufferSize uint32) uint32 {
 	// 4 is a magic number here. There is no theory behind this.
-	offset := max((maxReceiveBufferSize*4)/avgChunkSize, minTSNOffset)
-	if offset > maxTSNOffset {
-		offset = maxTSNOffset
-	}
+	offset := min(max((maxReceiveBufferSize*4)/avgChunkSize, minTSNOffset), maxTSNOffset)
 
 	return offset
 }
 
-func setSupportedExtensions(init *chunkInitCommon) {
+func setSupportedExtensions(init *chunkInitCommon, enableInterleaving bool) {
 	// nolint:godox
 	// TODO RFC5061 https://tools.ietf.org/html/rfc6525#section-5.2
 	// An implementation supporting this (Supported Extensions Parameter)
 	// extension MUST list the ASCONF, the ASCONF-ACK, and the AUTH chunks
 	// in its INIT and INIT-ACK parameters.
+	chunkTypes := []chunkType{ctReconfig, ctForwardTSN}
+	if enableInterleaving {
+		chunkTypes = append(chunkTypes, ctIData, ctIForwardTSN)
+	}
 	init.params = append(init.params, &paramSupportedExtensions{
-		ChunkTypes: []chunkType{ctReconfig, ctForwardTSN},
+		ChunkTypes: chunkTypes,
 	})
+}
+
+type supportedExtensions struct {
+	forwardTSN   bool
+	interleaving bool
+	iForwardTSN  bool
+}
+
+func getSupportedExtensions(params []param) supportedExtensions {
+	var extensions supportedExtensions
+	for _, param := range params {
+		if supported, ok := param.(*paramSupportedExtensions); ok {
+			parsed := supportedExtensionsFromChunkTypes(supported.ChunkTypes)
+			extensions.forwardTSN = extensions.forwardTSN || parsed.forwardTSN
+			extensions.interleaving = extensions.interleaving || parsed.interleaving
+			extensions.iForwardTSN = extensions.iForwardTSN || parsed.iForwardTSN
+		}
+	}
+
+	return extensions
+}
+
+func supportedExtensionsFromChunkTypes(chunkTypes []chunkType) supportedExtensions {
+	var extensions supportedExtensions
+	for _, t := range chunkTypes {
+		switch t {
+		case ctForwardTSN:
+			extensions.forwardTSN = true
+		case ctIData:
+			extensions.interleaving = true
+		case ctIForwardTSN:
+			extensions.iForwardTSN = true
+		default:
+		}
+	}
+
+	return extensions
+}
+
+func (a *Association) updateInterleavingState() error {
+	useInterleaving := a.localInterleaving && a.peerInterleaving
+	if useInterleaving != a.useInterleaving {
+		if err := a.pendingQueue.setInterleaving(useInterleaving); err != nil {
+			return err
+		}
+
+		a.useInterleaving = useInterleaving
+		if useInterleaving {
+			a.maxPayloadSize = a.mtu - (commonHeaderSize + iDataChunkHeaderSize)
+		} else {
+			a.maxPayloadSize = a.mtu - (commonHeaderSize + dataChunkHeaderSize)
+		}
+	}
+
+	if useInterleaving {
+		a.useIForwardTSN = a.peerIForwardTSN && a.localInterleaving
+		a.useForwardTSN = false
+	} else {
+		a.useIForwardTSN = false
+		a.useForwardTSN = a.peerForwardTSN
+	}
+
+	return nil
+}
+
+func (a *Association) partialReliabilityEnabled() bool {
+	return a.useForwardTSN || a.useIForwardTSN
+}
+
+// The caller should hold the lock.
+func (a *Association) abortProtocolViolation(reason string) {
+	a.log.Warnf("[%s] protocol violation: %s", a.name, reason)
+	a.willSendAbort = true
+	a.willSendAbortCause = &errorCauseProtocolViolation{
+		errorCauseHeader:      errorCauseHeader{code: protocolViolation},
+		additionalInformation: []byte(reason),
+	}
+	a.awakeWriteLoop()
 }
 
 // The caller should hold the lock.
@@ -1417,21 +1952,33 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	a.setRWND(initChunk.advertisedReceiverWindowCredit)
 	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
 
+	a.peerInterleaving = false
+	a.peerForwardTSN = false
+	a.peerIForwardTSN = false
+
 	for _, param := range initChunk.params {
-		switch v := param.(type) { // nolint:gocritic
+		switch val := param.(type) { // nolint:gocritic
 		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
-					a.useForwardTSN = true
-				}
-			}
+			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
+			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
+			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
+			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
 		}
 	}
 
-	if !a.useForwardTSN {
+	if err := a.updateInterleavingState(); err != nil {
+		return nil, err
+	}
+	if a.useInterleaving { //nolint:nestif,gocritic
+		a.log.Debugf("[%s] use interleaving (on init)", a.name)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on init)", a.name)
+		}
+	} else if a.useForwardTSN {
+		a.log.Debugf("[%s] use ForwardTSN (on init)", a.name)
+	} else {
 		a.log.Warnf("[%s] not using ForwardTSN (on init)", a.name)
 	}
 
@@ -1465,7 +2012,7 @@ func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, 
 	}
 	a.log.Debugf("[%s] sendZeroChecksum=%t (on init)", a.name, a.sendZeroChecksum)
 
-	setSupportedExtensions(&initAck.chunkInitCommon)
+	setSupportedExtensions(&initAck.chunkInitCommon, a.localInterleaving)
 
 	outbound.chunks = []chunk{initAck}
 
@@ -1500,7 +2047,7 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 	a.setRWND(initChunkAck.advertisedReceiverWindowCredit)
 	a.log.Debugf("[%s] initial rwnd=%d", a.name, a.RWND())
 
-	// RFC 4690 Sec 7.2.1
+	// RFC 4960 Sec 7.2.1
 	//  o  The initial value of ssthresh MAY be arbitrarily high (for
 	//     example, implementations MAY use the size of the receiver
 	//     advertised window).
@@ -1511,26 +2058,38 @@ func (a *Association) handleInitAck(pkt *packet, initChunkAck *chunkInitAck) err
 	a.t1Init.stop()
 	a.storedInit = nil
 
+	a.peerInterleaving = false
+	a.peerForwardTSN = false
+	a.peerIForwardTSN = false
+
 	var cookieParam *paramStateCookie
 	for _, param := range initChunkAck.params {
-		switch v := param.(type) {
+		switch val := param.(type) {
 		case *paramStateCookie:
-			cookieParam = v
+			cookieParam = val
 		case *paramSupportedExtensions:
-			for _, t := range v.ChunkTypes {
-				if t == ctForwardTSN {
-					a.log.Debugf("[%s] use ForwardTSN (on initAck)", a.name)
-					a.useForwardTSN = true
-				}
-			}
+			extensions := supportedExtensionsFromChunkTypes(val.ChunkTypes)
+			a.peerForwardTSN = a.peerForwardTSN || extensions.forwardTSN
+			a.peerInterleaving = a.peerInterleaving || extensions.interleaving
+			a.peerIForwardTSN = a.peerIForwardTSN || extensions.iForwardTSN
 		case *paramZeroChecksumAcceptable:
-			a.sendZeroChecksum = v.edmid == dtlsErrorDetectionMethod
+			a.sendZeroChecksum = val.edmid == dtlsErrorDetectionMethod
 		}
 	}
 
 	a.log.Debugf("[%s] sendZeroChecksum=%t (on initAck)", a.name, a.sendZeroChecksum)
 
-	if !a.useForwardTSN {
+	if err := a.updateInterleavingState(); err != nil {
+		return err
+	}
+	if a.useInterleaving { //nolint:gocritic
+		a.log.Tracef("[%s] use interleaving (on initAck)", a.name)
+		if !a.useIForwardTSN {
+			a.log.Warnf("[%s] not using I-ForwardTSN (on initAck)", a.name)
+		}
+	} else if a.useForwardTSN {
+		a.log.Tracef("[%s] use ForwardTSN (on initAck)", a.name)
+	} else {
 		a.log.Warnf("[%s] not using ForwardTSN (on initAck)", a.name)
 	}
 	if cookieParam == nil {
@@ -1617,7 +2176,7 @@ func (a *Association) handleHeartbeatAck(c *chunkHeartbeatAck) {
 			srtt := a.rtoMgr.setNewRTT(rttMs)
 			a.srtt.Store(srtt)
 
-			a.rackMinRTTWnd.Push(now, now.Sub(sent))
+			a.rack.rackMinRTTWnd.Push(now, now.Sub(sent))
 
 			a.log.Tracef("[%s] HB RTT: measured=%.3fms srtt=%.3fms rto=%.3fms",
 				a.name, rttMs, srtt, a.rtoMgr.getRTO())
@@ -1655,7 +2214,11 @@ func (a *Association) handleCookieEcho(cookieEcho *chunkCookieEcho) []*packet {
 		a.t1Cookie.stop()
 		a.storedCookieEcho = nil
 
-		a.setState(established)
+		if err := a.establish("cookieEcho"); err != nil {
+			a.completeHandshake(err)
+
+			return nil
+		}
 		if !a.completeHandshake(nil) {
 			return nil
 		}
@@ -1686,47 +2249,39 @@ func (a *Association) handleCookieAck() {
 	a.t1Cookie.stop()
 	a.storedCookieEcho = nil
 
-	a.setState(established)
+	if err := a.establish("cookieAck"); err != nil {
+		a.completeHandshake(err)
+
+		return
+	}
 	a.completeHandshake(nil)
 }
 
 // The caller should hold the lock.
 func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
+	state := a.getState()
+	if state != established && state != shutdownPending && state != shutdownReceived {
+		return nil
+	}
+
+	if chunkPayload.isIData() != a.useInterleaving {
+		if chunkPayload.isIData() {
+			a.abortProtocolViolation("received I-DATA without interleaving negotiated")
+		} else {
+			a.abortProtocolViolation("received DATA with interleaving negotiated")
+		}
+
+		return nil
+	}
+
 	a.log.Tracef("[%s] DATA: tsn=%d immediateSack=%v len=%d",
 		a.name, chunkPayload.tsn, chunkPayload.immediateSack, len(chunkPayload.userData))
 	a.stats.incDATAs()
 
 	canPush := a.payloadQueue.canPush(chunkPayload.tsn)
-	if canPush { //nolint:nestif
-		stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
-		if stream == nil {
-			// silently discard the data. (sender will retry on T3-rtx timeout)
-			// see pion/sctp#30
-			a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
-
+	if canPush {
+		if !a.acceptPayloadData(chunkPayload) {
 			return nil
-		}
-
-		if a.getMyReceiverWindowCredit() > 0 {
-			// Pass the new chunk to stream level as soon as it arrives
-			a.payloadQueue.push(chunkPayload.tsn)
-			stream.handleData(chunkPayload)
-		} else {
-			// Receive buffer is full
-			lastTSN, ok := a.payloadQueue.getLastTSNReceived()
-			if ok && sna32LT(chunkPayload.tsn, lastTSN) {
-				a.log.Debugf(
-					"[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d",
-					a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
-				)
-				a.payloadQueue.push(chunkPayload.tsn)
-				stream.handleData(chunkPayload)
-			} else {
-				a.log.Debugf(
-					"[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d",
-					a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
-				)
-			}
 		}
 	}
 
@@ -1742,6 +2297,53 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	sackNow := chunkPayload.immediateSack || gapDetected
 
 	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
+}
+
+// The caller should hold the lock.
+func (a *Association) acceptPayloadData(chunkPayload *chunkPayloadData) bool {
+	stream := a.getOrCreateStream(chunkPayload.streamIdentifier, true, PayloadTypeUnknown)
+	if stream == nil {
+		// silently discard the data. (sender will retry on T3-rtx timeout)
+		// see pion/sctp#30
+		a.log.Debugf("[%s] discard %d", a.name, chunkPayload.streamSequenceNumber)
+
+		return false
+	}
+
+	if a.getMyReceiverWindowCredit() > 0 {
+		// Pass the new chunk to stream level as soon as it arrives
+		return a.pushPayloadDataToStream(stream, chunkPayload)
+	}
+
+	// Receive buffer is full
+	lastTSN, ok := a.payloadQueue.getLastTSNReceived()
+	if !ok || !sna32LT(chunkPayload.tsn, lastTSN) {
+		a.log.Debugf(
+			"[%s] receive buffer full. dropping DATA with tsn=%d ssn=%d",
+			a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
+		)
+
+		return true
+	}
+
+	a.log.Debugf(
+		"[%s] receive buffer full, but accepted as this is a missing chunk with tsn=%d ssn=%d",
+		a.name, chunkPayload.tsn, chunkPayload.streamSequenceNumber,
+	)
+
+	return a.pushPayloadDataToStream(stream, chunkPayload)
+}
+
+// The caller should hold the lock.
+func (a *Association) pushPayloadDataToStream(stream *Stream, chunkPayload *chunkPayloadData) bool {
+	a.payloadQueue.push(chunkPayload.tsn)
+	if err := stream.handleData(chunkPayload); err != nil {
+		a.abortProtocolViolation(err.Error())
+
+		return false
+	}
+
+	return true
 }
 
 // A common routine for handleData and handleForwardTSN routines
@@ -1955,7 +2557,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 					// use a window to determine minRtt instead of a global min
 					// as the RTT can fluctuate, which can cause problems if going from a
 					// high RTT to a low RTT.
-					a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
+					a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 					a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 						a.name, rtt, srtt, a.rtoMgr.getRTO())
@@ -2012,7 +2614,7 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 						srtt := a.rtoMgr.setNewRTT(rtt)
 						a.srtt.Store(srtt)
 
-						a.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
+						a.rack.rackMinRTTWnd.Push(now, now.Sub(chunkPayload.since))
 
 						a.log.Tracef("[%s] SACK: measured-rtt=%f srtt=%f new-rto=%f",
 							a.name, rtt, srtt, a.rtoMgr.getRTO())
@@ -2255,7 +2857,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		return err
 	}
 
-	if a.useForwardTSN {
+	if a.partialReliabilityEnabled() {
 		// RFC 3758 Sec 3.5 C1
 		if sna32LT(a.advancedPeerTSNAckPoint, a.cumulativeTSNAckPoint) {
 			a.advancedPeerTSNAckPoint = a.cumulativeTSNAckPoint
@@ -2365,14 +2967,14 @@ func (a *Association) handleShutdownComplete(_ *chunkShutdownComplete) error {
 }
 
 func (a *Association) handleAbort(c *chunkAbort) error {
-	var errStr string
+	var errStr strings.Builder
 	for _, e := range c.errorCauses {
-		errStr += fmt.Sprintf("(%s)", e)
+		fmt.Fprintf(&errStr, "(%s)", e)
 	}
 
 	_ = a.close()
 
-	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr)
+	return fmt.Errorf("[%s] %w: %s", a.name, ErrChunk, errStr.String())
 }
 
 // createForwardTSN generates ForwardTSN chunk.
@@ -2401,9 +3003,9 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 		streams:          []chunkForwardTSNStream{},
 	}
 
-	var streamStr string
+	var streamStr strings.Builder
 	for si, ssn := range streamMap {
-		streamStr += fmt.Sprintf("(si=%d ssn=%d)", si, ssn)
+		fmt.Fprintf(&streamStr, "(si=%d ssn=%d)", si, ssn)
 		fwdtsn.streams = append(fwdtsn.streams, chunkForwardTSNStream{
 			identifier: si,
 			sequence:   ssn,
@@ -2411,8 +3013,54 @@ func (a *Association) createForwardTSN() *chunkForwardTSN {
 	}
 	a.log.Tracef(
 		"[%s] building fwdtsn: newCumulativeTSN=%d cumTSN=%d - %s",
-		a.name, fwdtsn.newCumulativeTSN, a.cumulativeTSNAckPoint, streamStr,
+		a.name, fwdtsn.newCumulativeTSN, a.cumulativeTSNAckPoint, streamStr.String(),
 	)
+
+	return fwdtsn
+}
+
+// createIForwardTSN generates I-FORWARD-TSN chunk.
+// The caller should hold the lock.
+func (a *Association) createIForwardTSN() *chunkIForwardTSN {
+	ordered := map[uint16]uint32{}
+	unordered := map[uint16]uint32{}
+	for i := a.cumulativeTSNAckPoint + 1; sna32LTE(i, a.advancedPeerTSNAckPoint); i++ {
+		c, ok := a.inflightQueue.get(i)
+		if !ok {
+			break
+		}
+		if c.unordered {
+			mid, ok := unordered[c.streamIdentifier]
+			if !ok || sna32LT(mid, c.messageIdentifier) {
+				unordered[c.streamIdentifier] = c.messageIdentifier
+			}
+		} else {
+			mid, ok := ordered[c.streamIdentifier]
+			if !ok || sna32LT(mid, c.messageIdentifier) {
+				ordered[c.streamIdentifier] = c.messageIdentifier
+			}
+		}
+	}
+
+	fwdtsn := &chunkIForwardTSN{
+		newCumulativeTSN: a.advancedPeerTSNAckPoint,
+		streams:          []chunkIForwardTSNStream{},
+	}
+
+	for si, mid := range ordered {
+		fwdtsn.streams = append(fwdtsn.streams, chunkIForwardTSNStream{
+			identifier:        si,
+			unordered:         false,
+			messageIdentifier: mid,
+		})
+	}
+	for si, mid := range unordered {
+		fwdtsn.streams = append(fwdtsn.streams, chunkIForwardTSNStream{
+			identifier:        si,
+			unordered:         true,
+			messageIdentifier: mid,
+		})
+	}
 
 	return fwdtsn
 }
@@ -2459,6 +3107,12 @@ func (a *Association) handleReconfig(reconfigChunk *chunkReconfig) ([]*packet, e
 func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	a.log.Tracef("[%s] FwdTSN: %s", a.name, chunkTSN.String())
 
+	if a.useInterleaving {
+		a.abortProtocolViolation("received FORWARD-TSN with interleaving enabled")
+
+		return nil
+	}
+
 	if !a.useForwardTSN {
 		a.log.Warn("[%s] received FwdTSN but not enabled")
 		// Return an error chunk
@@ -2503,10 +3157,7 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	//   its cumulative TSN point to the value carried in the FORWARD TSN
 	//   chunk,
 
-	// Advance peerLastTSN
-	for sna32LT(a.peerLastTSN(), chunkTSN.newCumulativeTSN) {
-		a.payloadQueue.pop(true) // may not exist
-	}
+	a.payloadQueue.advanceCumulativeTSN(chunkTSN.newCumulativeTSN)
 
 	// Report new peerLastTSN value and abandoned largest SSN value to
 	// corresponding streams so that the abandoned chunks can be removed
@@ -2524,6 +3175,42 @@ func (a *Association) handleForwardTSN(chunkTSN *chunkForwardTSN) []*packet {
 	// See https://github.com/pion/sctp/issues/106
 	for _, s := range a.streams {
 		s.handleForwardTSNForUnordered(chunkTSN.newCumulativeTSN)
+	}
+
+	return a.handlePeerLastTSNAndAcknowledgement(false)
+}
+
+// The caller should hold the lock.
+func (a *Association) handleIForwardTSN(chunkTSN *chunkIForwardTSN) []*packet {
+	a.log.Tracef("[%s] I-FwdTSN: %s", a.name, chunkTSN.String())
+
+	if !a.useIForwardTSN {
+		a.abortProtocolViolation("received I-FORWARD-TSN without support")
+
+		return nil
+	}
+
+	a.log.Tracef("[%s] should send ack? newCumTSN=%d peerLastTSN=%d",
+		a.name, chunkTSN.newCumulativeTSN, a.peerLastTSN())
+	if sna32LTE(chunkTSN.newCumulativeTSN, a.peerLastTSN()) {
+		a.log.Tracef("[%s] sending ack on I-Forward TSN", a.name)
+		a.ackState = ackStateImmediate
+		a.ackTimer.stop()
+		a.awakeWriteLoop()
+
+		return nil
+	}
+
+	a.payloadQueue.advanceCumulativeTSN(chunkTSN.newCumulativeTSN)
+
+	for _, forwarded := range chunkTSN.streams {
+		if s, ok := a.streams[forwarded.identifier]; ok {
+			if forwarded.unordered {
+				s.handleForwardTSNForUnorderedMID(forwarded.messageIdentifier)
+			} else {
+				s.handleForwardTSNForOrderedMID(forwarded.messageIdentifier)
+			}
+		}
 	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(false)
@@ -2555,6 +3242,8 @@ func (a *Association) sendResetRequest(streamIdentifier uint16) error {
 }
 
 // The caller should hold the lock.
+//
+//nolint:cyclop
 func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 	switch par := raw.(type) {
 	case *paramOutgoingResetRequest:
@@ -2595,6 +3284,9 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 
 			return nil, nil //nolint:nilnil
 		}
+		if par.result == reconfigResultSuccessPerformed {
+			a.resetOutgoingStreamSequenceNumbers(par.reconfigResponseSequenceNumber)
+		}
 		delete(a.reconfigs, par.reconfigResponseSequenceNumber)
 		if len(a.reconfigs) == 0 {
 			a.tReconfig.stop()
@@ -2603,6 +3295,23 @@ func (a *Association) handleReconfigParam(raw param) (*packet, error) {
 		return nil, nil //nolint:nilnil
 	default:
 		return nil, fmt.Errorf("%w: %t", ErrParamterType, par)
+	}
+}
+
+// The caller should hold the lock.
+func (a *Association) resetOutgoingStreamSequenceNumbers(reconfigRequestSequenceNumber uint32) {
+	reconfig := a.reconfigs[reconfigRequestSequenceNumber]
+	if reconfig == nil {
+		return
+	}
+	resetRequest, ok := reconfig.paramA.(*paramOutgoingResetRequest)
+	if !ok {
+		return
+	}
+	for _, id := range resetRequest.streamIdentifiers {
+		if s, ok := a.streams[id]; ok {
+			s.resetOutgoingStreamSequenceNumbers()
+		}
 	}
 }
 
@@ -2723,9 +3432,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 				break // no more rwnd
 			}
 
-			// compute current DATA chunk size including padding.
-			chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-			chunkBytes += getPadding(chunkBytes)
+			chunkBytes := chunkPayload.chunkSizeInPacket()
 
 			// ensure MTU bundling matches bundleDataChunksIntoPackets().
 			addBytes := chunkBytes
@@ -2768,8 +3475,7 @@ func (a *Association) popPendingDataChunksToSend( //nolint:cyclop,gocognit
 			c := a.pendingQueue.peek()
 			if c != nil && len(c.userData) > 0 {
 				// probe is a new packet: common header + chunk bytes.
-				chunkBytes := int(dataChunkHeaderSize) + len(c.userData)
-				chunkBytes += getPadding(chunkBytes)
+				chunkBytes := c.chunkSizeInPacket()
 				addBytes := int(commonHeaderSize) + chunkBytes
 
 				if addBytes <= int(a.MTU()) && a.tlrAllowSendLocked(budgetScaled, consumed, addBytes) {
@@ -2803,8 +3509,7 @@ func (a *Association) bundleDataChunksIntoPackets(chunks []*chunkPayloadData) []
 		//   single packet.  Furthermore, DATA chunks being retransmitted MAY be
 		//   bundled with new DATA chunks, as long as the resulting packet size
 		//   does not exceed the path MTU.
-		chunkSizeInPacket := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkSizeInPacket += getPadding(chunkSizeInPacket)
+		chunkSizeInPacket := chunkPayload.chunkSizeInPacket()
 		if bytesInPacket+chunkSizeInPacket > int(a.MTU()) {
 			packets = append(packets, a.createPacket(chunksToSend))
 			chunksToSend = []chunk{}
@@ -2835,12 +3540,21 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 
 	if a.blockWrite {
 		for a.writePending {
+			writeNotify := a.writeNotify
 			a.lock.Unlock()
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-a.writeNotify:
-				a.lock.Lock()
+			case <-writeNotify:
+			}
+			a.lock.Lock()
+
+			state = a.getState()
+			if state != established {
+				a.lock.Unlock()
+
+				return fmt.Errorf("%w: state=%s", ErrPayloadDataStateNotExist,
+					getAssociationStateString(state))
 			}
 		}
 		a.writePending = true
@@ -2859,7 +3573,7 @@ func (a *Association) sendPayloadData(ctx context.Context, chunks []*chunkPayloa
 
 // The caller should hold the lock.
 func (a *Association) checkPartialReliabilityStatus(chunkPayload *chunkPayloadData) {
-	if !a.useForwardTSN {
+	if !a.partialReliabilityEnabled() {
 		return
 	}
 
@@ -2929,8 +3643,7 @@ func (a *Association) getDataPacketsToRetransmit(budgetScaled *int64, consumed *
 			break
 		}
 
-		chunkBytes := int(dataChunkHeaderSize) + len(chunkPayload.userData)
-		chunkBytes += getPadding(chunkBytes)
+		chunkBytes := chunkPayload.chunkSizeInPacket()
 
 		// retry as first chunk in a new packet if needed.
 		for {
@@ -3045,8 +3758,12 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	var packets []*packet
 	var err error
 
-	if _, err = receivedChunk.check(); err != nil {
+	var abort bool
+	if abort, err = receivedChunk.check(); err != nil {
 		a.log.Errorf("[%s] failed validating chunk: %s ", a.name, err)
+		if abort && shouldAbortOnChunkValidationError(receivedChunk) {
+			a.abortProtocolViolation(err.Error())
+		}
 
 		return nil
 	}
@@ -3070,11 +3787,11 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		err = a.handleAbort(receivedChunk)
 
 	case *chunkError:
-		var errStr string
+		var errStr strings.Builder
 		for _, e := range receivedChunk.errorCauses {
-			errStr += fmt.Sprintf("(%s)", e)
+			fmt.Fprintf(&errStr, "(%s)", e)
 		}
-		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr)
+		a.log.Debugf("[%s] Error chunk, with following errors: %s", a.name, errStr.String())
 
 	case *chunkHeartbeat:
 		packets = a.handleHeartbeat(receivedChunk)
@@ -3099,6 +3816,8 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 
 	case *chunkForwardTSN:
 		packets = a.handleForwardTSN(receivedChunk)
+	case *chunkIForwardTSN:
+		packets = a.handleIForwardTSN(receivedChunk)
 
 	case *chunkShutdown:
 		a.handleShutdown(receivedChunk)
@@ -3128,6 +3847,15 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 	}
 
 	return nil
+}
+
+func shouldAbortOnChunkValidationError(receivedChunk chunk) bool {
+	switch receivedChunk.(type) {
+	case *chunkInit, *chunkInitAck, *chunkCookieEcho:
+		return false
+	default:
+		return true
+	}
 }
 
 func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyclop
@@ -3199,7 +3927,7 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 		//  A5) Any time the T3-rtx timer expires, on any destination, the sender
 		//  SHOULD try to advance the "Advanced.Peer.Ack.Point" by following
 		//  the procedures outlined in C2 - C5.
-		if a.useForwardTSN {
+		if a.partialReliabilityEnabled() {
 			// RFC 3758 Sec 3.5 C2
 			for i := a.advancedPeerTSNAckPoint + 1; ; i++ {
 				c, ok := a.inflightQueue.get(i)
@@ -3502,13 +4230,13 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	}
 
 	// 2) Maintain ReoWND (RACK for SCTP section 2B)
-	if minRTT := a.rackMinRTTWnd.Min(currTime); minRTT > 0 {
+	if minRTT := a.rack.rackMinRTTWnd.Min(currTime); minRTT > 0 {
 		a.rackMinRTT = minRTT
 	}
 
 	var base time.Duration
 	if a.rackMinRTT > 0 {
-		base = max(a.rackMinRTT/4, a.rackReoWndFloor)
+		base = max(a.rackMinRTT/4, a.rack.rackReoWndFloor)
 	}
 
 	// Suppress during recovery if no reordering ever seen; else (re)initialize from base if zero.
@@ -3521,7 +4249,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 	// DSACK-style inflation using SCTP duplicate TSNs (RACK for SCTP section 3 noting SCTP
 	// natively reports duplicates + RACK for SCTP section 2B policy)
 	if len(sack.duplicateTSN) > 0 && a.rackMinRTT > 0 {
-		a.rackReoWnd += max(a.rackMinRTT/4, a.rackReoWndFloor)
+		a.rackReoWnd += max(a.rackMinRTT/4, a.rack.rackReoWndFloor)
 		// keep inflated for 16 loss recoveries before reset
 		a.rackKeepInflatedRecoveries = 16
 		a.log.Tracef("[%s] RACK: DSACK/dupTSN seen, inflate reoWnd to %v", a.name, a.rackReoWnd)
@@ -3619,7 +4347,7 @@ func (a *Association) onRackAfterSACK( // nolint:gocognit,cyclop,gocyclo
 		extra := 2 * time.Millisecond
 
 		if a.inflightQueue.size() == 1 {
-			extra = a.rackWCDelAck // 200ms for single outstanding, else 2ms
+			extra = a.rack.rackWCDelAck // 200ms for single outstanding, else 2ms
 		}
 
 		pto = 2*srtt + extra
@@ -3645,7 +4373,7 @@ func (a *Association) schedulePTOAfterSendLocked() {
 		extra := 2 * time.Millisecond
 
 		if a.inflightQueue.size() == 1 {
-			extra = a.rackWCDelAck
+			extra = a.rack.rackWCDelAck
 		}
 
 		pto = 2*srtt + extra
@@ -4007,4 +4735,40 @@ func (a *Association) sendActiveHeartbeatLocked() {
 		chunks:          []chunk{hb},
 	})
 	a.awakeWriteLoop()
+}
+
+// GenerateOutOfBandToken generates an out-of-band connection token (i.e. a
+// serialized SCTP INIT chunk) for use with SNAP.
+func GenerateOutOfBandToken(opts ...ClientOption) ([]byte, error) {
+	config := &Config{}
+	config.applyDefaults()
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		if err := opt.applyClient(config); err != nil {
+			return nil, err
+		}
+	}
+
+	config.applyDefaults()
+
+	init := &chunkInit{}
+	init.initialTSN = globalMathRandomGenerator.Uint32()
+	init.numOutboundStreams = math.MaxUint16
+	init.numInboundStreams = math.MaxUint16
+	init.initiateTag = generateInitiateTag()
+	init.advertisedReceiverWindowCredit = config.MaxReceiveBufferSize
+	setSupportedExtensions(&init.chunkInitCommon, config.enableInterleaving)
+
+	if config.EnableZeroChecksum {
+		init.params = append(init.params, &paramZeroChecksumAcceptable{edmid: dtlsErrorDetectionMethod})
+	}
+	_, err := init.check()
+	if err != nil {
+		return nil, err
+	}
+
+	return init.marshal()
 }

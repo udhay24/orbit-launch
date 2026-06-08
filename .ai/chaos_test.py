@@ -23,8 +23,8 @@ import random
 import threading
 import traceback
 
-TARGET_HOST = "165.245.188.43"
-TARGET_PORT = 1935
+TARGET_HOST = os.environ.get("CHAOS_TARGET_HOST", "165.245.188.43")
+TARGET_PORT = int(os.environ.get("CHAOS_TARGET_PORT", "1935"))
 TIMEOUT = 5
 
 # ============================================================
@@ -189,7 +189,7 @@ def do_connect(sock, app="live"):
         "app": app,
         "type": "nonprivate",
         "flashVer": "FMLE/3.0",
-        "tcUrl": f"rtmp://{TARGET_HOST}/{app}",
+        "tcUrl": f"rtmp://{TARGET_HOST}:{TARGET_PORT}/{app}",
     })
     write_chunk(sock, 3, MSG_COMMAND_AMF0, 0, 0, payload)
 
@@ -1312,7 +1312,7 @@ def test_ffmpeg_adversarial():
             "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
             "-c:a", "aac", "-b:a", "64k",
-            "-f", "flv", f"rtmp://{TARGET_HOST}/live/chaos_ffmpeg_valid"
+            "-f", "flv", f"rtmp://{TARGET_HOST}:{TARGET_PORT}/live/chaos_ffmpeg_valid"
         ], capture_output=True, text=True, timeout=15)
 
         success = result.returncode == 0 or "muxing overhead" in result.stderr.lower()
@@ -1333,7 +1333,7 @@ def test_ffmpeg_adversarial():
             "-i", "testsrc=duration=3:size=320x240:rate=15",
             "-vf", "setpts='PTS+random(0)*0.5/TB'",
             "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-f", "flv", f"rtmp://{TARGET_HOST}/live/chaos_ffmpeg_jitter"
+            "-f", "flv", f"rtmp://{TARGET_HOST}:{TARGET_PORT}/live/chaos_ffmpeg_jitter"
         ], capture_output=True, text=True, timeout=15)
         log_result("FFmpeg jittery PTS stream", "Timestamp", "Medium", True,
                   f"FFmpeg exited with code {result.returncode}")
@@ -1351,7 +1351,7 @@ def test_ffmpeg_adversarial():
             "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=3:size=320x240:rate=15",
             "-c:v", "libx265", "-preset", "ultrafast",
             "-tag:v", "hvc1",
-            "-f", "flv", f"rtmp://{TARGET_HOST}/live/chaos_ffmpeg_h265"
+            "-f", "flv", f"rtmp://{TARGET_HOST}:{TARGET_PORT}/live/chaos_ffmpeg_h265"
         ], capture_output=True, text=True, timeout=15)
         log_result("FFmpeg H265 stream", "Bitstream", "High", True,
                   f"FFmpeg exited with code {result.returncode}")
@@ -1463,6 +1463,9 @@ def main():
         print("\033[93mMost tests passed. Some edge cases may need attention.\033[0m")
     else:
         print("\033[91mSignificant failures detected. Review failed tests above.\033[0m")
+
+    # Exit non-zero on any failure so this can gate a merge in CI.
+    sys.exit(0 if failed == 0 else 1)
 
 
 if __name__ == "__main__":

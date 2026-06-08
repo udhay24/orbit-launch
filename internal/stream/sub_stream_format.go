@@ -65,14 +65,14 @@ func (ssf *subStreamFormat) initialize2(firstTimeReceived bool, lastPTS time.Dur
 
 		switch curFormat := ssf.curFormat.(type) {
 		case *format.H265:
-			sps, pps, vps := curFormat.SafeParams()
+			vps, sps, pps := curFormat.SafeParams()
 
-			if sps != nil && pps != nil && vps != nil {
+			if vps != nil && sps != nil && pps != nil {
 				ssf.writeUnit(&unit.Unit{
 					PTS:        0,
 					NTP:        time.Time{},
 					RTPPackets: nil,
-					Payload:    unit.PayloadH265([][]byte{sps, pps, vps}),
+					Payload:    unit.PayloadH265([][]byte{vps, sps, pps}),
 				})
 			}
 
@@ -94,7 +94,7 @@ func (ssf *subStreamFormat) initialize2(firstTimeReceived bool, lastPTS time.Dur
 func (ssf *subStreamFormat) writeUnit(u *unit.Unit) {
 	err := ssf.writeUnitInner(u)
 	if err != nil {
-		ssf.streamFormat.processingErrors.Add(err)
+		ssf.streamFormat.inboundFramesInError.Add(err)
 		return
 	}
 }
@@ -126,7 +126,7 @@ func (ssf *subStreamFormat) writeUnitInner(u *unit.Unit) error {
 				if len(pkt.Payload) > ssf.streamFormat.rtpMaxPayloadSize {
 					var err error
 					ssf.streamFormat.rtpEncoder, err = newRTPEncoder(ssf.streamFormat.format, ssf.streamFormat.rtpMaxPayloadSize,
-						ptrOf(pkt.SSRC), ptrOf(pkt.SequenceNumber))
+						new(pkt.SSRC), new(pkt.SequenceNumber))
 					if err != nil {
 						var err2 rtpEncoderNotAvailableError
 						if errors.As(err, &err2) {
@@ -170,7 +170,7 @@ func (ssf *subStreamFormat) writeUnitInner(u *unit.Unit) error {
 	}
 
 	size := unitSize(u)
-	ssf.streamFormat.addBytesReceived(size)
+	ssf.streamFormat.inboundBytes.Add(size)
 
 	ssf.streamFormat.writeRTSP(ssf.streamFormat.media, u.RTPPackets, u.NTP)
 
@@ -178,8 +178,8 @@ func (ssf *subStreamFormat) writeUnitInner(u *unit.Unit) error {
 		csr := sr
 		cOnData := onData
 		sr.push(func() error {
-			if !csr.SkipBytesSent {
-				ssf.streamFormat.addBytesSent(size)
+			if !csr.SkipOutboundBytes {
+				ssf.streamFormat.outboundBytes.Add(size)
 			}
 			return cOnData(u)
 		})

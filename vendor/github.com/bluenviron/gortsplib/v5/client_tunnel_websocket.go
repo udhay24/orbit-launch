@@ -50,26 +50,35 @@ func (tu *clientTunnelWebSocket) SetWriteDeadline(t time.Time) error {
 
 func newClientTunnelWebSocket(
 	ctx context.Context,
-	dialContext func(ctx context.Context, network, address string) (net.Conn, error),
 	addr string,
+	secure bool,
 	tlsConfig *tls.Config,
+	dialContext func(ctx context.Context, network, address string) (net.Conn, error),
+	dialTLSContext func(ctx context.Context, network string, addr string) (net.Conn, error),
 ) (net.Conn, error) {
 	c := &clientTunnelWebSocket{}
 
 	var ur string
-	if tlsConfig != nil {
+	if secure {
 		ur = "wss"
 	} else {
 		ur = "ws"
 	}
 	ur += "://" + addr + "/"
 
+	dialer := &websocket.Dialer{
+		Subprotocols: []string{"rtsp.onvif.org"},
+	}
+
+	if secure && dialTLSContext != nil {
+		dialer.NetDialTLSContext = dialTLSContext
+	} else {
+		dialer.NetDialContext = dialContext
+		dialer.TLSClientConfig = tlsConfig
+	}
+
 	var err error
-	c.wconn, _, err = (&websocket.Dialer{
-		NetDialContext:  dialContext,
-		TLSClientConfig: tlsConfig,
-		Subprotocols:    []string{"rtsp.onvif.org"},
-	}).DialContext(ctx, ur, nil) //nolint:bodyclose
+	c.wconn, _, err = dialer.DialContext(ctx, ur, nil) //nolint:bodyclose
 	if err != nil {
 		return nil, err
 	}

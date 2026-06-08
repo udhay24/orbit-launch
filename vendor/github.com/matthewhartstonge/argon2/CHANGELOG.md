@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.4](https://github.com/matthewhartstonge/argon2/compare/v1.5.3...v1.5.4) (2026-05-24)
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/crypto from 0.51.0 to 0.52.0 ([#137](https://github.com/matthewhartstonge/argon2/issues/137)) ([5d52290](https://github.com/matthewhartstonge/argon2/commit/5d52290393a9c321992c7df0146f4ba0b9dd12c3))
+
+## [1.5.3](https://github.com/matthewhartstonge/argon2/compare/v1.5.2...v1.5.3) (2026-05-14)
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/crypto from 0.50.0 to 0.51.0 ([#134](https://github.com/matthewhartstonge/argon2/issues/134)) ([0e1c93a](https://github.com/matthewhartstonge/argon2/commit/0e1c93aff3555666f1e1c9acebb7f586337e7b21))
+
+## [1.5.2](https://github.com/matthewhartstonge/argon2/compare/v1.5.1...v1.5.2) (2026-04-09)
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/crypto from 0.49.0 to 0.50.0 ([#131](https://github.com/matthewhartstonge/argon2/issues/131)) ([c6096ae](https://github.com/matthewhartstonge/argon2/commit/c6096ae2dcb7067e9526eb1523d0f205cb365386))
+
+## [1.5.1](https://github.com/matthewhartstonge/argon2/compare/v1.5.0...v1.5.1) (2026-04-07)
+
+
+### Bug Fixes
+
+* restore support for 32-bit platforms ([#128](https://github.com/matthewhartstonge/argon2/issues/128)) ([3dcd610](https://github.com/matthewhartstonge/argon2/commit/3dcd610ce2c358ec2b39b1377bd87ed6156ae1f1))
+
+## [1.5.0](https://github.com/matthewhartstonge/argon2/compare/v1.4.6...v1.5.0) (2026-03-17)
+
+
+### Features
+
+* **deps:** upgrades to go@1.25.0. ([#124](https://github.com/matthewhartstonge/argon2/issues/124)) ([f17ebfc](https://github.com/matthewhartstonge/argon2/commit/f17ebfc1e3b84f59b15d95ac9e3230aa65a1f58c))
+
+
+### Bug Fixes
+
+* **cmd/argon2:** fixes cli parallelism print line. ([#126](https://github.com/matthewhartstonge/argon2/issues/126)) ([b08c0e9](https://github.com/matthewhartstonge/argon2/commit/b08c0e9f3fc9c265480d98849f49e7cf4f86eb6e))
+* **lint:** fixes gosec G115 - potential under/overflow on hash and salt length when calling `Decode`. Now returns `ErrDecodingFail`. ([7c659c8](https://github.com/matthewhartstonge/argon2/commit/7c659c8b35ed8ceecf97b8045c288c7dd32137c0))
+* **lint:** fixes gosec reported G115 on Decode ([a4d601c](https://github.com/matthewhartstonge/argon2/commit/a4d601c8280d4d5a6481b563ba1a4c385636637b))
+* **deps:** bump golang.org/x/crypto from 0.48.0 to 0.49.0 ([#123](https://github.com/matthewhartstonge/argon2/issues/123)) ([78c3433](https://github.com/matthewhartstonge/argon2/commit/78c34336ca1136e10ebc9fde1f3616ec91652e76))
+
 ## [1.4.6](https://github.com/matthewhartstonge/argon2/compare/v1.4.5...v1.4.6) (2026-02-13)
 
 

@@ -2,9 +2,11 @@
 package rtmp
 
 import (
+	"encoding/hex"
 	"errors"
 	"net"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/bluenviron/gortmplib"
@@ -13,11 +15,13 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/ac3"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg1audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -25,7 +29,7 @@ import (
 
 var errNoSupportedCodecsFrom = errors.New(
 	"the stream doesn't contain any supported codec, which are currently " +
-		"AV1, VP9, H265, H264, Opus, MPEG-4 Audio, MPEG-1/2 Audio, AC-3, G711, LPCM")
+		"AV1, VP9, H265, H264, Opus, FLAC, MPEG-4 Audio (AAC), MPEG-1/2 Audio (MP3), AC-3, G711, LPCM")
 
 func multiplyAndDivide2(v, m, d time.Duration) time.Duration {
 	secs := v / d
@@ -211,7 +215,11 @@ func FromStream(
 				if slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCOpus))) {
 					track := &gortmplib.Track{
 						Codec: &codecs.Opus{
-							ChannelCount: forma.ChannelCount,
+							IDHeader: &opus.IDHeader{
+								Version:      0x1,
+								ChannelCount: uint8(forma.ChannelCount),
+								PreSkip:      3840,
+							},
 						},
 					}
 					tracks = append(tracks, track)
@@ -452,6 +460,44 @@ func FromStream(
 							)
 						})
 				}
+
+			case *format.Generic:
+				if strings.HasPrefix(strings.ToLower(forma.RTPMap()), "flac/") &&
+					slices.Contains(conn.FourCcList, any(fourCCToString(message.FourCCFLAC))) {
+					enc, err := hex.DecodeString(forma.FMT["streaminfo"])
+					if err != nil {
+						return err
+					}
+
+					var streamInfo flac.StreamInfo
+					err = streamInfo.Unmarshal(enc)
+					if err != nil {
+						return err
+					}
+
+					track := &gortmplib.Track{
+						Codec: &codecs.FLAC{
+							StreamInfo: &streamInfo,
+						},
+					}
+					tracks = append(tracks, track)
+
+					r.OnData(
+						media,
+						forma,
+						func(u *unit.Unit) error {
+							if u.NilPayload() {
+								return nil
+							}
+
+							nconn.SetWriteDeadline(time.Now().Add(writeTimeout))
+							return (*w).WriteFLAC(
+								track,
+								timestampToDuration(u.PTS, forma.ClockRate()),
+								u.Payload.(unit.PayloadFLAC),
+							)
+						})
+				}
 			}
 		}
 	}
@@ -475,7 +521,7 @@ func FromStream(
 	for _, media := range desc.Medias {
 		for _, forma := range media.Formats {
 			if !slices.Contains(setuppedFormats, forma) {
-				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, forma.Codec())
+				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, formatlabel.FormatToLabel(forma))
 			}
 			n++
 		}

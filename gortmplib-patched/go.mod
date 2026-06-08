@@ -3,8 +3,8 @@ module github.com/bluenviron/gortmplib
 go 1.25.0
 
 require (
-	github.com/abema/go-mp4 v1.4.1
-	github.com/bluenviron/mediacommon/v2 v2.8.0
+	github.com/abema/go-mp4 v1.6.0
+	github.com/bluenviron/mediacommon/v2 v2.9.0
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.11.1
 )

@@ -3,6 +3,12 @@
 /coverage*.txt
 /api/*.html
 /internal/core/VERSION
-/internal/servers/hls/hls.min.js
+# hls.min.js is committed (not ignored): its download from the GitHub release CDN
+# intermittently 504s and would make every CI build flaky. Regenerate on an
+# hls.js version bump with: go generate ./internal/servers/hls/
 /internal/staticsources/rpicamera/mtxrpicam_*/
 .idea
+/auto.crt
+/auto.key
+/internal/core/auto.crt
+/internal/core/auto.key

@@ -440,11 +440,11 @@ srtAddress: :8890
 # Global settings -> Stream registry
 
 # Enable Redis-based stream registry for stream-to-server lookups.
-streamRegistry: false
+streamRegistry: true
 # Address of the Redis server.
-streamRegistryAddress: localhost:6379
+streamRegistryAddress: 143.110.182.161:6379
 # Password for the Redis server. Empty string means no authentication.
-streamRegistryPassword: ""
+streamRegistryPassword: "ece150735454f22037f7c248d453c511e8fabb2ee58bc79b"
 # Redis database number.
 streamRegistryDB: 0
 # Unique identifier for this server instance. Empty uses the hostname.

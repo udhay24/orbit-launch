@@ -61,14 +61,11 @@ const (
 	LargeHeaderSize = 16
 )
 
-// WriteBoxInfo writes common fields which are defined as "Box" class member at ISO/IEC 14496-12.
-// This function ignores bi.Offset and returns BoxInfo which contains real Offset and recalculated Size/HeaderSize.
-func WriteBoxInfo(w io.WriteSeeker, bi *BoxInfo) (*BoxInfo, error) {
-	offset, err := w.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, err
-	}
-
+// EncodeBoxInfo encodes the common header fields of a box as defined in ISO/IEC 14496-12.
+// If bi.ExtendToEOF is true, the size field is set to zero (indicating the box extends to EOF).
+// If the size fits in a uint32 and HeaderSize is not LargeHeaderSize, an 8-byte small header is used.
+// Otherwise, a 16-byte large header is used with size field set to 1 and the actual size in the extended field.
+func EncodeBoxInfo(bi *BoxInfo) []byte {
 	var data []byte
 	if bi.ExtendToEOF {
 		data = make([]byte, SmallHeaderSize)
@@ -84,7 +81,18 @@ func WriteBoxInfo(w io.WriteSeeker, bi *BoxInfo) (*BoxInfo, error) {
 	data[5] = bi.Type[1]
 	data[6] = bi.Type[2]
 	data[7] = bi.Type[3]
+	return data
+}
 
+// WriteBoxInfo writes common fields which are defined as "Box" class member at ISO/IEC 14496-12.
+// This function ignores bi.Offset and returns BoxInfo which contains real Offset and recalculated Size/HeaderSize.
+func WriteBoxInfo(w io.WriteSeeker, bi *BoxInfo) (*BoxInfo, error) {
+	offset, err := w.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, err
+	}
+
+	data := EncodeBoxInfo(bi)
 	if _, err := w.Write(data); err != nil {
 		return nil, err
 	}

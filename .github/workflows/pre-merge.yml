@@ -1,0 +1,69 @@
+name: pre-merge
+
+# Fork-delta gate: runs on every PR into the production branch and blocks merge
+# if any custom change (RTMP camera patches, publisher limits, stream registry)
+# regressed during an upstream merge.
+# Spec: docs/superpowers/specs/2026-06-07-pre-merge-test-suite-design.md
+
+on:
+  pull_request:
+    branches: [production]
+
+jobs:
+  integrity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: fork-delta integrity (Layer 1)
+        run: bash scripts/fork-delta-check.sh
+
+  go-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - name: build & vet (Layer 2)
+        run: |
+          bash scripts/gen-embeds.sh
+          go build ./...
+          go vet ./...
+
+      - name: tests — upstream + custom features (Layers 2-3)
+        # Mirror upstream's `make test-nodocker`: run non-core and core as
+        # separate invocations so core's integration servers don't collide on
+        # ports (e.g. :8888) with the per-package server tests run in parallel.
+        # Skip TestSampleConfFile: it asserts the shipped mediamtx.yml equals
+        # upstream defaults, but the fork uses it as a real deployment config.
+        run: |
+          go test -race -skip 'TestSampleConfFile' $(go list ./internal/... | grep -v /core)
+          go test -race ./internal/core
+
+  chaos:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install ffmpeg (used by chaos suite)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: live RTMP chaos (Layer 4)
+        run: bash scripts/run-chaos.sh

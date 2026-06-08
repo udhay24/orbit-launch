@@ -45,30 +45,35 @@ func downloadPlaylist(
 	httpClient *http.Client,
 	onRequest ClientOnRequestFunc,
 	ur *url.URL,
-) (playlist.Playlist, error) {
+) (*url.URL, playlist.Playlist, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ur.String(), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	onRequest(req)
 
 	res, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status code: %d", res.StatusCode)
+		return nil, nil, fmt.Errorf("bad status code: %d", res.StatusCode)
 	}
 
-	byts, err := io.ReadAll(res.Body)
+	byts, err := io.ReadAll(&customLimitReader{res.Body, clientMaxInboundPlaylistSize})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return playlist.Unmarshal(byts)
+	pl, err := playlist.Unmarshal(byts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return res.Request.URL, pl, nil
 }
 
 func pickLeadingPlaylist(variants []*playlist.MultivariantVariant) *playlist.MultivariantVariant {
@@ -111,9 +116,8 @@ func getRenditionsByGroup(
 
 type clientPrimaryDownloaderClient interface {
 	setTracks([]*Track) (map[*Track]*clientTrack, error)
-	setLeadingTimeConv(ts clientTimeConv)
-	waitLeadingTimeConv(ctx context.Context) bool
-	getLeadingTimeConv() clientTimeConv
+	setTimeConv(ts clientTimeConv)
+	waitTimeConv(ctx context.Context) (clientTimeConv, bool)
 }
 
 type clientPrimaryDownloader struct {
@@ -139,10 +143,12 @@ func (d *clientPrimaryDownloader) initialize() {
 func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 	d.onDownloadPrimaryPlaylist(d.primaryPlaylistURL.String())
 
-	pl, err := downloadPlaylist(ctx, d.httpClient, d.onRequest, d.primaryPlaylistURL)
+	finalURL, pl, err := downloadPlaylist(ctx, d.httpClient, d.onRequest, d.primaryPlaylistURL)
 	if err != nil {
 		return err
 	}
+
+	d.primaryPlaylistURL = finalURL
 
 	var streams []*clientStreamDownloader
 
@@ -158,7 +164,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 			onDownloadSegment:        d.onDownloadSegment,
 			onDownloadPart:           d.onDownloadPart,
 			onDecodeError:            d.onDecodeError,
-			playlistURL:              d.primaryPlaylistURL,
+			playlistURL:              finalURL,
 			firstPlaylist:            plt,
 			rp:                       d.rp,
 			client:                   d.client,
@@ -174,7 +180,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 		}
 
 		var u *url.URL
-		u, err = clientAbsoluteURL(d.primaryPlaylistURL, leadingPlaylist.URI)
+		u, err = clientAbsoluteURL(finalURL, leadingPlaylist.URI)
 		if err != nil {
 			return err
 		}

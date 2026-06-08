@@ -41,6 +41,9 @@ const (
 	UserControlTypeStreamIsRecorded UserControlType = 4
 	UserControlTypePingRequest      UserControlType = 6
 	UserControlTypePingResponse     UserControlType = 7
+
+	userControlTypeUndocumented1 UserControlType = 31
+	userControlTypeUndocumented2 UserControlType = 32
 )
 
 // AudioExType is an audio message extended type.
@@ -85,6 +88,7 @@ var (
 	FourCCAC3  FourCC = 'a'<<24 | 'c'<<16 | '-'<<8 | '3'
 	FourCCMP4A FourCC = 'm'<<24 | 'p'<<16 | '4'<<8 | 'a'
 	FourCCMP3  FourCC = '.'<<24 | 'm'<<16 | 'p'<<8 | '3'
+	FourCCFLAC FourCC = 'f'<<24 | 'L'<<16 | 'a'<<8 | 'C'
 )
 
 // Message is a message.

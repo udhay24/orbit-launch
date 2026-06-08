@@ -241,11 +241,11 @@ func (w *Writer) writeTracks() error {
 	}
 
 	if len(videoTracks) > 1 {
-		var val amf0.Object
+		val := make(amf0.Object, len(videoTracks)-1)
 
-		for id, track := range videoTracks[1:] {
-			val = append(val, amf0.ObjectEntry{
-				Key: strconv.FormatInt(int64(id+2), 10),
+		for i, track := range videoTracks[1:] {
+			val[i] = amf0.ObjectEntry{
+				Key: strconv.FormatInt(int64(i+2), 10),
 				Value: amf0.Object{
 					{
 						Key:   "videocodecid",
@@ -256,7 +256,7 @@ func (w *Writer) writeTracks() error {
 						Value: float64(0),
 					},
 				},
-			})
+			}
 		}
 
 		metadata = append(metadata, amf0.ObjectEntry{
@@ -266,11 +266,11 @@ func (w *Writer) writeTracks() error {
 	}
 
 	if len(audioTracks) > 1 {
-		var val amf0.Object
+		val := make(amf0.Object, len(audioTracks)-1)
 
-		for id, track := range audioTracks[1:] {
-			val = append(val, amf0.ObjectEntry{
-				Key: strconv.FormatInt(int64(id+2), 10),
+		for i, track := range audioTracks[1:] {
+			val[i] = amf0.ObjectEntry{
+				Key: strconv.FormatInt(int64(i+2), 10),
 				Value: amf0.Object{
 					{
 						Key:   "audiocodecid",
@@ -281,7 +281,7 @@ func (w *Writer) writeTracks() error {
 						Value: float64(0),
 					},
 				},
-			})
+			}
 		}
 
 		metadata = append(metadata, amf0.ObjectEntry{
@@ -439,11 +439,28 @@ func (w *Writer) writeTracks() error {
 				ChunkStreamID:   message.AudioChunkStreamID,
 				MessageStreamID: 0x1000000,
 				FourCC:          message.FourCCOpus,
-				OpusConfig: &message.OpusIDHeader{
-					Version:      0x1,
-					ChannelCount: uint8(codec.ChannelCount),
-					PreSkip:      3840,
-				},
+				OpusConfig:      codec.IDHeader,
+			}
+
+			if id != 0 {
+				msg = &message.AudioExMultitrack{
+					MultitrackType: 0x0,
+					TrackID:        uint8(id),
+					Wrapped:        msg,
+				}
+			}
+
+			err = w.Conn.Write(msg)
+			if err != nil {
+				return err
+			}
+
+		case *codecs.FLAC:
+			var msg message.Message = &message.AudioExSequenceStart{
+				ChunkStreamID:   message.AudioChunkStreamID,
+				MessageStreamID: 0x1000000,
+				FourCC:          message.FourCCFLAC,
+				FlacConfig:      codec.StreamInfo,
 			}
 
 			if id != 0 {
@@ -685,6 +702,29 @@ func (w *Writer) WriteOpus(track *Track, pts time.Duration, pkt []byte) error {
 		DTS:             pts,
 		FourCC:          message.FourCCOpus,
 		Payload:         pkt,
+	}
+
+	id := w.audioTrackToID[track]
+
+	if id != 0 {
+		msg = &message.AudioExMultitrack{
+			MultitrackType: 0x0,
+			TrackID:        id,
+			Wrapped:        msg,
+		}
+	}
+
+	return w.Conn.Write(msg)
+}
+
+// WriteFLAC writes a FLAC frame.
+func (w *Writer) WriteFLAC(track *Track, pts time.Duration, frame []byte) error {
+	var msg message.Message = &message.AudioExCodedFrames{
+		ChunkStreamID:   message.AudioChunkStreamID,
+		MessageStreamID: 0x1000000,
+		FourCC:          message.FourCCFLAC,
+		Payload:         frame,
+		DTS:             pts,
 	}
 
 	id := w.audioTrackToID[track]

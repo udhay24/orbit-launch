@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package sctp
@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"strings"
 )
 
 // Create the crc32 table we'll use for the checksum.
@@ -121,12 +122,16 @@ func (p *packet) unmarshal(doChecksum bool, raw []byte) error { //nolint:cyclop
 			dataChunk = &chunkHeartbeat{}
 		case ctPayloadData:
 			dataChunk = &chunkPayloadData{}
+		case ctIData:
+			dataChunk = &chunkPayloadData{}
 		case ctSack:
 			dataChunk = &chunkSelectiveAck{}
 		case ctReconfig:
 			dataChunk = &chunkReconfig{}
 		case ctForwardTSN:
 			dataChunk = &chunkForwardTSN{}
+		case ctIForwardTSN:
+			dataChunk = &chunkIForwardTSN{}
 		case ctError:
 			dataChunk = &chunkError{}
 		case ctShutdown:
@@ -218,16 +223,17 @@ func (p *packet) String() string {
 	destinationPort: %d
 	verificationTag: %d
 	`
-	res := fmt.Sprintf(format,
+	var res strings.Builder
+	fmt.Fprintf(&res, format,
 		p.sourcePort,
 		p.destinationPort,
 		p.verificationTag,
 	)
 	for i, chunk := range p.chunks {
-		res += fmt.Sprintf("Chunk %d:\n %s", i, chunk)
+		fmt.Fprintf(&res, "Chunk %d:\n %s", i, chunk)
 	}
 
-	return res
+	return res.String()
 }
 
 // TryMarshalUnmarshal attempts to marshal and unmarshal a message. Added for fuzzing.

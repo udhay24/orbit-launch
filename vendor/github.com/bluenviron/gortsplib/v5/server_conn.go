@@ -3,7 +3,6 @@ package gortsplib
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"net"
 	gourl "net/url"
@@ -13,9 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5/internal/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/auth"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
-	"github.com/bluenviron/gortsplib/v5/pkg/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/conn"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/headers"
@@ -73,7 +72,7 @@ func prepareForDescribe(
 				sm := medias[medi]
 
 				var err error
-				keyMgmtMikey, err = mikeyGenerate(sm.srtpOutCtx)
+				keyMgmtMikey, err = contextToMikey(sm.srtpOutCtx)
 				if err != nil {
 					return nil, err
 				}
@@ -144,10 +143,6 @@ type ServerConn struct {
 func (sc *ServerConn) initialize() {
 	ctx, ctxCancel := context.WithCancel(sc.s.ctx)
 
-	if sc.s.TLSConfig != nil && sc.tunnel == TunnelNone {
-		sc.nconn = tls.Server(sc.nconn, sc.s.TLSConfig)
-	}
-
 	sc.bc = bytecounter.New(sc.nconn, nil, nil)
 	sc.ctx = ctx
 	sc.ctxCancel = ctxCancel
@@ -202,6 +197,8 @@ func (sc *ServerConn) Transport() *ConnTransport {
 // Stats returns connection statistics.
 func (sc *ServerConn) Stats() *ConnStats {
 	return &ConnStats{
+		InboundBytes:  sc.bc.BytesReceived(),
+		OutboundBytes: sc.bc.BytesSent(),
 		BytesReceived: sc.bc.BytesReceived(),
 		BytesSent:     sc.bc.BytesSent(),
 	}
@@ -307,7 +304,9 @@ func (sc *ServerConn) runInner() error {
 
 		case ss := <-sc.chRemoveSession:
 			if sc.session == ss {
+				sc.propsMutex.Lock()
 				sc.session = nil
+				sc.propsMutex.Unlock()
 			}
 
 		case <-sc.ctx.Done():
@@ -544,46 +543,45 @@ func (sc *ServerConn) handleRequestInSession(
 	req *base.Request,
 	create bool,
 ) (*base.Response, error) {
-	// handle directly in Session
-	if sc.session != nil {
+	var session *ServerSession
+
+	if sc.session == nil {
+		var err error
+		session, err = sc.s.findOrCreateSession(serverFindOrCreateSessionReq{
+			sc:     sc,
+			id:     sxID,
+			create: create,
+		})
+		if err != nil {
+			var terr1 liberrors.ErrServerSessionNotFound
+			if errors.As(err, &terr1) {
+				return &base.Response{
+					StatusCode: base.StatusSessionNotFound,
+				}, err
+			}
+
+			return &base.Response{
+				StatusCode: base.StatusBadRequest,
+			}, err
+		}
+	} else {
 		// session ID is optional in SETUP and ANNOUNCE requests, since
 		// client may not have received the session ID yet due to multiple reasons:
 		// * requests can be retries after code 301
-		// * SETUP requests comes after ANNOUNCE response, that don't contain the session ID
-		if sxID != "" {
-			// the connection can't communicate with two sessions at once.
-			if sxID != sc.session.secretID {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerLinkedToOtherSession{}
-			}
+		// * SETUP requests come after the ANNOUNCE response, that doesn't contain the session ID
+		if sxID != "" && sxID != sc.session.secretID {
+			return &base.Response{
+				StatusCode: base.StatusBadRequest,
+			}, liberrors.ErrServerLinkedToOtherSession{}
 		}
 
-		cres := make(chan sessionRequestRes)
-		sreq := sessionRequestReq{
-			sc:     sc,
-			req:    req,
-			id:     sxID,
-			create: create,
-			res:    cres,
-		}
-
-		res, session, err := sc.session.handleRequest(sreq)
-		sc.session = session
-		return res, err
+		session = sc.session
 	}
 
-	// otherwise, pass through Server
-	cres := make(chan sessionRequestRes)
-	sreq := sessionRequestReq{
-		sc:     sc,
-		req:    req,
-		id:     sxID,
-		create: create,
-		res:    cres,
-	}
-
-	res, session, err := sc.s.handleRequest(sreq)
+	res, session, err := session.handleRequest(sessionRequestReq{
+		sc:  sc,
+		req: req,
+	})
 
 	sc.propsMutex.Lock()
 	sc.session = session

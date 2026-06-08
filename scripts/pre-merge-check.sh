@@ -42,7 +42,9 @@ go test -race -run TestPathManagerPublisherLimit ./internal/core/
 
 if [ "$RUN_FULL" -eq 1 ]; then
   step "Layer 2b — full upstream test suite"
-  go test ./internal/...
+  # Skip TestSampleConfFile — the fork's mediamtx.yml is a deployment config,
+  # not the upstream "equals defaults" sample it asserts against.
+  go test -skip 'TestSampleConfFile' ./internal/...
 fi
 
 if [ "$RUN_CHAOS" -eq 1 ]; then

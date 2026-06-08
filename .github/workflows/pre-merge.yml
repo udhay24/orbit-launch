@@ -38,7 +38,10 @@ jobs:
           go vet ./...
 
       - name: tests — upstream + custom features (Layers 2-3)
-        run: make test-nodocker
+        # Skip TestSampleConfFile: it asserts the shipped mediamtx.yml equals
+        # upstream defaults, but the fork intentionally uses it as a real
+        # deployment config (stream registry, publisher limits, recording).
+        run: go test -race -skip 'TestSampleConfFile' ./internal/...
 
   chaos:
     runs-on: ubuntu-24.04

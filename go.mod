@@ -9,6 +9,7 @@ require (
 	github.com/MicahParks/keyfunc/v3 v3.8.0
 	github.com/abema/go-mp4 v1.6.0
 	github.com/alecthomas/kong v1.15.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/asticode/go-astits v1.15.0
 	github.com/bluenviron/gohlslib/v2 v2.4.0
 	github.com/bluenviron/gortmplib v0.4.0
@@ -101,6 +102,7 @@ require (
 	github.com/ugorji/go/codec v1.3.1 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.22.0 // indirect

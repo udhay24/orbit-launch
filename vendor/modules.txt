@@ -55,6 +55,17 @@ github.com/abema/go-mp4/internal/util
 # github.com/alecthomas/kong v1.15.0
 ## explicit; go 1.20
 github.com/alecthomas/kong
+# github.com/alicebob/miniredis/v2 v2.38.0
+## explicit; go 1.17
+github.com/alicebob/miniredis/v2
+github.com/alicebob/miniredis/v2/fpconv
+github.com/alicebob/miniredis/v2/geohash
+github.com/alicebob/miniredis/v2/gopher-json
+github.com/alicebob/miniredis/v2/hyperloglog
+github.com/alicebob/miniredis/v2/metro
+github.com/alicebob/miniredis/v2/proto
+github.com/alicebob/miniredis/v2/server
+github.com/alicebob/miniredis/v2/size
 # github.com/asticode/go-astikit v0.30.0
 ## explicit; go 1.13
 github.com/asticode/go-astikit
@@ -631,6 +642,12 @@ github.com/xanzy/ssh-agent
 # github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e
 ## explicit; go 1.19
 github.com/xo/terminfo
+# github.com/yuin/gopher-lua v1.1.1
+## explicit; go 1.17
+github.com/yuin/gopher-lua
+github.com/yuin/gopher-lua/ast
+github.com/yuin/gopher-lua/parse
+github.com/yuin/gopher-lua/pm
 # go.mongodb.org/mongo-driver/v2 v2.5.0
 ## explicit; go 1.19
 go.mongodb.org/mongo-driver/v2/bson

@@ -32,6 +32,7 @@ step "Layer 1 — fork-delta integrity"
 bash scripts/fork-delta-check.sh
 
 step "Layer 2 — build & vet"
+go generate ./...   # produces embedded VERSION / hls.min.js (absent on a clean checkout)
 go build ./...
 go vet ./...
 

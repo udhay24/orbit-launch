@@ -44,6 +44,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "generating embedded assets (VERSION, hls.min.js)..."
+go generate ./...
 echo "building binary..."
 go build -o "$bin" .
 

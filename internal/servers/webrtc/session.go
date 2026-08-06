@@ -338,15 +338,17 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 	ip, _, _ := net.SplitHostPort(s.remoteAddr)
 
 	res1, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author: s,
 		AccessRequest: defs.PathAccessRequest{
-			Name:        s.pathName,
-			Query:       s.httpRequest.URL.RawQuery,
-			Publish:     true,
-			UserAgent:   s.httpRequest.Header.Get("User-Agent"),
-			Proto:       auth.ProtocolWebRTC,
-			ID:          &s.uuid,
-			Credentials: httpp.Credentials(s.httpRequest),
-			IP:          net.ParseIP(ip),
+			Name:                 s.pathName,
+			Query:                s.httpRequest.URL.RawQuery,
+			Publish:              true,
+			UserAgent:            s.httpRequest.Header.Get("User-Agent"),
+			Proto:                auth.ProtocolWebRTC,
+			ID:                   &s.uuid,
+			Credentials:          httpp.Credentials(s.httpRequest),
+			IP:                   net.ParseIP(ip),
+			EnableAskCredentials: true,
 		},
 	})
 	if err != nil {
@@ -453,9 +455,9 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 		AccessRequest: defs.PathAccessRequest{
 			Name:      s.pathName,
 			Query:     s.httpRequest.URL.RawQuery,
+			UserAgent: s.httpRequest.Header.Get("User-Agent"),
 			Publish:   true,
 			SkipAuth:  true,
-			UserAgent: s.httpRequest.Header.Get("User-Agent"),
 		},
 	})
 	if err != nil {
@@ -483,18 +485,18 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 	res, err := s.pathManager.AddReader(defs.PathAddReaderReq{
 		Author: s,
 		AccessRequest: defs.PathAccessRequest{
-			Name:        s.pathName,
-			Query:       s.httpRequest.URL.RawQuery,
-			UserAgent:   s.httpRequest.Header.Get("User-Agent"),
-			Proto:       auth.ProtocolWebRTC,
-			ID:          &s.uuid,
-			Credentials: httpp.Credentials(s.httpRequest),
-			IP:          net.ParseIP(ip),
+			Name:                 s.pathName,
+			Query:                s.httpRequest.URL.RawQuery,
+			UserAgent:            s.httpRequest.Header.Get("User-Agent"),
+			Proto:                auth.ProtocolWebRTC,
+			ID:                   &s.uuid,
+			Credentials:          httpp.Credentials(s.httpRequest),
+			IP:                   net.ParseIP(ip),
+			EnableAskCredentials: true,
 		},
 	})
 	if err != nil {
-		var terr2 *defs.PathNoStreamAvailableError
-		if errors.As(err, &terr2) {
+		if _, ok := errors.AsType[*defs.PathNoStreamAvailableError](err); ok {
 			return http.StatusNotFound, err
 		}
 
@@ -527,7 +529,7 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 
 	r := &stream.Reader{Parent: s}
 
-	err = webrtc.FromStream(res.Stream.Desc, r, pc)
+	err = webrtc.FromStream(res.Stream.OrigDesc, r, pc)
 	if err != nil {
 		return http.StatusBadRequest, err
 	}

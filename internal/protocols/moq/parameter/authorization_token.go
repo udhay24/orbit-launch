@@ -9,16 +9,22 @@ import (
 const typeAuthorizationToken = 0x03
 
 // AuthorizationTokenAliasType is a value of Alias Type.
-// spec: draft-18, section 10.2.2
+// spec:
+// * draft-17, section 9.3.2
+// * draft-18/19, section 10.2.2
 type AuthorizationTokenAliasType uint64
 
-// spec: draft-18, section 10.2.2
+// spec:
+// * draft-17, section 9.3.2
+// * draft-18/19, section 10.2.2
 const (
 	AuthorizationTokenAliasTypeUseValue AuthorizationTokenAliasType = 0x03
 )
 
 // AuthorizationToken is the AUTHORIZATION_TOKEN parameter.
-// spec: draft-18, section 10.2.2
+// spec:
+// * draft-17, section 9.3.2
+// * draft-18/19, section 10.2.2
 type AuthorizationToken struct {
 	AliasType  AuthorizationTokenAliasType
 	TokenType  uint64
@@ -33,35 +39,41 @@ func (*AuthorizationToken) paramType() uint64 {
 
 func (t *AuthorizationToken) unmarshal(buf []byte) (int, error) {
 	var le varint.Varint
-	llen, err := le.Unmarshal(buf)
+	n1, err := le.Unmarshal(buf)
 	if err != nil {
 		return 0, err
 	}
-	if len(buf)-llen < int(le) {
+	buf = buf[n1:]
+
+	if uint64(len(buf)) < uint64(le) {
 		return 0, fmt.Errorf("not enough bytes for parameter value")
 	}
-	buf = buf[llen : llen+int(le)]
+
+	buf = buf[:le]
 
 	var aliasType varint.Varint
 	n, err := aliasType.Unmarshal(buf)
 	if err != nil {
 		return 0, err
 	}
+	buf = buf[n:]
+
 	t.AliasType = AuthorizationTokenAliasType(aliasType)
 
 	if t.AliasType != AuthorizationTokenAliasTypeUseValue {
 		return 0, fmt.Errorf("unsupported token alias type: %d", aliasType)
 	}
-	buf = buf[n:]
 
 	var tokenType varint.Varint
 	n, err = tokenType.Unmarshal(buf)
 	if err != nil {
 		return 0, err
 	}
+
 	t.TokenType = uint64(tokenType)
 	t.TokenValue = buf[n:]
-	return llen + int(le), nil
+
+	return n1 + int(le), nil
 }
 
 func (t AuthorizationToken) marshalSize() int {

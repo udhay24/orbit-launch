@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/pion/ice/v4"
 	"github.com/pion/logging"
 	"github.com/pion/rtcp"
@@ -16,6 +15,8 @@ import (
 	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 type nilWriter struct{}
@@ -32,6 +33,38 @@ func gatherCodecs(tracks []*InboundTrack) []webrtc.RTPCodecParameters {
 		codecs[i] = track.Codec()
 	}
 	return codecs
+}
+
+func gatherTrackIDs(tracks []*InboundTrack) []string {
+	ids := make([]string, len(tracks))
+	for i, track := range tracks {
+		ids[i] = track.track.ID()
+	}
+	return ids
+}
+
+func gatherTrackRIDs(tracks []*InboundTrack) []string {
+	rids := make([]string, len(tracks))
+	for i, track := range tracks {
+		rids[i] = track.track.RID()
+	}
+	return rids
+}
+
+func gatherTrackMIDIndexes(tracks []*InboundTrack) []int {
+	mids := make([]int, len(tracks))
+	for i, track := range tracks {
+		mids[i] = track.midIndex
+	}
+	return mids
+}
+
+func gatherTrackRIDIndexes(tracks []*InboundTrack) []int {
+	rids := make([]int, len(tracks))
+	for i, track := range tracks {
+		rids[i] = track.ridIndex
+	}
+	return rids
 }
 
 func senderHeaderExtensionID(params webrtc.RTPSendParameters, uri string) uint8 {
@@ -343,7 +376,7 @@ func TestPeerConnectionRead(t *testing.T) {
 	go func() {
 		time.Sleep(100 * time.Millisecond)
 
-		err2 := videoTrack.WriteRTP(&rtp.Packet{
+		err2 := audioTrack.WriteRTP(&rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
 				Marker:         true,
@@ -356,7 +389,7 @@ func TestPeerConnectionRead(t *testing.T) {
 		})
 		require.NoError(t, err2)
 
-		err2 = audioTrack.WriteRTP(&rtp.Packet{
+		err2 = videoTrack.WriteRTP(&rtp.Packet{
 			Header: rtp.Header{
 				Version:        2,
 				Marker:         true,
@@ -372,6 +405,9 @@ func TestPeerConnectionRead(t *testing.T) {
 
 	err = reader.GatherInboundTracks(2 * time.Second)
 	require.NoError(t, err)
+
+	require.Equal(t, []string{"video", "audio"}, gatherTrackIDs(reader.InboundTracks()))
+	require.Equal(t, []int{0, 1}, gatherTrackMIDIndexes(reader.InboundTracks()))
 
 	codecs := gatherCodecs(reader.InboundTracks())
 
@@ -572,12 +608,8 @@ func TestPeerConnectionReadSimulcast(t *testing.T) {
 		}, codec.RTPCodecCapability)
 	}
 
-	rids := make([]string, len(tracks))
-	for i, track := range tracks {
-		rids[i] = track.track.RID()
-	}
-	sort.Strings(rids)
-	require.Equal(t, []string{"h", "l", "m"}, rids)
+	require.Equal(t, []string{"l", "m", "h"}, gatherTrackRIDs(tracks))
+	require.Equal(t, []int{0, 1, 2}, gatherTrackRIDIndexes(tracks))
 }
 
 func TestPeerConnectionStripIncomingTWCC(t *testing.T) {
@@ -838,11 +870,13 @@ func TestPeerConnectionPublishDataChannel(t *testing.T) {
 	_, err = pc1.CreateDataChannel("", nil)
 	require.NoError(t, err)
 
-	dataChanCreated := make(chan struct{})
+	dataChanOpened := make(chan struct{})
 	dataReceived := make(chan struct{})
 
 	pc1.OnDataChannel(func(dc *webrtc.DataChannel) {
-		close(dataChanCreated)
+		dc.OnOpen(func() {
+			close(dataChanOpened)
+		})
 
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			require.Equal(t, []byte("test data"), msg.Data)
@@ -871,6 +905,12 @@ func TestPeerConnectionPublishDataChannel(t *testing.T) {
 	require.NoError(t, err)
 	defer pc2.Close()
 
+	outboundDataChanOpened := make(chan struct{})
+
+	pc2.OutboundDataChannels[0].dataChan.OnOpen(func() {
+		close(outboundDataChanOpened)
+	})
+
 	answer, err := pc2.CreateFullAnswer(&offer, false)
 	require.NoError(t, err)
 
@@ -880,9 +920,252 @@ func TestPeerConnectionPublishDataChannel(t *testing.T) {
 	err = pc2.WaitUntilConnected(10 * time.Second)
 	require.NoError(t, err)
 
-	<-dataChanCreated
+	<-outboundDataChanOpened
+	<-dataChanOpened
 
-	pc2.OutboundDataChannels[0].Write([]byte("test data"))
+	err = pc2.OutboundDataChannels[0].dataChan.Send([]byte("test data"))
+	require.NoError(t, err)
 
 	<-dataReceived
+}
+
+func TestPeerConnectionAdditionalHostsUnresolvable(t *testing.T) {
+	// A host in AdditionalHosts that can't be resolved server-side - for
+	// instance air-gapped networks without DNS, or split-horizon / overlay
+	// DNS names that only resolve on the client - must be skipped instead of
+	// aborting the session; the other (valid) entries must still produce
+	// candidates.
+	clientPC := &PeerConnection{
+		LocalRandomUDP:        true,
+		IPsFromInterfaces:     true,
+		IPsFromInterfacesList: []string{"lo"},
+		Log:                   test.NilLogger,
+	}
+	err := clientPC.Start()
+	require.NoError(t, err)
+	defer clientPC.Close()
+
+	ln, err := net.ListenPacket("udp4", ":0")
+	require.NoError(t, err)
+	defer ln.Close()
+	udpMux := webrtc.NewICEUDPMux(webrtcNilLogger, ln)
+
+	serverPC := &PeerConnection{
+		ICEUDPMux:       udpMux,
+		AdditionalHosts: []string{"127.0.0.1", "unresolvable.invalid"},
+		Publish:         true,
+		OutboundTracks: []*OutboundTrack{{
+			Caps: webrtc.RTPCodecCapability{
+				MimeType:  webrtc.MimeTypeAV1,
+				ClockRate: 90000,
+			},
+		}},
+		Log: test.NilLogger,
+	}
+	err = serverPC.Start()
+	require.NoError(t, err)
+	defer serverPC.Close()
+
+	offer, err := clientPC.CreatePartialOffer(false)
+	require.NoError(t, err)
+
+	answer, err := serverPC.CreateFullAnswer(offer, false)
+	require.NoError(t, err)
+
+	require.Contains(t, answer.SDP, "127.0.0.1")
+	require.NotContains(t, answer.SDP, "unresolvable.invalid")
+}
+
+func TestPeerConnectionRecomputeSequenceNumber(t *testing.T) {
+	for _, ca := range []struct {
+		name          string
+		packets       []*rtp.Packet
+		expectedCount int
+		check         func(t *testing.T, seqNums []uint16)
+	}{
+		{
+			name: "skip empty packets",
+			packets: []*rtp.Packet{
+				{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 1000,
+						Timestamp:      45343,
+						SSRC:           124123,
+					},
+					Payload: []byte{5, 2},
+				},
+				{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 1001,
+						Timestamp:      45343,
+						SSRC:           124123,
+					},
+					Payload: []byte{},
+				},
+				{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 1002,
+						Timestamp:      45343,
+						SSRC:           124123,
+					},
+					Payload: []byte{5, 2},
+				},
+				{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 1003,
+						Timestamp:      45343,
+						SSRC:           124123,
+					},
+					Payload: []byte{},
+				},
+				{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 1004,
+						Timestamp:      45343,
+						SSRC:           124123,
+					},
+					Payload: []byte{5, 2},
+				},
+			},
+			expectedCount: 3,
+			check: func(t *testing.T, seqNums []uint16) {
+				require.Len(t, seqNums, 3)
+				require.Equal(t, seqNums[1], seqNums[0]+1)
+				require.Equal(t, seqNums[2], seqNums[1]+1)
+			},
+		},
+		{
+			name: "preserve real gaps",
+			packets: func() []*rtp.Packet {
+				packets := []*rtp.Packet{{
+					Header: rtp.Header{
+						Version:        2,
+						Marker:         true,
+						PayloadType:    96,
+						SequenceNumber: 1000,
+						Timestamp:      45343,
+						SSRC:           124123,
+					},
+					Payload: []byte{5, 2},
+				}}
+
+				for i := uint16(1002); i <= 1065; i++ {
+					packets = append(packets, &rtp.Packet{
+						Header: rtp.Header{
+							Version:        2,
+							Marker:         true,
+							PayloadType:    96,
+							SequenceNumber: i,
+							Timestamp:      45343,
+							SSRC:           124123,
+						},
+						Payload: []byte{5, 2},
+					})
+				}
+
+				return packets
+			}(),
+			expectedCount: 2,
+			check: func(t *testing.T, seqNums []uint16) {
+				require.Len(t, seqNums, 2)
+				require.Equal(t, seqNums[1], seqNums[0]+2)
+			},
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			pub, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+			require.NoError(t, err)
+			defer pub.Close() //nolint:errcheck
+
+			videoTrack, err := webrtc.NewTrackLocalStaticRTP(
+				webrtc.RTPCodecCapability{
+					MimeType:  webrtc.MimeTypeVP8,
+					ClockRate: 90000,
+				},
+				"video", "publisher",
+			)
+			require.NoError(t, err)
+
+			_, err = pub.AddTrack(videoTrack)
+			require.NoError(t, err)
+
+			reader := &PeerConnection{
+				LocalRandomUDP:    true,
+				IPsFromInterfaces: true,
+				Publish:           false,
+				Log:               test.NilLogger,
+			}
+			err = reader.Start()
+			require.NoError(t, err)
+			defer reader.Close()
+
+			offer, err := pub.CreateOffer(nil)
+			require.NoError(t, err)
+
+			err = pub.SetLocalDescription(offer)
+			require.NoError(t, err)
+
+			answer, err := reader.CreateFullAnswer(&offer, false)
+			require.NoError(t, err)
+
+			err = pub.SetRemoteDescription(*answer)
+			require.NoError(t, err)
+
+			err = reader.WaitUntilConnected(10 * time.Second)
+			require.NoError(t, err)
+
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+
+				for _, pkt := range ca.packets {
+					err2 := videoTrack.WriteRTP(pkt)
+					if err2 != nil {
+						return
+					}
+				}
+			}()
+
+			err = reader.GatherInboundTracks(5 * time.Second)
+			require.NoError(t, err)
+
+			tracks := reader.InboundTracks()
+			require.Len(t, tracks, 1)
+
+			received := make(chan []uint16, 1)
+			var seqNums []uint16
+
+			tracks[0].OnPacketRTP = func(p *rtp.Packet) {
+				require.NotEmpty(t, p.Payload)
+				seqNums = append(seqNums, p.SequenceNumber)
+				if len(seqNums) == ca.expectedCount {
+					received <- append([]uint16(nil), seqNums...)
+				}
+			}
+
+			reader.StartReading()
+
+			select {
+			case seqs := <-received:
+				ca.check(t, seqs)
+
+			case <-time.After(2 * time.Second):
+				require.FailNow(t, "timeout waiting for packets")
+			}
+		})
+	}
 }

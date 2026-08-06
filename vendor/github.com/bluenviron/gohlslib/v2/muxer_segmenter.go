@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
@@ -13,6 +12,8 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/vp9"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+
+	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
 )
 
 func multiplyAndDivide(v, m, d int64) int64 {
@@ -425,9 +426,8 @@ func (s *muxerSegmenter) writeMPEG4Audio(
 				if err != nil {
 					return err
 				}
-			} else if track.stream.nextSegment.(*muxerSegmentMPEGTS).audioAUCount >= mpegtsSegmentMinAUCount && // switch segment
-				(timestampToDuration(pts, track.ClockRate)-
-					track.stream.nextSegment.(*muxerSegmentMPEGTS).startDTS) >= s.segmentMinDuration {
+			} else if (timestampToDuration(pts, track.ClockRate) -
+				track.stream.nextSegment.(*muxerSegmentMPEGTS).startDTS) >= s.segmentMinDuration { // switch segment
 				err := s.parent.rotateSegments(timestampToDuration(pts, track.ClockRate), ntp)
 				if err != nil {
 					return err
@@ -448,13 +448,10 @@ func (s *muxerSegmenter) writeMPEG4Audio(
 		return nil
 	}
 
-	sampleRate := track.Codec.(*codecs.MPEG4Audio).Config.SampleRate
-
 	for i, au := range aus {
 		auNTP := ntp.Add(time.Duration(i) * mpeg4audio.SamplesPerAccessUnit *
-			time.Second / time.Duration(sampleRate))
-		auPTS := pts + int64(i)*mpeg4audio.SamplesPerAccessUnit*
-			int64(track.ClockRate)/int64(sampleRate)
+			time.Second / time.Duration(track.ClockRate))
+		auPTS := pts + int64(i)*mpeg4audio.SamplesPerAccessUnit
 
 		err := s.fmp4WriteSample(
 			track,

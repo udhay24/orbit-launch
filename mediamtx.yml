@@ -291,6 +291,10 @@ rtspServerCert: server.crt
 # Authentication methods. Available are "basic" and "digest".
 # "digest" doesn't provide any additional security and is available for compatibility only.
 rtspAuthMethods: [basic]
+# IPs or CIDRs of proxies placed before the RTSP server.
+# If the server receives a request from one of these entries, IP in logs
+# and authentication will be taken from the PROXY protocol header.
+rtspTrustedProxies: []
 
 ###############################################
 # Global settings -> RTMP server
@@ -311,6 +315,10 @@ rtmpsAddress: :1936
 rtmpServerKey: server.key
 # Path to the server certificate. This is needed only when encryption is "strict" or "optional".
 rtmpServerCert: server.crt
+# IPs or CIDRs of proxies placed before the RTMP server.
+# If the server receives a request from one of these entries, IP in logs
+# and authentication will be taken from the PROXY protocol header.
+rtmpTrustedProxies: []
 
 ###############################################
 # Global settings -> HLS server
@@ -459,6 +467,34 @@ maxPublishers: 2000
 publisherHysteresis: 300
 
 ###############################################
+# Global settings -> MoQ server
+
+# Enable the MoQ (Media over QUIC) server, which allows to publish and read streams with the MoQ protocol.
+# Disabled in this deployment: MoQ is a new upstream subsystem and enabling it opens
+# additional listeners. Upstream's sample defaults this to true.
+moq: false
+# Address of the TCP/HTTP2 listener.
+# This hosts the web client.
+moqHTTP2Address: :8892
+# Address of the UDP/HTTP3 listener.
+# This hosts the WebTransport endpoint.
+moqHTTP3Address: :8892
+# Address of the UDP/QUIC listener used for native MoQ-over-QUIC.
+moqQUICAddress: :8893
+# Path to the server key.
+# This can be generated with:
+# openssl genrsa -out server.key 2048
+# openssl req -new -x509 -sha256 -key server.key -out server.crt -days 3650
+# If set to "auto.key", a key is generated automatically and saved in the current folder.
+moqServerKey: auto.key
+# Path to the server certificate.
+moqServerCert: auto.crt
+# Allowed origins for CORS.
+moqAllowOrigins: ["*"]
+# Proxies which are trusted to provide the client's real IP via the X-Forwarded-For header.
+moqTrustedProxies: []
+
+###############################################
 # Default path settings
 
 # Settings in "pathDefaults" are applied anywhere,
@@ -470,28 +506,27 @@ pathDefaults:
 
   # Source of the stream. This can be:
   # * publisher -> the stream is provided by a RTSP, RTMP, WebRTC or SRT client
-  # * rtsp://existing-url -> the stream is pulled from another RTSP server / camera
-  # * rtsps://existing-url -> the stream is pulled from another RTSP server / camera with RTSPS
-  # * rtsp+http://existing-url -> the stream is pulled from another RTSP server / camera, with HTTP tunneling
-  # * rtsps+http://existing-url -> the stream is pulled from another RTSP server / camera, with HTTPS tunneling
-  # * rtsp+ws://existing-url -> the stream is pulled from another RTSP server / camera, with WebSocket tunneling
-  # * rtsps+ws://existing-url -> the stream is pulled from another RTSP server / camera, with secure WebSocket tunneling
-  # * rtmp://existing-url -> the stream is pulled from another RTMP server / camera
-  # * rtmps://existing-url -> the stream is pulled from another RTMP server / camera with RTMPS
-  # * http://existing-url/stream.m3u8 -> the stream is pulled from another HLS server / camera
-  # * https://existing-url/stream.m3u8 -> the stream is pulled from another HLS server / camera with HTTPS
+  # * rtsp://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera
+  # * rtsps://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera with RTSPS
+  # * rtsp+http://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera, with HTTP tunneling
+  # * rtsps+http://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera, with HTTPS tunneling
+  # * rtsp+ws://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera, with WebSocket tunneling
+  # * rtsps+ws://user:pass@host:port/path -> the stream is pulled from another RTSP server / camera, with secure WebSocket tunneling
+  # * rtmp://user:pass@host:port/path#streamKey -> the stream is pulled from another RTMP server / camera
+  # * rtmps://user:pass@host:port/path#streamKey -> the stream is pulled from another RTMP server / camera with RTMPS
+  # * http://user:pass@host:port/stream.m3u8 -> the stream is pulled from another HLS server / camera
+  # * https://user:pass@host:port/stream.m3u8 -> the stream is pulled from another HLS server / camera with HTTPS
   # * udp+mpegts://ip:port -> the stream is pulled from MPEG-TS over UDP, by listening on the specified address
-  # * unix+mpegts://socket -> the stream is pulled from MPEG-TS over Unix socket, by using the socket
+  # * unix+mpegts://socketPath -> the stream is pulled from MPEG-TS over a Unix socket
   # * udp+rtp://ip:port -> the stream is pulled from RTP over UDP, by listening on the specified address
-  # * srt://existing-url -> the stream is pulled from another SRT server / camera
-  # * whep://existing-url -> the stream is pulled from another WebRTC server / camera with HTTP+WHEP
-  # * wheps://existing-url -> the stream is pulled from another WebRTC server / camera with HTTPS+WHEP
+  # * srt://host:port?streamid=streamid -> the stream is pulled from another SRT server / camera
+  # * whep://host:port/path -> the stream is pulled from another WebRTC server / camera with HTTP+WHEP
+  # * wheps://host:port/path -> the stream is pulled from another WebRTC server / camera with HTTPS+WHEP
   # * redirect -> the stream is provided by another path or server
   # * rpiCamera -> the stream is provided by a Raspberry Pi Camera
-  # The following variables can be used in the source string:
+  # The following variables can be used:
   # * $MTX_QUERY: query parameters (passed by first reader)
-  # * $G1, $G2, ...: regular expression groups, if path name is
-  #   a regular expression.
+  # * $G1, $G2, ...: regular expression groups, if path name is a regular expression.
   source: publisher
   # If the source is a URL, and the source TLS certificate is self-signed
   # or invalid, you can provide the fingerprint of the certificate in order to
@@ -531,6 +566,22 @@ pathDefaults:
       #  channelCount: 2
       #  in case of G711, muLaw must be provided too.
       #  muLaw: false
+
+  ###############################################
+  # Default path settings -> Forward
+
+  # Forward the stream of this path to one or more external servers.
+  forward: []
+    # forward destination. This can be:
+    # * rtsp://user:pass@host:port/path -> the stream is forwarded to another RTSP server
+    # * rtsps://user:pass@host:port/path -> the stream is forwarded to another RTSP server with RTSPS
+    # * rtmp://user:pass@host:port/path#streamKey -> the stream is forwarded to another RTMP server
+    # * rtmps://user:pass@host:port/path#streamKey -> the stream is forwarded to another RTMP server with RTMPS
+    # * srt://host:port?streamid=streamid -> the stream is forwarded to another SRT server
+    # The following variables can be used:
+    # * $MTX_PATH: path name
+    # * $G1, $G2, ...: regular expression groups, if path name is a regular expression.
+    # - dest:
 
   ###############################################
   # Default path settings -> Record
@@ -585,8 +636,12 @@ pathDefaults:
   # * npt: duration such as "300ms", "1.5m" or "2h45m", valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
   # * smpte: duration such as "300ms", "1.5m" or "2h45m", valid time units are "ns", "us" (or "µs"), "ms", "s", "m", "h"
   rtspRangeStart:
+  # Scale header value to send to the source, in order to play the stream at a different speed.
+  # Negative values play in reverse, values > 1 fast-forward,
+  # values 0 < x < 1 play slow motion.
+  rtspScale:
   # Range of ports used as source port in outgoing UDP packets.
-  rtspUDPSourcePortRange: [10000, 65535]
+  rtspUDPSourcePortRange: [32768, 60999]
 
   ###############################################
   # Default path settings -> RTP source (when source is RTP)
@@ -689,22 +744,23 @@ pathDefaults:
   # format is the one of the strftime() function.
   rpiCameraTextOverlay: '%Y-%m-%d %H:%M:%S - MediaMTX'
   # Codec (auto, hardwareH264, softwareH264 or mjpeg).
-  # When is "auto" and stream is primary, it defaults to hardwareH264 (if available) or softwareH264.
-  # When is "auto" and stream is secondary, it defaults to mjpeg.
+  # When is "auto", it defaults to:
+  # * hardwareH264 when stream is primary and hardware encoder is available
+  # * softwareH264 when stream is primary and hardware encoder is not available
+  # * mjpeg when stream is secondary
   rpiCameraCodec: auto
   # Period between IDR frames (when codec is hardwareH264 or softwareH264).
   rpiCameraIDRPeriod: 60
   # Bitrate (when codec is hardwareH264 or softwareH264).
   rpiCameraBitrate: 5000000
-  # Hardware H264 profile (baseline, main or high) (when codec is hardwareH264).
-  rpiCameraHardwareH264Profile: main
-  # Hardware H264 level (4.0, 4.1 or 4.2) (when codec is hardwareH264).
-  rpiCameraHardwareH264Level: '4.1'
-  # Software H264 profile (baseline, main or high) (when codec is softwareH264).
-  rpiCameraSoftwareH264Profile: baseline
-  # Software H264 level (4.0, 4.1 or 4.2) (when codec is softwareH264).
-  rpiCameraSoftwareH264Level: '4.1'
-  # M-JPEG JPEG quality (when codec is mjpeg).
+  # H264 profile (auto, baseline, main or high).
+  # When is "auto", it defaults to:
+  # * main when codec is hardwareH264
+  # * baseline when codec is softwareH264
+  rpiCameraH264Profile: auto
+  # H264 level (4.0, 4.1 or 4.2).
+  rpiCameraH264Level: "4.1"
+  # M-JPEG quality (0-100).
   rpiCameraMJPEGQuality: 60
 
   ###############################################
@@ -745,9 +801,8 @@ pathDefaults:
   # Environment variables are the same of runOnDemand.
   runOnUnDemand:
 
-  # Command to run when the stream is ready to be read, whenever it is
-  # published by a client or pulled from a server / camera.
-  # This is terminated with SIGINT when the stream is not ready anymore.
+  # Command to run when the stream is available to be read.
+  # This is terminated with SIGINT when the stream is not available anymore.
   # The following environment variables are available:
   # * MTX_PATH: path name
   # * MTX_QUERY: query parameters (passed by publisher)
@@ -756,12 +811,30 @@ pathDefaults:
   # * RTSP_PORT: RTSP server port
   # * G1, G2, ...: regular expression groups, if path name is
   #   a regular expression.
-  runOnReady: sh -c 'echo connect:$MTX_PATH | nc -q0 localhost 50052'
+  runOnAvailable: sh -c 'echo connect:$MTX_PATH | nc -q0 localhost 50052'
   # Restart the command if it exits.
-  runOnReadyRestart: false
+  runOnAvailableRestart: false
   # Command to run when the stream is not available anymore.
-  # Environment variables are the same of runOnReady.
-  runOnNotReady: sh -c 'echo disconnect:$MTX_PATH | nc -q0 localhost 50052'
+  # Environment variables are the same as runOnAvailable.
+  runOnUnavailable: sh -c 'echo disconnect:$MTX_PATH | nc -q0 localhost 50052'
+
+  # Command to run when the stream is online, which means
+  # that the stream is available and provided by a online source (not an offline segment).
+  # This is terminated with SIGINT when the stream is not online anymore.
+  # The following environment variables are available:
+  # * MTX_PATH: path name
+  # * MTX_QUERY: query parameters (passed by publisher) (url-encoded)
+  # * MTX_SOURCE_TYPE: source type
+  # * MTX_SOURCE_ID: source ID
+  # * RTSP_PORT: RTSP server port
+  # * G1, G2, ...: regular expression groups, if path name is
+  #   a regular expression.
+  runOnOnline:
+  # Restart the command if it exits.
+  runOnOnlineRestart: false
+  # Command to run when the stream is not online anymore.
+  # Environment variables are the same as runOnOnline.
+  runOnOffline:
 
   # Command to run when a client starts reading.
   # This is terminated with SIGINT when a client stops reading.

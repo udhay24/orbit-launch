@@ -9,13 +9,14 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+
 	"github.com/bluenviron/gortmplib"
 	"github.com/bluenviron/gortmplib/pkg/codecs"
-	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 )
 
 // This example shows how to:
-// 1. connect to a RTMP server, announce a MPEG-4 Audio (AAC) track.
+// 1. connect to a RTMP server through a URL, announce a MPEG-4 Audio (AAC) track.
 // 2. generate dummy LPCM audio samples.
 // 3. encode audio samples with MPEG-4 Audio (AAC).
 // 4. send MPEG-4 Audio access units to the server.
@@ -30,6 +31,7 @@ func multiplyAndDivide(v, m, d int64) int64 {
 }
 
 func main() {
+	// URL format is rtmp://user:pass@host:port/path#streamKey
 	u, err := url.Parse("rtmp://127.0.0.1:1935/stream/test")
 	if err != nil {
 		panic(err)

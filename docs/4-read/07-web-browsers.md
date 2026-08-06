@@ -162,10 +162,7 @@ import Hls from "hls.js";
 Otherwise, you can use a `<script>` tag inside the `<head>` section that points to a CDN:
 
 ```html
-<script
-  defer
-  src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.6.13/hls.min.js"
-></script>
+<script defer src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
 ```
 
 Add a `<video>` tag:
@@ -182,8 +179,6 @@ After the video tag, add a script that initializes the stream when the page is f
     if (Hls.isSupported()) {
       const hls = new Hls({
         xhrSetup: function (xhr, url) {
-          xhr.withCredentials = true;
-
           let user = ""; // fill if needed
           let pass = ""; // fill if needed
           let token = ""; // fill if needed

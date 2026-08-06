@@ -138,29 +138,28 @@ func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 
 func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, publish bool) bool {
 	_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author: &logger.InlineWriter{
+			Parent: s,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		},
 		AccessRequest: defs.PathAccessRequest{
-			Name:        pathName,
-			Query:       ctx.Request.URL.RawQuery,
-			Publish:     publish,
-			UserAgent:   ctx.Request.Header.Get("User-Agent"),
-			Proto:       auth.ProtocolWebRTC,
-			Credentials: httpp.Credentials(ctx.Request),
-			IP:          net.ParseIP(ctx.ClientIP()),
+			Name:                 pathName,
+			Query:                ctx.Request.URL.RawQuery,
+			Publish:              publish,
+			UserAgent:            ctx.Request.Header.Get("User-Agent"),
+			Proto:                auth.ProtocolWebRTC,
+			Credentials:          httpp.Credentials(ctx.Request),
+			IP:                   net.ParseIP(ctx.ClientIP()),
+			EnableAskCredentials: true,
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
+		if terr, ok := errors.AsType[*auth.Error](err); ok {
 			if terr.AskCredentials {
 				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 				return false
 			}
-
-			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Wrapped)
-
-			// wait some seconds to delay brute force attacks
-			<-time.After(auth.PauseAfterError)
 
 			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return false
@@ -218,18 +217,12 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 
 	res2 := res.sx.initialRequest(initialRequestReq{})
 	if res2.err != nil {
-		var terr *auth.Error
-		if errors.As(res2.err, &terr) {
+		if terr, ok := errors.AsType[*auth.Error](res2.err); ok {
 			if terr.AskCredentials {
 				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 				return
 			}
-
-			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Wrapped)
-
-			// wait some seconds to delay brute force attacks
-			<-time.After(auth.PauseAfterError)
 
 			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return
@@ -258,8 +251,6 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 	ctx.Header("Location", sessionLocation(publish, pathName, ctx.Request.URL.RawQuery, res.sx.secret))
 	ctx.Writer.WriteHeader(http.StatusCreated)
 	ctx.Writer.Write(res2.answer)
-
-	res.sx.Log(logger.Debug, "SDP answer:\n"+string(res2.answer))
 }
 
 func (s *httpServer) onWHIPPatch(ctx *gin.Context, rawSecret string) {

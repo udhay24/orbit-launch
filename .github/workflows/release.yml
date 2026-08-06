@@ -18,13 +18,13 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - run: make binaries
 
       - run: cd binaries && sha256sum -b * > checksums.sha256
 
-      - uses: actions/attest@v4
+      - uses: actions/attest@v4.2.1
         with:
           subject-path: "${{ github.workspace }}/binaries/*"
 
@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:

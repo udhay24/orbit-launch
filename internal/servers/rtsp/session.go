@@ -72,6 +72,7 @@ type session struct {
 	pathConf                    *conf.Path // record only
 	path                        defs.Path
 	stream                      *stream.Stream
+	rtspStream                  *gortsplib.ServerStream
 	subStream                   *stream.SubStream
 	onUnreadHook                func()
 	inboundRTPPacketsLost       *counterdumper.Dumper
@@ -201,21 +202,22 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 	}
 
 	res, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author: s,
 		AccessRequest: defs.PathAccessRequest{
-			Name:             ctx.Path,
-			Query:            ctx.Query,
-			Publish:          true,
-			UserAgent:        userAgent,
-			Proto:            auth.ProtocolRTSP,
-			ID:               &c.uuid,
-			Credentials:      rtsp.Credentials(ctx.Request),
-			IP:               c.ip(),
-			CustomVerifyFunc: customVerifyFunc,
+			Name:                 ctx.Path,
+			Query:                ctx.Query,
+			Publish:              true,
+			UserAgent:            userAgent,
+			Proto:                auth.ProtocolRTSP,
+			ID:                   &s.uuid,
+			Credentials:          rtsp.Credentials(ctx.Request),
+			IP:                   c.ip(),
+			CustomVerifyFunc:     customVerifyFunc,
+			EnableAskCredentials: true,
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
+		if terr, ok := errors.AsType[*auth.Error](err); ok {
 			return c.handleAuthError(terr)
 		}
 
@@ -234,13 +236,6 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 	return &base.Response{
 		StatusCode: base.StatusOK,
 	}, nil
-}
-
-func (s *session) rtspStream() *gortsplib.ServerStream {
-	if !s.encryption {
-		return s.stream.RTSPStream(s.rserver)
-	}
-	return s.stream.RTSPSStream(s.rserver)
 }
 
 // onSetup is called by rtspServer.
@@ -284,25 +279,24 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 		res, err := s.pathManager.AddReader(defs.PathAddReaderReq{
 			Author: s,
 			AccessRequest: defs.PathAccessRequest{
-				Name:             ctx.Path,
-				Query:            ctx.Query,
-				UserAgent:        userAgent,
-				Proto:            auth.ProtocolRTSP,
-				ID:               &c.uuid,
-				Credentials:      rtsp.Credentials(ctx.Request),
-				IP:               c.ip(),
-				CustomVerifyFunc: customVerifyFunc,
+				Name:                 ctx.Path,
+				Query:                ctx.Query,
+				UserAgent:            userAgent,
+				Proto:                auth.ProtocolRTSP,
+				ID:                   &s.uuid,
+				Credentials:          rtsp.Credentials(ctx.Request),
+				IP:                   c.ip(),
+				CustomVerifyFunc:     customVerifyFunc,
+				EnableAskCredentials: true,
 			},
 		})
 		if err != nil {
-			var terr *auth.Error
-			if errors.As(err, &terr) {
+			if terr, ok := errors.AsType[*auth.Error](err); ok {
 				res, err2 := c.handleAuthError(terr)
 				return res, nil, err2
 			}
 
-			var terr2 *defs.PathNoStreamAvailableError
-			if errors.As(err, &terr2) {
+			if _, ok := errors.AsType[*defs.PathNoStreamAvailableError](err); ok {
 				return &base.Response{
 					StatusCode: base.StatusNotFound,
 				}, nil, err
@@ -313,8 +307,23 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 			}, nil, err
 		}
 
-		s.path = res.Path
+		var rtspStream *gortsplib.ServerStream
+		if !s.encryption {
+			rtspStream, err = res.Stream.RTSPStream(s.rserver)
+		} else {
+			rtspStream, err = res.Stream.RTSPSStream(s.rserver)
+		}
+
+		if err != nil {
+			res.Path.RemoveReader(defs.PathRemoveReaderReq{Author: s})
+			return &base.Response{
+				StatusCode: base.StatusBadRequest,
+			}, nil, err
+		}
+
 		s.stream = res.Stream
+		s.rtspStream = rtspStream
+		s.path = res.Path
 
 		s.mutex.Lock()
 		s.user = res.User
@@ -323,12 +332,12 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 
 		return &base.Response{
 			StatusCode: base.StatusOK,
-		}, s.rtspStream(), nil
+		}, s.rtspStream, nil
 
 	case gortsplib.ServerSessionStatePrePlay: // play, subsequent calls
 		return &base.Response{
 			StatusCode: base.StatusOK,
-		}, s.rtspStream(), nil
+		}, s.rtspStream, nil
 
 	default: // record
 		return &base.Response{
@@ -402,9 +411,9 @@ func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Respons
 		AccessRequest: defs.PathAccessRequest{
 			Name:      s.rsession.Path()[1:],
 			Query:     s.rsession.Query(),
+			UserAgent: s.userAgent,
 			Publish:   true,
 			SkipAuth:  true,
-			UserAgent: s.userAgent,
 		},
 	})
 	if err != nil {

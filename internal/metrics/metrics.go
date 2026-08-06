@@ -74,6 +74,7 @@ type metricsType string
 
 const (
 	metricsTypePaths          metricsType = "paths"
+	metricsTypeForwardDests   metricsType = "forward_dests"
 	metricsTypeHLSSessions    metricsType = "hls_sessions"
 	metricsTypeHLSMuxers      metricsType = "hls_muxers"
 	metricsTypeRTSPConns      metricsType = "rtsp_conns"
@@ -190,10 +191,11 @@ func (m *Metrics) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 
 func (m *Metrics) middlewareAuth(ctx *gin.Context) {
 	req := &auth.Request{
-		Action:      conf.AuthActionMetrics,
-		Query:       ctx.Request.URL.RawQuery,
-		Credentials: httpp.Credentials(ctx.Request),
-		IP:          net.ParseIP(ctx.ClientIP()),
+		Action:               conf.AuthActionMetrics,
+		Query:                ctx.Request.URL.RawQuery,
+		Credentials:          httpp.Credentials(ctx.Request),
+		IP:                   net.ParseIP(ctx.ClientIP()),
+		EnableAskCredentials: true,
 	}
 
 	_, err := m.AuthManager.Authenticate(req)
@@ -204,10 +206,10 @@ func (m *Metrics) middlewareAuth(ctx *gin.Context) {
 			return
 		}
 
-		m.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), err.Wrapped)
-
-		// wait some seconds to delay brute force attacks
-		<-time.After(auth.PauseAfterError)
+		auth.LogAndDelayError(&logger.InlineWriter{
+			Parent: m,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		}, err)
 
 		m.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 		return
@@ -229,6 +231,7 @@ func (m *Metrics) onMetrics(ctx *gin.Context) {
 
 	typ := metricsType(ctx.Query("type"))
 	pathFilter := ctx.Query("path")
+	forwardFilter := ctx.Query("forward_dest")
 	hlsMuxerFilter := ctx.Query("hls_muxer")
 	hlsSessionFilter := ctx.Query("hls_session")
 	rtspConnFilter := ctx.Query("rtsp_conn")
@@ -242,6 +245,7 @@ func (m *Metrics) onMetrics(ctx *gin.Context) {
 	moqSessionFilter := ctx.Query("moq_session")
 
 	anyFilterActive := pathFilter != "" ||
+		forwardFilter != "" ||
 		hlsMuxerFilter != "" ||
 		hlsSessionFilter != "" ||
 		rtspConnFilter != "" ||
@@ -339,6 +343,59 @@ func (m *Metrics) onMetrics(ctx *gin.Context) {
 			metric(&out, "paths_bytes_sent", "", 0)
 			metric(&out, "paths_readers", "", 0)
 			out.WriteString("\n")
+		}
+	}
+
+	if (typ == "" || typ == metricsTypeForwardDests) &&
+		(!anyFilterActive || pathFilter != "" || forwardFilter != "") {
+		data, err := pathManager.APIPathsList()
+		if err == nil {
+			type forwardWithPath struct {
+				path string
+				item defs.APIForwardDest
+			}
+
+			var items []forwardWithPath
+			for _, pa := range data.Items {
+				if pathFilter != "" && pathFilter != pa.Name {
+					continue
+				}
+
+				forwards, forwardsErr := pathManager.APIForwardDestList(pa.Name)
+				if forwardsErr != nil {
+					continue
+				}
+
+				for _, item := range forwards.Items {
+					if forwardFilter == "" || forwardFilter == item.ID.String() {
+						items = append(items, forwardWithPath{
+							path: pa.Name,
+							item: item,
+						})
+					}
+				}
+			}
+
+			if len(items) != 0 {
+				out.WriteString("# Forward destinations\n")
+				for _, i := range items {
+					ta := tags(map[string]string{
+						"id":       i.item.ID.String(),
+						"path":     i.path,
+						"protocol": string(i.item.Protocol),
+						"state":    string(i.item.State),
+					})
+
+					metric(&out, "forward_dests", ta, 1)
+					metric(&out, "forward_dests_outbound_bytes", ta, int64(i.item.OutboundBytes))
+				}
+				out.WriteString("\n")
+			} else if typ == metricsTypeForwardDests && pathFilter == "" && forwardFilter == "" {
+				out.WriteString("# Forward destinations\n")
+				metric(&out, "forward_dests", "", 0)
+				metric(&out, "forward_dests_outbound_bytes", "", 0)
+				out.WriteString("\n")
+			}
 		}
 	}
 

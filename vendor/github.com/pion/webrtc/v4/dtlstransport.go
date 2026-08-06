@@ -6,6 +6,7 @@
 package webrtc
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -65,10 +66,21 @@ type simulcastStreamPair struct {
 }
 
 type streamsForSSRCResult struct {
-	rtpReadStream   *srtp.ReadStreamSRTP
-	rtpInterceptor  interceptor.RTPReader
-	rtcpReadStream  *srtp.ReadStreamSRTCP
-	rtcpInterceptor interceptor.RTCPReader
+	rtpReadStream             *srtp.ReadStreamSRTP
+	rtpInterceptor            interceptor.RTPReader
+	startRTPReaderImmediately bool
+	rtcpReadStream            *srtp.ReadStreamSRTCP
+	rtcpInterceptor           interceptor.RTCPReader
+}
+
+type srtpRTPReader struct {
+	readStream *srtp.ReadStreamSRTP
+}
+
+func (r *srtpRTPReader) Read(in []byte, a interceptor.Attributes) (int, interceptor.Attributes, error) {
+	n, err := r.readStream.Read(in)
+
+	return n, a, err
 }
 
 // NewDTLSTransport creates a new DTLSTransport.
@@ -301,6 +313,19 @@ func (t *DTLSTransport) role() DTLSRole {
 
 // Start DTLS transport negotiation with the parameters of the remote DTLS transport.
 func (t *DTLSTransport) Start(remoteParameters DTLSParameters) error {
+	return t.start(remoteParameters, t.handshakeDTLS)
+}
+
+// StartContext starts DTLS transport negotiation with the parameters of the remote DTLS
+// transport. If the context is canceled before the DTLS handshake is complete, the handshake
+// is interrupted and an error is returned.
+func (t *DTLSTransport) StartContext(ctx context.Context, remoteParameters DTLSParameters) error {
+	return t.start(remoteParameters, func(dtlsConn *dtls.Conn) error {
+		return dtlsConn.HandshakeContext(ctx)
+	})
+}
+
+func (t *DTLSTransport) start(remoteParameters DTLSParameters, handshake func(*dtls.Conn) error) error {
 	role, certificate, err := t.prepareStart(remoteParameters)
 	if err != nil {
 		return err
@@ -319,7 +344,7 @@ func (t *DTLSTransport) Start(remoteParameters DTLSParameters) error {
 		return t.failStart(err)
 	}
 
-	if err = t.handshakeDTLS(dtlsConn); err != nil {
+	if err = handshake(dtlsConn); err != nil {
 		dtlsEndpoint.SetOnClose(nil)
 		_ = dtlsConn.Close()
 
@@ -679,16 +704,8 @@ func (t *DTLSTransport) streamsForSSRC(
 		return nil, err
 	}
 
-	rtpInterceptor := t.api.interceptor.BindRemoteStream(
-		&streamInfo,
-		interceptor.RTPReaderFunc(
-			func(in []byte, a interceptor.Attributes) (n int, attributes interceptor.Attributes, err error) {
-				n, err = rtpReadStream.Read(in)
-
-				return n, a, err
-			},
-		),
-	)
+	rtpReader := &srtpRTPReader{readStream: rtpReadStream}
+	rtpInterceptor := t.api.interceptor.BindRemoteStream(&streamInfo, rtpReader)
 
 	srtcpSession, err := t.getSRTCPSession()
 	if err != nil {
@@ -709,9 +726,10 @@ func (t *DTLSTransport) streamsForSSRC(
 	)
 
 	return &streamsForSSRCResult{
-		rtpReadStream:   rtpReadStream,
-		rtpInterceptor:  rtpInterceptor,
-		rtcpReadStream:  rtcpReadStream,
-		rtcpInterceptor: rtcpInterceptor,
+		rtpReadStream:             rtpReadStream,
+		rtpInterceptor:            rtpInterceptor,
+		startRTPReaderImmediately: rtpInterceptor != rtpReader && t.api.settingEngine.BufferFactory == nil,
+		rtcpReadStream:            rtcpReadStream,
+		rtcpInterceptor:           rtcpInterceptor,
 	}, nil
 }

@@ -160,9 +160,8 @@ func handleAllocateRequest(req Request, stunMsg *stun.Message) error { //nolint:
 	_ = realmAttr.GetFrom(stunMsg)
 
 	// RFC 6156: Parse REQUESTED-ADDRESS-FAMILY attribute if present.
-	// If absent, default to IPv4 per RFC 6156 Section 4.1.1.
-	// "If the REQUESTED-ADDRESS-FAMILY attribute is absent, the server MUST
-	// allocate an IPv4-relayed transport address for the TURN client."
+	// If absent, default to the listener family unless strict RFC 6156
+	// behavior is requested.
 	// "Length:  this 16-bit field contains the length of the attribute in
 	// bytes.  The length of this attribute is 4 bytes."
 	// "If the server does not support the address family requested by the
@@ -173,7 +172,7 @@ func handleAllocateRequest(req Request, stunMsg *stun.Message) error { //nolint:
 	if err = requestedFamily.GetFrom(stunMsg); err != nil {
 		switch {
 		case errors.Is(err, stun.ErrAttributeNotFound):
-			requestedFamily = proto.RequestedFamilyIPv4
+			requestedFamily = defaultAllocationAddressFamily(req)
 		case stun.IsAttrSizeInvalid(err) || stun.IsAttrSizeOverflow(err):
 			return buildAndSendErr(req.Conn, req.SrcAddr, err, badRequestMsg...)
 		default:
@@ -386,22 +385,27 @@ func handleCreatePermissionRequest(req Request, stunMsg *stun.Message) error {
 	}
 
 	addCount := 0
+	errorCode := stun.CodeBadRequest
 
 	if err := stunMsg.ForEach(stun.AttrXORPeerAddress, func(m *stun.Message) error {
 		var peerAddress proto.PeerAddress
 		if err := peerAddress.GetFrom(m); err != nil {
+			errorCode = stun.CodeBadRequest
+
 			return err
 		}
 
 		// RFC 6156: Peer address must match allocation's address family.
 		if !ipMatchesFamily(peerAddress.IP, alloc.AddressFamily()) {
 			req.Log.Infof("peer address family mismatch for client %s to peer %s", req.SrcAddr, peerAddress.IP)
+			errorCode = stun.CodePeerAddrFamilyMismatch
 
 			return errPeerAddressFamilyMismatch
 		}
 
 		if err := req.AllocationManager.GrantPermission(req.SrcAddr, peerAddress.IP); err != nil {
 			req.Log.Infof("permission denied for client %s to peer %s", req.SrcAddr, peerAddress.IP)
+			errorCode = stun.CodeForbidden
 
 			return err
 		}
@@ -428,12 +432,19 @@ func handleCreatePermissionRequest(req Request, stunMsg *stun.Message) error {
 	if addCount == 0 {
 		respClass = stun.ClassErrorResponse
 	}
+	attrs := []stun.Setter{messageIntegrity}
+	if respClass == stun.ClassErrorResponse {
+		attrs = []stun.Setter{
+			&stun.ErrorCodeAttribute{Code: errorCode},
+			messageIntegrity,
+		}
+	}
 
 	return buildAndSend(
 		req.Conn,
 		req.SrcAddr,
 		buildMsg(stunMsg.TransactionID, stun.NewType(stun.MethodCreatePermission, respClass),
-			[]stun.Setter{messageIntegrity}...)...,
+			attrs...)...,
 	)
 }
 
@@ -628,6 +639,16 @@ func handleConnectRequest(req Request, stunMsg *stun.Message) error {
 		)...)
 	}
 
+	if err = req.AllocationManager.GrantPermission(req.SrcAddr, peerAddr.IP); err != nil {
+		req.Log.Infof("permission denied for client %s to peer %s", req.SrcAddr, peerAddr.IP)
+
+		return buildAndSendErr(req.Conn, req.SrcAddr, err, buildMsg(
+			stunMsg.TransactionID,
+			stun.NewType(stun.MethodConnect, stun.ClassErrorResponse),
+			&stun.ErrorCodeAttribute{Code: stun.CodeForbidden},
+		)...)
+	}
+
 	connectionID, err := req.AllocationManager.CreateTCPConnection(alloc, peerAddr)
 	if err != nil {
 		// If the server is currently processing a Connect request for this
@@ -753,4 +774,49 @@ func ipMatchesFamily(ip net.IP, family proto.RequestedAddressFamily) bool {
 	}
 
 	return false
+}
+
+func defaultAllocationAddressFamily(req Request) proto.RequestedAddressFamily {
+	if req.StrictAddressFamily {
+		return proto.RequestedFamilyIPv4
+	}
+
+	ip, _, err := ipnet.AddrIPPort(req.Conn.LocalAddr())
+	if err != nil {
+		return proto.RequestedFamilyIPv4
+	}
+
+	// some dual-stack wildcard sockets can report [::] as LocalAddr even for IPv4 or
+	// ipv6-mapped IPv4 addresses.
+	if ip.IsUnspecified() {
+		if family, ok := addressFamilyFromAddr(req.SrcAddr); ok {
+			return family
+		}
+	}
+
+	if family, ok := addressFamilyFromIP(ip); ok {
+		return family
+	}
+
+	return proto.RequestedFamilyIPv4
+}
+
+func addressFamilyFromAddr(addr net.Addr) (proto.RequestedAddressFamily, bool) {
+	ip, _, err := ipnet.AddrIPPort(addr)
+	if err != nil {
+		return 0, false
+	}
+
+	return addressFamilyFromIP(ip)
+}
+
+func addressFamilyFromIP(ip net.IP) (proto.RequestedAddressFamily, bool) {
+	if ip.To4() != nil {
+		return proto.RequestedFamilyIPv4, true
+	}
+	if ip.To16() != nil {
+		return proto.RequestedFamilyIPv6, true
+	}
+
+	return 0, false
 }

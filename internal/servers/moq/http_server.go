@@ -37,27 +37,43 @@ var readerJS []byte
 var publisherJS []byte
 
 const (
-	moqtVersion                = "moqt-18"
 	wtProtocolHeader           = "WT-Protocol"
 	wtAvailableProtocolsHeader = "WT-Available-Protocols"
 )
+
+// ordered from most preferred to least preferred
+var supportedMoqtVersions = []defs.APIMoQVersion{
+	defs.APIMoQVersionDraft19,
+	defs.APIMoQVersionDraft18,
+	defs.APIMoQVersionDraft17,
+	defs.APIMoQVersionDraft16,
+}
 
 type ginUnwrapper interface {
 	Unwrap() http.ResponseWriter
 }
 
-func containsMoqtVersion(header string) bool {
+func selectMoqtVersion(header string) defs.APIMoQVersion {
+	available := make(map[string]struct{})
+
 	for item := range strings.SplitSeq(header, ",") {
 		item = strings.TrimSpace(item)
 		if i := strings.IndexByte(item, ';'); i >= 0 {
 			item = item[:i]
 		}
 		item = strings.Trim(strings.TrimSpace(item), `"`)
-		if item == moqtVersion {
-			return true
+		if item != "" {
+			available[item] = struct{}{}
 		}
 	}
-	return false
+
+	for _, version := range supportedMoqtVersions {
+		if _, ok := available[string(version)]; ok {
+			return version
+		}
+	}
+
+	return ""
 }
 
 func trailingSlashLocation(rawPath string, rawQuery string) string {
@@ -86,8 +102,8 @@ type httpServerParent interface {
 }
 
 type httpServer struct {
-	https2Address     string
-	https3Address     string
+	http2Address      string
+	http3Address      string
 	serverCert        string
 	serverKey         string
 	allowOrigins      []string
@@ -98,18 +114,18 @@ type httpServer struct {
 	pathManager       serverPathManager
 	parent            httpServerParent
 
-	innerHTTPS2 *httpp.Server
-	innerHTTPS3 *httpp3.Server
+	innerHTTP2 *httpp.Server
+	innerHTTP3 *httpp3.Server
 }
 
 func (s *httpServer) initialize() error {
-	routerHTTPS2 := gin.New()
-	routerHTTPS2.SetTrustedProxies(s.trustedProxies.ToTrustedProxies()) //nolint:errcheck
-	routerHTTPS2.Use(s.middlewarePreflightRequests)
-	routerHTTPS2.Use(s.onRequestHTTPS2)
+	routerHTTP2 := gin.New()
+	routerHTTP2.SetTrustedProxies(s.trustedProxies.ToTrustedProxies()) //nolint:errcheck
+	routerHTTP2.Use(s.middlewarePreflightRequests)
+	routerHTTP2.Use(s.onRequestHTTPS2)
 
-	s.innerHTTPS2 = &httpp.Server{
-		Address:       s.https2Address,
+	s.innerHTTP2 = &httpp.Server{
+		Address:       s.http2Address,
 		AllowOrigins:  s.allowOrigins,
 		ReadTimeout:   time.Duration(s.readTimeout),
 		WriteTimeout:  time.Duration(s.writeTimeout),
@@ -117,27 +133,27 @@ func (s *httpServer) initialize() error {
 		ServerKey:     s.serverKey,
 		ServerCert:    s.serverCert,
 		AllowAutoCert: true,
-		Handler:       routerHTTPS2,
+		Handler:       routerHTTP2,
 		Parent:        s,
 	}
-	err := s.innerHTTPS2.Initialize()
+	err := s.innerHTTP2.Initialize()
 	if err != nil {
 		return err
 	}
 
-	routerHTTPS3 := gin.New()
-	routerHTTPS3.Use(s.onRequestHTTPS3)
+	routerHTTP3 := gin.New()
+	routerHTTP3.Use(s.onRequestHTTPS3)
 
-	s.innerHTTPS3 = &httpp3.Server{
-		Address:            s.https3Address,
+	s.innerHTTP3 = &httpp3.Server{
+		Address:            s.http3Address,
 		UDPReadBufferSize:  s.udpReadBufferSize,
 		EnableWebTransport: true,
-		Handler:            routerHTTPS3,
+		Handler:            routerHTTP3,
 		Parent:             s,
 	}
-	err = s.innerHTTPS3.Initialize()
+	err = s.innerHTTP3.Initialize()
 	if err != nil {
-		s.innerHTTPS2.Close()
+		s.innerHTTP2.Close()
 		return err
 	}
 
@@ -150,8 +166,8 @@ func (s *httpServer) Log(level logger.Level, format string, args ...any) {
 }
 
 func (s *httpServer) close() {
-	s.innerHTTPS3.Close()
-	s.innerHTTPS2.Close()
+	s.innerHTTP3.Close()
+	s.innerHTTP2.Close()
 }
 
 func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
@@ -172,28 +188,27 @@ func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 
 func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, publish bool) bool {
 	_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author: &logger.InlineWriter{
+			Parent: s,
+			Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+		},
 		AccessRequest: defs.PathAccessRequest{
-			Name:        pathName,
-			Query:       ctx.Request.URL.RawQuery,
-			Publish:     publish,
-			Proto:       auth.ProtocolMoQ,
-			Credentials: httpp.Credentials(ctx.Request),
-			IP:          net.ParseIP(ctx.ClientIP()),
+			Name:                 pathName,
+			Query:                ctx.Request.URL.RawQuery,
+			Publish:              publish,
+			Proto:                auth.ProtocolMoQ,
+			Credentials:          httpp.Credentials(ctx.Request),
+			IP:                   net.ParseIP(ctx.ClientIP()),
+			EnableAskCredentials: true,
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
+		if terr, ok := errors.AsType[*auth.Error](err); ok {
 			if terr.AskCredentials {
 				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
 				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 				return false
 			}
-
-			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Wrapped)
-
-			// wait some seconds to delay brute force attacks
-			<-time.After(auth.PauseAfterError)
 
 			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return false
@@ -249,7 +264,7 @@ func (s *httpServer) onAuthMirror(ctx *gin.Context) {
 }
 
 func (s *httpServer) onFingerprint(ctx *gin.Context) {
-	fp, err := certFingerprint(s.innerHTTPS3.Certificate())
+	fp, err := certFingerprint(s.innerHTTP3.Certificate())
 	if err != nil {
 		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 		return
@@ -309,21 +324,24 @@ func (s *httpServer) onRequestHTTPS3(ctx *gin.Context) {
 		return
 	}
 
-	if offered := ctx.Request.Header.Get(wtAvailableProtocolsHeader); offered != "" {
-		if !containsMoqtVersion(offered) {
-			s.writeErrorNoLog(ctx, http.StatusBadRequest,
-				fmt.Errorf("no supported MoQ version in %s", wtAvailableProtocolsHeader))
-			return
-		}
+	offered := ctx.Request.Header.Get(wtAvailableProtocolsHeader)
+	if offered == "" {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest,
+			fmt.Errorf("missing %s header", wtAvailableProtocolsHeader))
+		return
+	}
+
+	version := selectMoqtVersion(offered)
+	if version == "" {
+		s.writeErrorNoLog(ctx, http.StatusBadRequest,
+			fmt.Errorf("no supported MoQ version in %s", wtAvailableProtocolsHeader))
+		return
 	}
 
 	w := ctx.Writer.(ginUnwrapper).Unwrap()
+	w.Header().Set(wtProtocolHeader, `"`+string(version)+`"`)
 
-	if offered := ctx.Request.Header.Get(wtAvailableProtocolsHeader); offered != "" {
-		w.Header().Set(wtProtocolHeader, `"`+moqtVersion+`"`)
-	}
-
-	wt, err := s.innerHTTPS3.Upgrade(w, ctx.Request)
+	wt, err := s.innerHTTP3.Upgrade(w, ctx.Request)
 	if err != nil {
 		s.writeErrorNoLog(ctx, http.StatusBadRequest, fmt.Errorf("webtransport upgrade failed: %w", err))
 		return
@@ -333,7 +351,8 @@ func (s *httpServer) onRequestHTTPS3(ctx *gin.Context) {
 		pathName:  pathName,
 		query:     ctx.Request.URL.RawQuery,
 		userAgent: ctx.Request.Header.Get("User-Agent"),
-		wt:        wt,
+		version:   version,
+		conn:      &connWebTransport{session: wt},
 	})
 	if res.err != nil {
 		wt.CloseWithError(0, res.err.Error()) //nolint:errcheck

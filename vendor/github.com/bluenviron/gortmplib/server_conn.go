@@ -63,15 +63,9 @@ func authResponse(user, pass, salt, opaque, challenge, challenge2 string) string
 	return base64.StdEncoding.EncodeToString(h.Sum(nil))
 }
 
-func buildURL(tcURL string, app string, streamKey string) (*url.URL, error) {
-	raw := "/" + app
-	if streamKey != "" {
-		raw += "/" + streamKey
-	}
-
-	u, err := url.ParseRequestURI(raw)
-	if err != nil {
-		return nil, err
+func joinURL(tcURL string, streamKey string) (*url.URL, error) {
+	if streamKey != "" && streamKey[0] != '?' {
+		tcURL += "/" + streamKey
 	}
 
 	tu, err := url.Parse(tcURL)
@@ -79,17 +73,7 @@ func buildURL(tcURL string, app string, streamKey string) (*url.URL, error) {
 		return nil, err
 	}
 
-	if tu.Host == "" {
-		return nil, fmt.Errorf("invalid host")
-	}
-	u.Host = tu.Host
-
-	if tu.Scheme == "" {
-		return nil, fmt.Errorf("invalid scheme")
-	}
-	u.Scheme = tu.Scheme
-
-	return u, nil
+	return tu, nil
 }
 
 func objectOrArray(in any) (amf0.Object, bool) {
@@ -195,7 +179,7 @@ func (c *ServerConn) Initialize() error {
 
 // CheckCredentials checks credentials.
 func (c *ServerConn) CheckCredentials(expectedUser string, expectedPass string) error {
-	i := strings.Index(c.app, "?authmod=adobe")
+	i := strings.Index(c.tcURL, "?authmod=adobe")
 	if i < 0 {
 		err := c.mrw.Write(&message.CommandAMF0{
 			ChunkStreamID: c.connectChunkStreamID,
@@ -217,7 +201,7 @@ func (c *ServerConn) CheckCredentials(expectedUser string, expectedPass string) 
 		return fmt.Errorf("need auth")
 	}
 
-	authParams := c.app[i+1:]
+	authParams := c.tcURL[i+1:]
 	vals := queryDecode(authParams)
 
 	user := vals["user"]
@@ -275,15 +259,15 @@ func (c *ServerConn) CheckCredentials(expectedUser string, expectedPass string) 
 		return fmt.Errorf("authentication failed")
 	}
 
-	// remove auth parameters from app
-	c.app = c.app[:i]
+	// remove auth parameters from tcURL
+	c.tcURL = c.tcURL[:i]
 	delete(vals, "authmod")
 	delete(vals, "user")
 	delete(vals, "challenge")
 	delete(vals, "response")
 	q := queryEncode(vals)
 	if q != "" {
-		c.app += "?" + q
+		c.tcURL += "?" + q
 	}
 
 	return nil
@@ -382,7 +366,7 @@ func (c *ServerConn) Accept() error {
 				return fmt.Errorf("invalid play command arguments")
 			}
 
-			c.URL, err = buildURL(c.tcURL, c.app, streamKey)
+			c.URL, err = joinURL(c.tcURL, streamKey)
 			if err != nil {
 				return err
 			}
@@ -486,7 +470,7 @@ func (c *ServerConn) Accept() error {
 				return fmt.Errorf("invalid publish command arguments")
 			}
 
-			c.URL, err = buildURL(c.tcURL, c.app, streamKey)
+			c.URL, err = joinURL(c.tcURL, streamKey)
 			if err != nil {
 				return err
 			}

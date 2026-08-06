@@ -8,7 +8,9 @@ import (
 )
 
 // Parameter is a parameter of a control message.
-// spec: draft-18, section 10.2
+// spec:
+// * draft-17, section 9.3
+// * draft-18/19, section 10.2
 type Parameter interface {
 	isParameter()
 	paramType() uint64
@@ -31,8 +33,8 @@ func (p *Parameters) Unmarshal(count int, buf []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-
 		buf = buf[n:]
+
 		total += n
 		currentType += uint64(typeDelta)
 
@@ -50,9 +52,9 @@ func (p *Parameters) Unmarshal(count int, buf []byte) (int, error) {
 		if err != nil {
 			return 0, fmt.Errorf("failed to unmarshal authorization token: %w", err)
 		}
+		buf = buf[n:]
 
 		*p = append(*p, param)
-		buf = buf[n:]
 		total += n
 	}
 

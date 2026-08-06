@@ -8,7 +8,9 @@ import (
 )
 
 // Property is an object property.
-// spec: draft-18, section 11.2.1.2
+// spec:
+// * draft-17, section 10.2.1.2
+// * draft-18/19, section 11.2.1.2
 type Property interface {
 	isProperty()
 	propType() varint.Varint
@@ -18,7 +20,9 @@ type Property interface {
 }
 
 // Properties are object properties.
-// spec: draft-18, section 11.2.1.2
+// spec:
+// * draft-17, section 10.2.1.2
+// * draft-18/19, section 11.2.1.2
 type Properties []Property
 
 // Unmarshal decodes properties.
@@ -31,8 +35,8 @@ func (p *Properties) Unmarshal(buf []byte) error {
 		if err != nil {
 			return err
 		}
-
 		buf = buf[n:]
+
 		currentType += uint64(delta)
 
 		switch currentType {
@@ -54,9 +58,11 @@ func (p *Properties) Unmarshal(buf []byte) error {
 				if err != nil {
 					return err
 				}
-				if len(buf)-n2 < int(length) {
+
+				if uint64(len(buf))-uint64(n2) < uint64(length) {
 					return fmt.Errorf("not enough bytes for unknown property")
 				}
+
 				buf = buf[n2+int(length):]
 			} else {
 				var skip varint.Varint

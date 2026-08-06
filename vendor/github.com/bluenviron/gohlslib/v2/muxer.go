@@ -21,9 +21,9 @@ import (
 
 const (
 	fmp4StartDTS               = 10 * time.Second
-	mpegtsSegmentMinAUCount    = 100
 	multivariantPlaylistMaxAge = "30"
 	segmentMaxAge              = "3600"
+	mpegtsAACPTSDriftTolerance = 500 * time.Millisecond
 )
 
 func ptrOf[T any](v T) *T {
@@ -117,19 +117,34 @@ func partPath(prefix string, streamID string, partID uint64) string {
 	return prefix + "_" + streamID + "_part" + strconv.FormatUint(partID, 10) + ".mp4"
 }
 
-func fmp4TimeScale(c codecs.Codec) uint32 {
+func codecRequiredClockRate(c codecs.Codec) int {
 	switch codec := c.(type) {
-	case *codecs.MPEG4Audio:
-		return uint32(codec.Config.SampleRate)
+	case *codecs.AV1:
+		return 90000
+
+	case *codecs.VP9:
+		return 90000
+
+	case *codecs.H265:
+		return 90000
+
+	case *codecs.H264:
+		return 90000
 
 	case *codecs.Opus:
 		return 48000
 
+	case *codecs.MPEG4Audio:
+		return codec.Config.SampleRate
+
 	case *codecs.FLAC:
-		return codec.StreamInfo.SampleRate
+		return int(codec.StreamInfo.SampleRate)
+
+	case *codecs.KLV:
+		return 90000
 	}
 
-	return 90000
+	return 0
 }
 
 type switchableWriter struct {
@@ -227,6 +242,15 @@ func (m *Muxer) Start() error {
 
 	if len(m.Tracks) == 0 {
 		return fmt.Errorf("at least one track must be provided")
+	}
+
+	// supporting non-standard clock rates requires some computations that we're not doing right now.
+	// it's not worth the effort, for now.
+	for i, track := range m.Tracks {
+		requiredClockRate := codecRequiredClockRate(track.Codec)
+		if track.ClockRate != requiredClockRate {
+			return fmt.Errorf("track %d requires clock rate %d, but is %d", i, requiredClockRate, track.ClockRate)
+		}
 	}
 
 	hasVideo := false

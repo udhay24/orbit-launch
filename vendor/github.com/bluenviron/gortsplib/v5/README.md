@@ -2,7 +2,6 @@
 
 [![Test](https://github.com/bluenviron/gortsplib/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bluenviron/gortsplib/actions/workflows/test.yml?query=branch%3Amain)
 [![Lint](https://github.com/bluenviron/gortsplib/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/bluenviron/gortsplib/actions/workflows/lint.yml?query=branch%3Amain)
-[![Go Report Card](https://goreportcard.com/badge/github.com/bluenviron/gortsplib)](https://goreportcard.com/report/github.com/bluenviron/gortsplib)
 [![CodeCov](https://codecov.io/gh/bluenviron/gortsplib/branch/main/graph/badge.svg)](https://app.codecov.io/gh/bluenviron/gortsplib/tree/main)
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/bluenviron/gortsplib/v5)](https://pkg.go.dev/github.com/bluenviron/gortsplib/v5#pkg-index)
 
@@ -60,7 +59,6 @@ Features:
 * [client-play-timestamp](examples/client-play-timestamp/main.go)
 * [client-play-options](examples/client-play-options/main.go)
 * [client-play-pause](examples/client-play-pause/main.go)
-* [client-play-to-record](examples/client-play-to-record/main.go)
 * [client-play-backchannel](examples/client-play-backchannel/main.go)
 * [client-play-format-av1](examples/client-play-format-av1/main.go)
 * [client-play-format-av1-to-jpeg](examples/client-play-format-av1-to-jpeg/main.go)
@@ -94,6 +92,7 @@ Features:
 * [client-record-format-vp8](examples/client-record-format-vp8/main.go)
 * [client-record-format-vp9](examples/client-record-format-vp9/main.go)
 * [client-record-format-klv](examples/client-record-format-klv/main.go)
+* [client-republish](examples/client-republish/main.go)
 * [server](examples/server/main.go)
 * [server-secure](examples/server-secure/main.go)
 * [server-auth](examples/server-auth/main.go)

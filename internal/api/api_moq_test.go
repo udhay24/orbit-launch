@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/servers/moq"
 	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 )
 
 type testMoQServer struct {
@@ -56,6 +57,7 @@ func TestMoQSessionsList(t *testing.T) {
 				State:         defs.APIMoQSessionStatePublish,
 				Path:          "stream1",
 				Query:         "token=abc",
+				Version:       defs.APIMoQVersionDraft19,
 				InboundBytes:  1000,
 				OutboundBytes: 2000,
 			},
@@ -66,6 +68,7 @@ func TestMoQSessionsList(t *testing.T) {
 				State:         defs.APIMoQSessionStateRead,
 				Path:          "stream2",
 				Query:         "",
+				Version:       defs.APIMoQVersionDraft18,
 				InboundBytes:  500,
 				OutboundBytes: 1500,
 			},
@@ -109,6 +112,7 @@ func TestMoQSessionsGet(t *testing.T) {
 				State:         defs.APIMoQSessionStatePublish,
 				Path:          "mystream",
 				Query:         "key=value",
+				Version:       defs.APIMoQVersionDraft19,
 				InboundBytes:  999999,
 				OutboundBytes: 888888,
 			},
@@ -155,6 +159,7 @@ func TestMoQSessionsKick(t *testing.T) {
 				State:         defs.APIMoQSessionStatePublish,
 				Path:          "mystream",
 				Query:         "",
+				Version:       defs.APIMoQVersionDraft19,
 				InboundBytes:  1000,
 				OutboundBytes: 2000,
 			},

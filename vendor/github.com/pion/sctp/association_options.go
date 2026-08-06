@@ -96,11 +96,11 @@ func WithEnableInterleaving(b bool) AssociationOption {
 }
 
 // WithMTU sets the MTU size for the association.
-// By default this is 1228.
+// By default this is 1191.
 func WithMTU(size uint32) AssociationOption {
 	return sharedOption(func(c *Config) error {
-		if size == 0 {
-			return errZeroMTUOption
+		if err := validateMTU(size); err != nil {
+			return err
 		}
 		c.MTU = size
 
@@ -131,6 +131,16 @@ func WithMaxMessageSize(size uint32) AssociationOption {
 			return errZeroMaxMessageSize
 		}
 		c.MaxMessageSize = size
+
+		return nil
+	})
+}
+
+// WithMaxReassemblyQueueEntries caps the number of DATA entries and I-DATA MIDs queued per stream.
+// A value of 0 disables the cap. By default this cap is disabled.
+func WithMaxReassemblyQueueEntries(maxEntries uint32) AssociationOption {
+	return sharedOption(func(c *Config) error {
+		c.maxReassemblyQueueEntries = maxEntries
 
 		return nil
 	})

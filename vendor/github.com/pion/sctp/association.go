@@ -70,13 +70,43 @@ var (
 
 const (
 	receiveMTU            uint32 = 8192 // MTU for inbound packet (from DTLS)
-	initialMTU            uint32 = 1228 // initial MTU for outgoing packets (to DTLS)
+	initialMTU            uint32 = 1191 // initial MTU for outgoing packets (to DTLS)
 	initialRecvBufSize    uint32 = 1024 * 1024
-	commonHeaderSize      uint32 = 12
-	dataChunkHeaderSize   uint32 = 16
-	iDataChunkHeaderSize  uint32 = 20
+	commonHeaderSize      uint32 = packetHeaderSize
+	dataChunkHeaderSize   uint32 = chunkHeaderSize + payloadDataHeaderSize
+	iDataChunkHeaderSize  uint32 = chunkHeaderSize + iDataHeaderSize
 	defaultMaxMessageSize uint32 = 65536
 )
+
+func payloadDataChunkHeaderSize(useInterleaving bool) uint32 {
+	if useInterleaving {
+		return iDataChunkHeaderSize
+	}
+
+	return dataChunkHeaderSize
+}
+
+func maxPayloadSizeForMTU(mtu uint32, useInterleaving bool) uint32 {
+	headerSize := commonHeaderSize + payloadDataChunkHeaderSize(useInterleaving)
+	if mtu <= headerSize {
+		return 0
+	}
+
+	payloadSize := mtu - headerSize
+
+	return payloadSize - payloadSize%paddingMultiple
+}
+
+func validateMTU(mtu uint32) error {
+	if mtu == 0 {
+		return errZeroMTUOption
+	}
+	if maxPayloadSizeForMTU(mtu, true) == 0 {
+		return errMTUTooSmallOption
+	}
+
+	return nil
+}
 
 // PartialReliabilityMode indicates the negotiated partial reliability mode.
 type PartialReliabilityMode int
@@ -218,7 +248,9 @@ type Association struct {
 
 	lock sync.RWMutex
 
-	netConn net.Conn
+	netConn          net.Conn
+	netConnCloseOnce sync.Once
+	netConnCloseErr  error
 
 	peerVerificationTag    uint32
 	myVerificationTag      uint32
@@ -233,6 +265,7 @@ type Association struct {
 	willSendShutdown         bool
 	willSendShutdownAck      bool
 	willSendShutdownComplete bool
+	shutdownCompletePending  bool
 
 	willSendAbort      bool
 	willSendAbortCause errorCause
@@ -270,17 +303,18 @@ type Association struct {
 	recvZeroChecksum        bool
 
 	// Congestion control parameters
-	maxReceiveBufferSize uint32
-	maxMessageSize       uint32
-	cwnd                 uint32 // my congestion window size
-	rwnd                 uint32 // calculated peer's receiver windows size
-	ssthresh             uint32 // slow start threshold
-	partialBytesAcked    uint32
-	inFastRecovery       bool
-	fastRecoverExitPoint uint32
-	minCwnd              uint32 // Minimum congestion window
-	fastRtxWnd           uint32 // Send window for fast retransmit
-	cwndCAStep           uint32 // Step of congestion window increase at Congestion Avoidance
+	maxReceiveBufferSize      uint32
+	maxMessageSize            uint32
+	maxReassemblyQueueEntries uint32
+	cwnd                      uint32 // my congestion window size
+	rwnd                      uint32 // calculated peer's receiver windows size
+	ssthresh                  uint32 // slow start threshold
+	partialBytesAcked         uint32
+	inFastRecovery            bool
+	fastRecoverExitPoint      uint32
+	minCwnd                   uint32 // Minimum congestion window
+	fastRtxWnd                uint32 // Send window for fast retransmit
+	cwndCAStep                uint32 // Step of congestion window increase at Congestion Avoidance
 
 	// RTX & Ack timer
 	rtoMgr     *rtoManager
@@ -389,6 +423,9 @@ type Config struct {
 
 	// User message interleaving config options
 	interleaving *interleavingSettings
+
+	// Reassembly queue config options
+	maxReassemblyQueueEntries uint32
 
 	// SNAP/sctp-init
 	snapConfig *snapConfig
@@ -550,6 +587,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	cfg.EnableZeroChecksum = c.EnableZeroChecksum
 
 	if c.MTU != 0 {
+		if err := validateMTU(c.MTU); err != nil {
+			return err
+		}
 		cfg.MTU = c.MTU
 	}
 	if c.MaxReceiveBufferSize != 0 {
@@ -557,6 +597,9 @@ func (c Config) applyServer(cfg *Config) error { //nolint:dupl,cyclop
 	}
 	if c.MaxMessageSize != 0 {
 		cfg.MaxMessageSize = c.MaxMessageSize
+	}
+	if c.maxReassemblyQueueEntries != 0 {
+		cfg.maxReassemblyQueueEntries = c.maxReassemblyQueueEntries
 	}
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
@@ -663,6 +706,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	cfg.EnableZeroChecksum = c.EnableZeroChecksum
 
 	if c.MTU != 0 {
+		if err := validateMTU(c.MTU); err != nil {
+			return err
+		}
 		cfg.MTU = c.MTU
 	}
 	if c.MaxReceiveBufferSize != 0 {
@@ -670,6 +716,9 @@ func (c Config) applyClient(cfg *Config) error { //nolint:dupl,cyclop
 	}
 	if c.MaxMessageSize != 0 {
 		cfg.MaxMessageSize = c.MaxMessageSize
+	}
+	if c.maxReassemblyQueueEntries != 0 {
+		cfg.maxReassemblyQueueEntries = c.maxReassemblyQueueEntries
 	}
 	if c.RTOMax != 0 {
 		cfg.RTOMax = c.RTOMax
@@ -719,6 +768,12 @@ func buildClientConfig(opts ...ClientOption) (*Config, error) {
 }
 
 func createAssociationFromConfig(cfg *Config) (*Association, error) {
+	if cfg.MTU != 0 {
+		if err := validateMTU(cfg.MTU); err != nil {
+			return nil, err
+		}
+	}
+
 	tsn := globalMathRandomGenerator.Uint32()
 
 	return createAssociationFromConfigWithTsn(cfg, tsn), nil
@@ -748,12 +803,13 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 	}
 
 	assoc := &Association{
-		netConn:              cfg.NetConn,
-		maxReceiveBufferSize: maxReceiveBufferSize,
-		maxMessageSize:       maxMessageSize,
-		minCwnd:              cfg.MinCwnd,
-		fastRtxWnd:           cfg.FastRtxWnd,
-		cwndCAStep:           cfg.CwndCAStep,
+		netConn:                   cfg.NetConn,
+		maxReceiveBufferSize:      maxReceiveBufferSize,
+		maxMessageSize:            maxMessageSize,
+		maxReassemblyQueueEntries: cfg.maxReassemblyQueueEntries,
+		minCwnd:                   cfg.MinCwnd,
+		fastRtxWnd:                cfg.FastRtxWnd,
+		cwndCAStep:                cfg.CwndCAStep,
 
 		myMaxNumOutboundStreams: math.MaxUint16,
 		myMaxNumInboundStreams:  math.MaxUint16,
@@ -763,7 +819,7 @@ func createAssociationFromConfigWithTsn(cfg *Config, tsn uint32) *Association {
 		pendingQueue:            newPendingQueue(interleaving.newStreamScheduler),
 		controlQueue:            newControlQueue(),
 		mtu:                     mtu,
-		maxPayloadSize:          mtu - (commonHeaderSize + dataChunkHeaderSize),
+		maxPayloadSize:          maxPayloadSizeForMTU(mtu, false),
 		myVerificationTag:       generateInitiateTag(),
 		initialTSN:              tsn,
 		myNextTSN:               tsn,
@@ -949,24 +1005,27 @@ func (a *Association) sendCookieEcho() error {
 func (a *Association) Shutdown(ctx context.Context) error {
 	a.log.Debugf("[%s] closing association..", a.name)
 
+	a.lock.Lock()
+
 	state := a.getState()
 
 	if state != established {
+		a.lock.Unlock()
+
 		return fmt.Errorf("%w: shutdown %s", ErrShutdownNonEstablished, a.name)
 	}
 
 	// Attempt a graceful shutdown.
 	a.setState(shutdownPending)
+	a.unblockPendingWrites()
 
-	a.lock.Lock()
-
-	if a.inflightQueue.size() == 0 {
+	if !a.hasPendingOrInflightData() {
 		// No more outstanding, send shutdown.
 		a.willSendShutdown = true
-		a.awakeWriteLoop()
 		a.setState(shutdownSent)
 	}
 
+	a.awakeWriteLoop()
 	a.lock.Unlock()
 
 	select {
@@ -1004,7 +1063,7 @@ func (a *Association) close() error {
 
 	a.setState(closed)
 
-	err := a.netConn.Close()
+	err := a.closeNetConn()
 
 	a.closeAllTimers()
 
@@ -1012,6 +1071,14 @@ func (a *Association) close() error {
 	a.closeWriteLoopOnce.Do(func() { close(a.closeWriteLoopCh) })
 
 	return err
+}
+
+func (a *Association) closeNetConn() error {
+	a.netConnCloseOnce.Do(func() {
+		a.netConnCloseErr = a.netConn.Close()
+	})
+
+	return a.netConnCloseErr
 }
 
 // Abort sends the abort packet with user initiated abort and immediately
@@ -1138,6 +1205,10 @@ loop:
 					a.log.Warnf("[%s] failed to write packets on netConn: %v", a.name, err)
 				}
 				a.log.Debugf("[%s] writeLoop ended", a.name)
+
+				// A write failure may be one-sided, leaving readLoop blocked in
+				// Read. Close the transport so association teardown can finish.
+				_ = a.closeNetConn()
 
 				break loop
 			}
@@ -1285,6 +1356,27 @@ func (a *Association) gatherDataPacketsToRetransmit(rawPackets [][]byte, budgetU
 }
 
 // The caller should hold the lock.
+func (a *Association) gatherOutboundReconfigPackets(rawPackets [][]byte) [][]byte {
+	if !a.willRetransmitReconfig {
+		return rawPackets
+	}
+
+	a.willRetransmitReconfig = false
+	a.log.Debugf("[%s] retransmit %d RECONFIG chunk(s)", a.name, len(a.reconfigs))
+	for _, c := range a.reconfigs {
+		p := a.createPacket([]chunk{c})
+		raw, err := a.marshalPacket(p)
+		if err != nil {
+			a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name)
+		} else {
+			rawPackets = append(rawPackets, raw)
+		}
+	}
+
+	return rawPackets
+}
+
+// The caller should hold the lock.
 //
 //nolint:cyclop
 func (a *Association) gatherOutboundDataAndReconfigPackets(
@@ -1314,19 +1406,7 @@ func (a *Association) gatherOutboundDataAndReconfigPackets(
 	}
 
 	if len(sisToReset) > 0 || a.willRetransmitReconfig { //nolint:nestif
-		if a.willRetransmitReconfig {
-			a.willRetransmitReconfig = false
-			a.log.Debugf("[%s] retransmit %d RECONFIG chunk(s)", a.name, len(a.reconfigs))
-			for _, c := range a.reconfigs {
-				p := a.createPacket([]chunk{c})
-				raw, err := a.marshalPacket(p)
-				if err != nil {
-					a.log.Warnf("[%s] failed to serialize a RECONFIG packet to be retransmitted", a.name)
-				} else {
-					rawPackets = append(rawPackets, raw)
-				}
-			}
-		}
+		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 
 		if len(sisToReset) > 0 {
 			rsn := a.generateNextRSN()
@@ -1528,22 +1608,23 @@ func (a *Association) gatherOutboundShutdownPackets(rawPackets [][]byte) ([][]by
 	ok := true
 
 	switch {
-	case a.willSendShutdown:
+	case a.willSendShutdownComplete:
+		a.willSendShutdownComplete = false
+		a.willSendShutdownAck = false
 		a.willSendShutdown = false
 
-		shutdown := &chunkShutdown{
-			cumulativeTSNAck: a.cumulativeTSNAckPoint,
-		}
+		shutdownComplete := &chunkShutdownComplete{}
 
-		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdown}))
+		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdownComplete}))
 		if err != nil {
-			a.log.Warnf("[%s] failed to serialize a Shutdown packet", a.name)
+			a.log.Warnf("[%s] failed to serialize a ShutdownComplete packet", a.name)
 		} else {
-			a.t2Shutdown.start(a.rtoMgr.getRTO())
 			rawPackets = append(rawPackets, raw)
+			ok = false
 		}
 	case a.willSendShutdownAck:
 		a.willSendShutdownAck = false
+		a.willSendShutdown = false
 
 		shutdownAck := &chunkShutdownAck{}
 
@@ -1554,17 +1635,19 @@ func (a *Association) gatherOutboundShutdownPackets(rawPackets [][]byte) ([][]by
 			a.t2Shutdown.start(a.rtoMgr.getRTO())
 			rawPackets = append(rawPackets, raw)
 		}
-	case a.willSendShutdownComplete:
-		a.willSendShutdownComplete = false
+	case a.willSendShutdown:
+		a.willSendShutdown = false
 
-		shutdownComplete := &chunkShutdownComplete{}
+		shutdown := &chunkShutdown{
+			cumulativeTSNAck: a.peerLastTSN(),
+		}
 
-		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdownComplete}))
+		raw, err := a.marshalPacket(a.createPacket([]chunk{shutdown}))
 		if err != nil {
-			a.log.Warnf("[%s] failed to serialize a ShutdownComplete packet", a.name)
+			a.log.Warnf("[%s] failed to serialize a Shutdown packet", a.name)
 		} else {
+			a.t2Shutdown.start(a.rtoMgr.getRTO())
 			rawPackets = append(rawPackets, raw)
-			ok = false
 		}
 	}
 
@@ -1588,12 +1671,9 @@ func (a *Association) gatherAbortPacket() ([]byte, error) {
 	return raw, err
 }
 
-// gatherOutbound gathers outgoing packets. The returned bool value set to
-// false means the association should be closed down after the final send.
-func (a *Association) gatherOutbound() ([][]byte, bool) {
-	a.lock.Lock()
-	defer a.lock.Unlock()
-
+// The caller should hold the lock. The final bool reports whether the
+// returned packets terminate the association and suppress all other output.
+func (a *Association) gatherOutboundPriorityPackets() ([][]byte, bool, bool) {
 	if a.willSendAbort {
 		pkt, err := a.gatherAbortPacket()
 		if err != nil {
@@ -1603,13 +1683,51 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 			// (even though it failed) to avoid unnecessary delays.
 			a.abortSentOnce.Do(func() { close(a.abortSentCh) })
 
-			return nil, false
+			return nil, false, true
 		}
 
-		return [][]byte{pkt}, false
+		return [][]byte{pkt}, false, true
 	}
 
-	rawPackets := [][]byte{}
+	// Once SHUTDOWN ACK has been received, SHUTDOWN COMPLETE is the only
+	// protocol response left to send. Do not let queued control or DATA
+	// traffic delay the terminal response.
+	if a.willSendShutdownComplete {
+		rawPackets, ok := a.gatherOutboundShutdownPackets(nil)
+
+		return rawPackets, ok, true
+	}
+
+	// A retransmitted or crossed SHUTDOWN must not sit behind unrelated
+	// control traffic while the peer is waiting for SHUTDOWN ACK.
+	if a.getState() == shutdownAckSent && a.willSendShutdownAck {
+		rawPackets, ok := a.gatherOutboundShutdownPackets(nil)
+
+		return rawPackets, ok, false
+	}
+
+	// DATA received after sending SHUTDOWN requires an immediate updated
+	// SHUTDOWN response, plus a SACK when gaps or duplicates require one.
+	if a.getState() == shutdownSent && a.willSendShutdown {
+		rawPackets := a.gatherOutboundSackPackets(nil)
+		rawPackets, ok := a.gatherOutboundShutdownPackets(rawPackets)
+
+		return rawPackets, ok, false
+	}
+
+	return nil, true, false
+}
+
+// gatherOutbound gathers outgoing packets. The returned bool value set to
+// false means the association should be closed down after the final send.
+func (a *Association) gatherOutbound() ([][]byte, bool) {
+	a.lock.Lock()
+	defer a.lock.Unlock()
+
+	rawPackets, ok, terminal := a.gatherOutboundPriorityPackets()
+	if terminal {
+		return rawPackets, ok
+	}
 
 	if a.controlQueue.size() > 0 {
 		for _, p := range a.controlQueue.popAll() {
@@ -1625,8 +1743,6 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 
 	state := a.getState()
 
-	ok := true
-
 	switch state {
 	case established:
 		budgetUnits := a.tlrCurrentBurstBudgetScaledLocked()
@@ -1639,17 +1755,25 @@ func (a *Association) gatherOutbound() ([][]byte, bool) {
 		// control traffic shouldn't be limited.
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
 		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
-	case shutdownPending, shutdownSent, shutdownReceived:
+	case shutdownPending, shutdownReceived:
 		budgetUnits := a.tlrCurrentBurstBudgetScaledLocked()
 		consumed := false
 
 		rawPackets = a.gatherDataPacketsToRetransmit(rawPackets, &budgetUnits, &consumed)
+		rawPackets = a.gatherOutboundDataAndReconfigPackets(rawPackets, &budgetUnits, &consumed)
 		rawPackets = a.gatherOutboundFastRetransmissionPackets(rawPackets, &budgetUnits, &consumed)
+		a.advanceShutdownAfterDataDrain(state)
 
 		rawPackets = a.gatherOutboundSackPackets(rawPackets)
+		rawPackets = a.gatherOutboundForwardTSNPackets(rawPackets)
 		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
+	case shutdownSent:
+		rawPackets = a.gatherOutboundSackPackets(rawPackets)
+		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
+		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 	case shutdownAckSent:
 		rawPackets, ok = a.gatherOutboundShutdownPackets(rawPackets)
+		rawPackets = a.gatherOutboundReconfigPackets(rawPackets)
 	}
 
 	return rawPackets, ok
@@ -1880,11 +2004,7 @@ func (a *Association) updateInterleavingState() error {
 		}
 
 		a.useInterleaving = useInterleaving
-		if useInterleaving {
-			a.maxPayloadSize = a.mtu - (commonHeaderSize + iDataChunkHeaderSize)
-		} else {
-			a.maxPayloadSize = a.mtu - (commonHeaderSize + dataChunkHeaderSize)
-		}
+		a.maxPayloadSize = maxPayloadSizeForMTU(a.mtu, useInterleaving)
 	}
 
 	if useInterleaving {
@@ -1914,11 +2034,33 @@ func (a *Association) abortProtocolViolation(reason string) {
 }
 
 // The caller should hold the lock.
+func (a *Association) retransmitShutdownAck() {
+	if a.shutdownCompletePending {
+		return
+	}
+
+	a.t2Shutdown.stop()
+	a.willSendShutdown = false
+	a.willSendShutdownAck = true
+	a.awakeWriteLoop()
+}
+
+// The caller should hold the lock.
 //
 //nolint:cyclop
 func (a *Association) handleInit(pkt *packet, initChunk *chunkInit) ([]*packet, error) {
 	state := a.getState()
 	a.log.Debugf("[%s] chunkInit received in state '%s'", a.name, getAssociationStateString(state))
+
+	if state == shutdownAckSent {
+		// RFC 9260 Section 9.2: only an INIT whose SCTP port pair belongs
+		// to this association triggers a retransmission of SHUTDOWN ACK.
+		if a.sourcePort == pkt.destinationPort && a.destinationPort == pkt.sourcePort {
+			a.retransmitShutdownAck()
+		}
+
+		return nil, nil
+	}
 
 	// https://tools.ietf.org/html/rfc4960#section-5.2.1
 	// Upon receipt of an INIT in the COOKIE-WAIT state, an endpoint MUST
@@ -2257,10 +2399,18 @@ func (a *Association) handleCookieAck() {
 	a.completeHandshake(nil)
 }
 
+func isDataReceiveState(state uint32) bool {
+	return state == established || state == shutdownPending || state == shutdownSent
+}
+
+func (a *Association) canHandleData(state uint32) bool {
+	return !a.shutdownCompletePending && isDataReceiveState(state)
+}
+
 // The caller should hold the lock.
 func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	state := a.getState()
-	if state != established && state != shutdownPending && state != shutdownReceived {
+	if !a.canHandleData(state) {
 		return nil
 	}
 
@@ -2278,9 +2428,21 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 		a.name, chunkPayload.tsn, chunkPayload.immediateSack, len(chunkPayload.userData))
 	a.stats.incDATAs()
 
+	if state == shutdownSent {
+		// RFC 9260 Sections 6 and 9.2 require DATA received in
+		// SHUTDOWN-SENT to be acknowledged without delay and answered with a
+		// SHUTDOWN. Restart T2 when that SHUTDOWN is sent.
+		a.willSendShutdown = true
+		a.t2Shutdown.stop()
+	}
+
 	canPush := a.payloadQueue.canPush(chunkPayload.tsn)
 	if canPush {
 		if !a.acceptPayloadData(chunkPayload) {
+			if state == shutdownSent {
+				return a.handlePeerLastTSNAndAcknowledgement(true)
+			}
+
 			return nil
 		}
 	}
@@ -2295,6 +2457,9 @@ func (a *Association) handleData(chunkPayload *chunkPayloadData) []*packet {
 	gapDetected := sna32GT(chunkPayload.tsn, expectedTSN)
 
 	sackNow := chunkPayload.immediateSack || gapDetected
+	if state == shutdownSent {
+		sackNow = true
+	}
 
 	return a.handlePeerLastTSNAndAcknowledgement(sackNow)
 }
@@ -2444,10 +2609,13 @@ func (a *Association) createStream(streamIdentifier uint16, accept bool) *Stream
 	stream := &Stream{
 		association:      a,
 		streamIdentifier: streamIdentifier,
-		reassemblyQueue:  newReassemblyQueue(streamIdentifier),
-		log:              a.log,
-		name:             fmt.Sprintf("%d:%s", streamIdentifier, a.name),
-		writeDeadline:    deadline.New(),
+		reassemblyQueue: newReassemblyQueue(
+			streamIdentifier,
+			a.maxReassemblyQueueEntries,
+		),
+		log:           a.log,
+		name:          fmt.Sprintf("%d:%s", streamIdentifier, a.name),
+		writeDeadline: deadline.New(),
 	}
 
 	stream.readNotifier = sync.NewCond(&stream.lock)
@@ -2504,6 +2672,42 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 ) {
 	bytesAckedPerStream = map[uint16]int{}
 	now := time.Now() // capture the time for this SACK
+
+	// Validate that full range exists in the inflight queue to prevent partial pops
+	// left over from an invalid SACK that causes the cumulativeTSNAckPoint to be updated
+	// incorrectly and causes weird state and race conditions.
+	if sna32LT(a.cumulativeTSNAckPoint, selectiveAckChunk.cumulativeTSNAck) {
+		firstTSN := a.cumulativeTSNAckPoint + 1
+		if _, ok := a.inflightQueue.get(firstTSN); !ok {
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, firstTSN)
+		}
+		if _, ok := a.inflightQueue.get(selectiveAckChunk.cumulativeTSNAck); !ok {
+			return nil, 0, time.Time{}, 0, false,
+				fmt.Errorf("%w: %v", ErrInflightQueueTSNPop, selectiveAckChunk.cumulativeTSNAck)
+		}
+	}
+	for _, gap := range selectiveAckChunk.gapAckBlocks {
+		if gap.start == 0 {
+			return nil, 0, time.Time{}, 0, false,
+				fmt.Errorf("%w: %v", ErrTSNRequestNotExist, selectiveAckChunk.cumulativeTSNAck)
+		}
+		if gap.start > gap.end {
+			return nil, 0, time.Time{}, 0, false,
+				fmt.Errorf("%w: invalid Gap Ack Block %d-%d", ErrTSNRequestNotExist, gap.start, gap.end)
+		}
+
+		firstTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.start)
+		if _, ok := a.inflightQueue.get(firstTSN); !ok {
+			return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, firstTSN)
+		}
+		lastTSN := selectiveAckChunk.cumulativeTSNAck + uint32(gap.end)
+		if lastTSN != firstTSN {
+			if _, ok := a.inflightQueue.get(lastTSN); !ok {
+				return nil, 0, time.Time{}, 0, false,
+					fmt.Errorf("%w: %v", ErrTSNRequestNotExist, lastTSN)
+			}
+		}
+	}
 
 	// New ack point, so pop all ACKed packets from inflightQueue
 	// We add 1 because the "currentAckPoint" has already been popped from the inflight queue
@@ -2583,8 +2787,8 @@ func (a *Association) processSelectiveAck(selectiveAckChunk *chunkSelectiveAck) 
 
 	// Mark selectively acknowledged chunks as "acked"
 	for _, g := range selectiveAckChunk.gapAckBlocks {
-		for i := g.start; i <= g.end; i++ {
-			tsn := selectiveAckChunk.cumulativeTSNAck + uint32(i)
+		for i := uint32(g.start); i <= uint32(g.end); i++ {
+			tsn := selectiveAckChunk.cumulativeTSNAck + i
 			chunkPayload, ok := a.inflightQueue.get(tsn)
 			if !ok {
 				return nil, 0, time.Time{}, 0, false, fmt.Errorf("%w: %v", ErrTSNRequestNotExist, tsn)
@@ -2770,21 +2974,20 @@ func (a *Association) processFastRetransmission( //nolint:gocognit
 	return nil
 }
 
+type acknowledgementResult struct {
+	htna                    uint32
+	newestDeliveredSendTime time.Time
+	newestDeliveredOrigTSN  uint32
+	processed               bool
+	cumTSNAckPointAdvanced  bool
+	deliveredFound          bool
+}
+
+// processAcknowledgement applies the fields shared by SACK and SHUTDOWN.
 // The caller should hold the lock.
-//
-//nolint:cyclop
-func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
-	a.log.Tracef(
-		"[%s] SACK: cumTSN=%d a_rwnd=%d",
-		a.name, selectiveAckChunk.cumulativeTSNAck, selectiveAckChunk.advertisedReceiverWindowCredit,
-	)
-	state := a.getState()
-	if state != established && state != shutdownPending && state != shutdownReceived {
-		return nil
-	}
-
-	a.stats.incSACKsReceived()
-
+func (a *Association) processAcknowledgement(
+	selectiveAckChunk *chunkSelectiveAck,
+) (acknowledgementResult, error) {
 	if sna32GT(a.cumulativeTSNAckPoint, selectiveAckChunk.cumulativeTSNAck) {
 		// RFC 4960 sec 6.2.1.  Processing a Received SACK
 		// D)
@@ -2799,7 +3002,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 			selectiveAckChunk.cumulativeTSNAck,
 			a.cumulativeTSNAckPoint)
 
-		return nil
+		return acknowledgementResult{}, nil
 	}
 
 	// Process selective ack
@@ -2807,7 +3010,7 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		newestDeliveredSendTime, newestDeliveredOrigTSN,
 		deliveredFound, err := a.processSelectiveAck(selectiveAckChunk)
 	if err != nil {
-		return err
+		return acknowledgementResult{}, err
 	}
 
 	var totalBytesAcked int
@@ -2835,23 +3038,28 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		}
 	}
 
-	// New rwnd value
-	// RFC 4960 sec 6.2.1.  Processing a Received SACK
-	// D)
-	//   ii) Set rwnd equal to the newly received a_rwnd minus the number
-	//       of bytes still outstanding after processing the Cumulative
-	//       TSN Ack and the Gap Ack Blocks.
+	return acknowledgementResult{
+		htna:                    htna,
+		newestDeliveredSendTime: newestDeliveredSendTime,
+		newestDeliveredOrigTSN:  newestDeliveredOrigTSN,
+		processed:               true,
+		cumTSNAckPointAdvanced:  cumTSNAckPointAdvanced,
+		deliveredFound:          deliveredFound,
+	}, nil
+}
 
-	// bytes acked were already subtracted by markAsAcked() method
-	bytesOutstanding := uint32(a.inflightQueue.getNumBytes()) //nolint:gosec // G115
-	if bytesOutstanding >= selectiveAckChunk.advertisedReceiverWindowCredit {
-		a.setRWND(0)
-	} else {
-		a.setRWND(selectiveAckChunk.advertisedReceiverWindowCredit - bytesOutstanding)
-	}
-
-	err = a.processFastRetransmission(
-		selectiveAckChunk.cumulativeTSNAck, selectiveAckChunk.gapAckBlocks, htna, cumTSNAckPointAdvanced,
+// finishAcknowledgement applies acknowledgement processing that does not
+// depend on SACK-only fields.
+// The caller should hold the lock.
+func (a *Association) finishAcknowledgement(
+	selectiveAckChunk *chunkSelectiveAck,
+	result acknowledgementResult,
+) error {
+	err := a.processFastRetransmission(
+		selectiveAckChunk.cumulativeTSNAck,
+		selectiveAckChunk.gapAckBlocks,
+		result.htna,
+		result.cumTSNAckPointAdvanced,
 	)
 	if err != nil {
 		return err
@@ -2882,13 +3090,60 @@ func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
 		a.awakeWriteLoop()
 	}
 
-	a.postprocessSack(state, cumTSNAckPointAdvanced)
+	return nil
+}
+
+// The caller should hold the lock.
+//
+//nolint:cyclop
+func (a *Association) handleSack(selectiveAckChunk *chunkSelectiveAck) error {
+	a.log.Tracef(
+		"[%s] SACK: cumTSN=%d a_rwnd=%d",
+		a.name, selectiveAckChunk.cumulativeTSNAck, selectiveAckChunk.advertisedReceiverWindowCredit,
+	)
+	state := a.getState()
+	if state != established && state != shutdownPending && state != shutdownReceived {
+		return nil
+	}
+
+	a.stats.incSACKsReceived()
+
+	result, err := a.processAcknowledgement(selectiveAckChunk)
+	if err != nil || !result.processed {
+		return err
+	}
+
+	// New rwnd value
+	// RFC 4960 sec 6.2.1.  Processing a Received SACK
+	// D)
+	//   ii) Set rwnd equal to the newly received a_rwnd minus the number
+	//       of bytes still outstanding after processing the Cumulative
+	//       TSN Ack and the Gap Ack Blocks.
+
+	// bytes acked were already subtracted by markAsAcked() method
+	bytesOutstanding := uint32(a.inflightQueue.getNumBytes()) //nolint:gosec // G115
+	if bytesOutstanding >= selectiveAckChunk.advertisedReceiverWindowCredit {
+		a.setRWND(0)
+	} else {
+		a.setRWND(selectiveAckChunk.advertisedReceiverWindowCredit - bytesOutstanding)
+	}
+
+	if err = a.finishAcknowledgement(selectiveAckChunk, result); err != nil {
+		return err
+	}
+
+	a.postprocessSack(state, result.cumTSNAckPointAdvanced)
 
 	// RACK
-	a.onRackAfterSACK(deliveredFound, newestDeliveredSendTime, newestDeliveredOrigTSN, selectiveAckChunk)
+	a.onRackAfterSACK(
+		result.deliveredFound,
+		result.newestDeliveredSendTime,
+		result.newestDeliveredOrigTSN,
+		selectiveAckChunk,
+	)
 
 	// adaptive burst mitigation
-	ackProgress := cumTSNAckPointAdvanced || deliveredFound
+	ackProgress := result.cumTSNAckPointAdvanced || result.deliveredFound
 	a.tlrMaybeFinishLocked(ackProgress)
 
 	return nil
@@ -2902,16 +3157,14 @@ func (a *Association) postprocessSack(state uint32, shouldAwakeWriteLoop bool) {
 		// Start timer. (noop if already started)
 		a.log.Tracef("[%s] T3-rtx timer start (pt3)", a.name)
 		a.t3RTX.start(a.rtoMgr.getRTO())
-	case state == shutdownPending:
-		// No more outstanding, send shutdown.
+	case a.pendingQueue.size() > 0:
+		// The SACK opened room for DATA accepted before shutdown started.
 		shouldAwakeWriteLoop = true
-		a.willSendShutdown = true
-		a.setState(shutdownSent)
-	case state == shutdownReceived:
-		// No more outstanding, send shutdown ack.
-		shouldAwakeWriteLoop = true
-		a.willSendShutdownAck = true
-		a.setState(shutdownAckSent)
+	default:
+		// No more queued or outstanding DATA; advance shutdown if needed.
+		if a.advanceShutdownAfterDataDrain(state) {
+			shouldAwakeWriteLoop = true
+		}
 	}
 
 	if shouldAwakeWriteLoop {
@@ -2920,28 +3173,148 @@ func (a *Association) postprocessSack(state uint32, shouldAwakeWriteLoop bool) {
 }
 
 // The caller should hold the lock.
-func (a *Association) handleShutdown(_ *chunkShutdown) {
-	state := a.getState()
+func (a *Association) advanceShutdownAfterDataDrain(state uint32) bool {
+	if a.hasPendingOrInflightData() {
+		return false
+	}
 
 	switch state {
-	case established:
-		if a.inflightQueue.size() > 0 {
+	case shutdownPending:
+		a.willSendShutdown = true
+		a.setState(shutdownSent)
+	case shutdownReceived:
+		a.willSendShutdownAck = true
+		a.setState(shutdownAckSent)
+	default:
+		return false
+	}
+
+	return true
+}
+
+// The caller should hold the lock.
+func (a *Association) hasPendingOrInflightData() bool {
+	return a.pendingQueue.size() > 0 || a.inflightQueue.size() > 0
+}
+
+// processShutdownAcknowledgement processes the Cumulative TSN Ack carried by
+// a SHUTDOWN without applying SACK-only fields such as a_rwnd.
+// The caller should hold the lock.
+func (a *Association) processShutdownAcknowledgement(c *chunkShutdown) error {
+	// RFC 9260 Section 9.2 permits SHUTDOWN to cumulatively acknowledge
+	// contiguous DATA without a separate SACK.
+	ack := &chunkSelectiveAck{cumulativeTSNAck: c.cumulativeTSNAck}
+	result, err := a.processAcknowledgement(ack)
+	if err != nil {
+		return err
+	}
+	if result.processed {
+		if err = a.finishAcknowledgement(ack, result); err != nil {
+			return err
+		}
+
+		a.onRackAfterSACK(
+			result.deliveredFound,
+			result.newestDeliveredSendTime,
+			result.newestDeliveredOrigTSN,
+			ack,
+		)
+		a.tlrMaybeFinishLocked(result.cumTSNAckPointAdvanced || result.deliveredFound)
+	}
+
+	return nil
+}
+
+func isShutdownHandleState(state uint32) bool {
+	switch state {
+	case established, shutdownPending, shutdownReceived, shutdownSent:
+		return true
+	default:
+		return false
+	}
+}
+
+func entersShutdownReceived(state uint32) bool {
+	return state == established || state == shutdownPending
+}
+
+// The caller should hold the lock.
+func (a *Association) finishShutdownHandling(state uint32) {
+	switch state {
+	case established, shutdownPending, shutdownReceived:
+		if a.hasPendingOrInflightData() {
 			a.setState(shutdownReceived)
+			if a.pendingQueue.size() > 0 {
+				a.awakeWriteLoop()
+			}
 		} else {
-			// No more outstanding, send shutdown ack.
+			// No more queued or outstanding DATA, send shutdown ack.
 			a.willSendShutdownAck = true
 			a.setState(shutdownAckSent)
 
 			a.awakeWriteLoop()
 		}
+	}
+}
 
-		// a.cumulativeTSNAckPoint = c.cumulativeTSNAck
-	case shutdownSent:
+// The caller should hold the lock.
+func (a *Association) handleShutdown(shutdown *chunkShutdown) error {
+	if a.shutdownCompletePending {
+		return nil
+	}
+
+	state := a.getState()
+	if state == shutdownAckSent {
+		// Continue responding to retransmitted SHUTDOWN chunks after reaching
+		// SHUTDOWN-RECEIVED, as required by RFC 9260 Section 9.2.
+		a.retransmitShutdownAck()
+
+		return nil
+	}
+
+	if state == shutdownSent {
+		// RFC 9260 Section 9.2 requires an immediate SHUTDOWN ACK for a
+		// crossed shutdown. Since SHUTDOWN-SENT is entered only after all
+		// outbound DATA has been acknowledged, the peer's cumulative TSN ACK
+		// cannot release any additional DATA and must not delay the response.
+		a.t2Shutdown.stop()
+		a.willSendShutdown = false
 		a.willSendShutdownAck = true
 		a.setState(shutdownAckSent)
 
 		a.awakeWriteLoop()
+
+		return nil
 	}
+
+	if !isShutdownHandleState(state) {
+		return nil
+	}
+
+	if entersShutdownReceived(state) {
+		// Reject new user DATA before acknowledgement processing can release
+		// a.lock and invoke a stream's OnBufferedAmountLow callback.
+		a.setState(shutdownReceived)
+	}
+
+	previousCumulativeTSNAckPoint := a.cumulativeTSNAckPoint
+	if err := a.processShutdownAcknowledgement(shutdown); err != nil {
+		// Invalid acknowledgement fields are rejected before the transmit
+		// acknowledgement point advances. Restore the pre-SHUTDOWN state so a
+		// malformed chunk cannot strand the association in SHUTDOWN-RECEIVED.
+		if a.cumulativeTSNAckPoint == previousCumulativeTSNAckPoint {
+			a.setState(state)
+		}
+
+		return err
+	}
+
+	if entersShutdownReceived(state) {
+		a.unblockPendingWrites()
+	}
+	a.finishShutdownHandling(state)
+
+	return nil
 }
 
 // The caller should hold the lock.
@@ -2949,6 +3322,9 @@ func (a *Association) handleShutdownAck(_ *chunkShutdownAck) {
 	state := a.getState()
 	if state == shutdownSent || state == shutdownAckSent {
 		a.t2Shutdown.stop()
+		a.willSendShutdown = false
+		a.willSendShutdownAck = false
+		a.shutdownCompletePending = true
 		a.willSendShutdownComplete = true
 
 		a.awakeWriteLoop()
@@ -3820,7 +4196,7 @@ func (a *Association) handleChunk(receivedPacket *packet, receivedChunk chunk) e
 		packets = a.handleIForwardTSN(receivedChunk)
 
 	case *chunkShutdown:
-		a.handleShutdown(receivedChunk)
+		err = a.handleShutdown(receivedChunk)
 	case *chunkShutdownAck:
 		a.handleShutdownAck(receivedChunk)
 	case *chunkShutdownComplete:
@@ -3858,6 +4234,23 @@ func shouldAbortOnChunkValidationError(receivedChunk chunk) bool {
 	}
 }
 
+// The caller should hold the lock.
+func (a *Association) onShutdownTimeout(nRtos uint) {
+	a.log.Debugf("[%s] retransmission of shutdown timeout (nRtos=%d): %v", a.name, nRtos)
+	if a.shutdownCompletePending {
+		return
+	}
+
+	switch a.getState() {
+	case shutdownSent:
+		a.willSendShutdown = true
+		a.awakeWriteLoop()
+	case shutdownAckSent:
+		a.willSendShutdownAck = true
+		a.awakeWriteLoop()
+	}
+}
+
 func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyclop
 	a.lock.Lock()
 	defer a.lock.Unlock()
@@ -3881,17 +4274,9 @@ func (a *Association) onRetransmissionTimeout(id int, nRtos uint) { //nolint:cyc
 	}
 
 	if id == timerT2Shutdown {
-		a.log.Debugf("[%s] retransmission of shutdown timeout (nRtos=%d): %v", a.name, nRtos)
-		state := a.getState()
+		a.onShutdownTimeout(nRtos)
 
-		switch state {
-		case shutdownSent:
-			a.willSendShutdown = true
-			a.awakeWriteLoop()
-		case shutdownAckSent:
-			a.willSendShutdownAck = true
-			a.awakeWriteLoop()
-		}
+		return
 	}
 
 	if id == timerT3RTX { //nolint:nestif

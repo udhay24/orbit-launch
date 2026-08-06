@@ -22,6 +22,7 @@ import (
 
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
+	"github.com/pion/sdp/v3"
 
 	"github.com/bluenviron/gortsplib/v5/internal/asyncprocessor"
 	"github.com/bluenviron/gortsplib/v5/internal/bytecounter"
@@ -34,7 +35,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
 	"github.com/bluenviron/gortsplib/v5/pkg/mikey"
 	"github.com/bluenviron/gortsplib/v5/pkg/rtptime"
-	"github.com/bluenviron/gortsplib/v5/pkg/sdp"
+	"github.com/bluenviron/gortsplib/v5/pkg/sdpunmarshaler"
 )
 
 const (
@@ -345,6 +346,15 @@ func interfaceOfConn(c net.Conn) (*net.Interface, error) {
 	}
 
 	return nil, fmt.Errorf("no interface found for IP %s", localIP)
+}
+
+func hasH264PacketizationMode0(formats []format.Format) bool {
+	for _, forma := range formats {
+		if h264Forma, ok := forma.(*format.H264); ok && h264Forma.PacketizationMode == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 type clientState int
@@ -1008,7 +1018,7 @@ func (c *Client) checkState(allowed map[clientState]struct{}) error {
 }
 
 func (c *Client) trySwitchingProtocol() error {
-	c.OnTransportSwitch(liberrors.ErrClientSwitchToTCP{})
+	c.OnTransportSwitch(liberrors.ErrClientSwitchToTCPDueToNoUDP{})
 
 	prevBaseURL := c.baseURL
 	prevMedias := c.setuppedMedias
@@ -1505,19 +1515,18 @@ func (c *Client) doDescribe(u *base.URL) (*description.Session, *base.Response, 
 		return nil, nil, liberrors.ErrClientContentTypeUnsupported{CT: ct}
 	}
 
-	var ssd sdp.SessionDescription
-	err = ssd.Unmarshal(res.Body)
+	ssd, err := sdpunmarshaler.Unmarshal(res.Body)
 	if err != nil {
 		return nil, nil, liberrors.ErrClientSDPInvalid{Err: err}
 	}
 
 	var desc description.Session
-	err = desc.Unmarshal(&ssd)
+	err = desc.Unmarshal2(ssd)
 	if err != nil {
 		return nil, nil, liberrors.ErrClientSDPInvalid{Err: err}
 	}
 
-	baseURL, err := findBaseURL(&ssd, res, u)
+	baseURL, err := findBaseURL(ssd, res, u)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1661,35 +1670,36 @@ func (c *Client) doSetup(
 
 	var protocol Protocol
 
-	switch {
-	// use transport from previous SETUP calls
-	case c.setuppedTransport != nil:
+	// use protocol and secure flag from previous SETUP calls
+	if c.setuppedTransport != nil {
 		protocol = c.setuppedTransport.Protocol
 		th.Profile = c.setuppedTransport.Profile
+	} else {
+		// pick protocol
+		switch {
+		case c.Protocol != nil:
+			protocol = *c.Protocol
 
-	// use transport from config, secure flag from server
-	case c.Protocol != nil:
-		protocol = *c.Protocol
-		if isSecure(medi.Profile) && c.Scheme == schemeRTSPS {
-			th.Profile = headers.TransportProfileSAVP
-		} else {
-			th.Profile = headers.TransportProfileAVP
-		}
-
-	default:
-		if isSecure(medi.Profile) && c.Scheme == schemeRTSPS {
-			th.Profile = headers.TransportProfileSAVP
-		} else {
-			th.Profile = headers.TransportProfileAVP
-		}
-
-		// try
-		// - UDP if unencrypted or secure is supported by server
-		// - otherwise, TCP
-		if c.Tunnel == TunnelNone && (th.Profile == headers.TransportProfileSAVP || c.Scheme == schemeRTSP) {
-			protocol = ProtocolUDP
-		} else {
+		case hasH264PacketizationMode0(medi.Formats) && (c.state == clientStateInitial || c.state == clientStatePrePlay):
+			c.OnTransportSwitch(liberrors.ErrClientSwitchToTCPDueToH2640{})
 			protocol = ProtocolTCP
+
+		case (c.Scheme == schemeRTSPS && !isSecure(medi.Profile)):
+			c.OnTransportSwitch(liberrors.ErrClientSwitchToTCPToEncryptStream{})
+			protocol = ProtocolTCP
+
+		case c.Tunnel != TunnelNone:
+			protocol = ProtocolTCP
+
+		default:
+			protocol = ProtocolUDP
+		}
+
+		// set secure flag using server indication
+		if c.Scheme == schemeRTSPS && isSecure(medi.Profile) {
+			th.Profile = headers.TransportProfileSAVP
+		} else {
+			th.Profile = headers.TransportProfileAVP
 		}
 	}
 
@@ -1784,6 +1794,11 @@ func (c *Client) doSetup(
 		header["Require"] = base.HeaderValue{"www.onvif.org/ver20/backchannel"}
 	}
 
+	if hasH264PacketizationMode0(medi.Formats) &&
+		((c.state != clientStateInitial && c.state != clientStatePrePlay) || protocol != ProtocolTCP) {
+		return nil, liberrors.ErrClientH264PacketizationMode0{}
+	}
+
 	if isSecure(th.Profile) {
 		var srtpOutKey []byte
 
@@ -1849,7 +1864,7 @@ func (c *Client) doSetup(
 		if res.StatusCode == base.StatusUnsupportedTransport &&
 			c.setuppedTransport == nil &&
 			c.Protocol == nil {
-			c.OnTransportSwitch(liberrors.ErrClientSwitchToTCP2{})
+			c.OnTransportSwitch(liberrors.ErrClientSwitchToTCPDueToServer{})
 			c.setuppedTransport = &SessionTransport{
 				Protocol: ProtocolTCP,
 				Profile:  th.Profile,
@@ -1879,7 +1894,7 @@ func (c *Client) doSetup(
 		if thRes.Protocol == headers.TransportProtocolTCP {
 			// switch transport automatically
 			if c.setuppedTransport == nil && c.Protocol == nil {
-				c.OnTransportSwitch(liberrors.ErrClientSwitchToTCP2{})
+				c.OnTransportSwitch(liberrors.ErrClientSwitchToTCPDueToServer{})
 
 				c.baseURL = baseURL
 

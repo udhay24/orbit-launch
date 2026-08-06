@@ -3,24 +3,24 @@ module github.com/bluenviron/mediamtx
 go 1.26.0
 
 require (
-	code.cloudfoundry.org/bytefmt v0.74.0
+	code.cloudfoundry.org/bytefmt v0.83.0
 	github.com/Masterminds/semver/v3 v3.5.0
-	github.com/MicahParks/jwkset v0.11.0
-	github.com/MicahParks/keyfunc/v3 v3.8.0
-	github.com/abema/go-mp4 v1.6.0
-	github.com/alecthomas/kong v1.15.0
+	github.com/MicahParks/jwkset v0.11.3
+	github.com/MicahParks/keyfunc/v3 v3.8.1
+	github.com/abema/go-mp4 v1.7.1
+	github.com/alecthomas/kong v1.16.0
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/asticode/go-astits v1.15.0
-	github.com/bluenviron/gohlslib/v2 v2.4.0
-	github.com/bluenviron/gortmplib v0.4.0
-	github.com/bluenviron/gortsplib/v5 v5.5.4
-	github.com/bluenviron/mediacommon/v2 v2.9.0
+	github.com/bluenviron/gohlslib/v2 v2.4.2
+	github.com/bluenviron/gortmplib v1.0.0
+	github.com/bluenviron/gortsplib/v5 v5.6.3
+	github.com/bluenviron/mediacommon/v2 v2.9.2
 	github.com/datarhei/gosrt v0.11.0
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gin-contrib/pprof v1.5.4
 	github.com/gin-gonic/gin v1.12.0
-	github.com/go-git/go-billy/v5 v5.9.0
-	github.com/go-git/go-git/v5 v5.19.1
+	github.com/go-git/go-billy/v5 v5.9.1
+	github.com/go-git/go-git/v5 v5.19.2
 	github.com/goccy/go-yaml v1.19.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/gopacket v1.1.19
@@ -28,26 +28,27 @@ require (
 	github.com/gookit/color v1.6.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
-	github.com/matthewhartstonge/argon2 v1.5.4
+	github.com/matthewhartstonge/argon2 v1.5.6
 	github.com/minio/selfupdate v0.6.0
-	github.com/pion/ice/v4 v4.2.7
-	github.com/pion/interceptor v0.1.45
+	github.com/pion/ice/v4 v4.4.0
+	github.com/pion/interceptor v0.1.47
 	github.com/pion/logging v0.2.4
-	github.com/pion/rtcp v1.2.16
-	github.com/pion/rtp v1.10.2
-	github.com/pion/sdp/v3 v3.0.18
+	github.com/pion/rtcp v1.2.17
+	github.com/pion/rtp v1.10.5
+	github.com/pion/sdp/v3 v3.0.19
 	github.com/pion/transport/v4 v4.0.2
-	github.com/pion/webrtc/v4 v4.2.14
-	github.com/quic-go/quic-go v0.59.1
-	github.com/quic-go/webtransport-go v0.10.0
+	github.com/pion/webrtc/v4 v4.2.18
+	github.com/pires/go-proxyproto v0.15.0
+	github.com/quic-go/quic-go v0.61.0
+	github.com/quic-go/webtransport-go v0.12.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
 	github.com/wlynxg/anet v0.0.5
-	golang.org/x/crypto v0.52.0
-	golang.org/x/net v0.55.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/sys v0.45.0
-	golang.org/x/term v0.43.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/net v0.57.0
+	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 )
 
 require (
@@ -85,14 +86,14 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
-	github.com/pion/datachannel v1.6.0 // indirect
-	github.com/pion/dtls/v3 v3.1.3 // indirect
+	github.com/pion/datachannel v1.6.2 // indirect
+	github.com/pion/dtls/v3 v3.1.5 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/sctp v1.10.0 // indirect
-	github.com/pion/srtp/v3 v3.0.11 // indirect
-	github.com/pion/stun/v3 v3.1.4 // indirect
-	github.com/pion/turn/v5 v5.0.7 // indirect
+	github.com/pion/sctp v1.11.1 // indirect
+	github.com/pion/srtp/v3 v3.0.12 // indirect
+	github.com/pion/stun/v3 v3.1.6 // indirect
+	github.com/pion/turn/v5 v5.0.12 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
@@ -106,13 +107,13 @@ require (
 	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/arch v0.22.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
-	golang.org/x/time v0.14.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/pion/ice/v4 => github.com/aler9/ice/v4 v4.2.2-0.20260602093426-86d76c717f99
+replace github.com/datarhei/gosrt => github.com/aler9/gosrt v0.0.0-20260804162707-b6afcc8add8f
 
 replace github.com/bluenviron/gortmplib => ./gortmplib-patched

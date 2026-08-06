@@ -5,9 +5,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/pion/rtp"
-
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/pion/rtp"
 )
 
 // ErrMorePacketsNeeded is returned when more packets are needed.
@@ -93,7 +92,7 @@ type Decoder struct {
 
 // Init initializes the decoder.
 func (d *Decoder) Init() error {
-	if d.PacketizationMode != 1 {
+	if d.PacketizationMode != 0 && d.PacketizationMode != 1 {
 		return fmt.Errorf("unsupported packetization mode: %d", d.PacketizationMode)
 	}
 	return nil

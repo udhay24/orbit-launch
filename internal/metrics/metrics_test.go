@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/formatlabel"
-	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 )
 
 type dummyPathManager struct{}
@@ -60,6 +60,34 @@ func (dummyPathManager) APIPathsList() (*defs.APIPathList, error) {
 
 func (dummyPathManager) APIPathsGet(string) (*defs.APIPath, error) {
 	panic("unused")
+}
+
+func (dummyPathManager) APIForwardDestList(string) (*defs.APIForwardDestList, error) {
+	return &defs.APIForwardDestList{}, nil
+}
+
+func (dummyPathManager) APIForwardDestGet(string, uuid.UUID) (*defs.APIForwardDest, error) {
+	panic("unused")
+}
+
+type forwardPathManager struct {
+	dummyPathManager
+}
+
+func (forwardPathManager) APIForwardDestList(string) (*defs.APIForwardDestList, error) {
+	return &defs.APIForwardDestList{
+		ItemCount: 1,
+		PageCount: 1,
+		Items: []defs.APIForwardDest{{
+			ID:            uuid.MustParse("5b9a82ca-3cb8-46d1-a80b-6b716ccfcafe"),
+			Pos:           1,
+			Created:       time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC),
+			Conf:          conf.ForwardDest{Dest: "rtmp://example.com/live/stream"},
+			Protocol:      defs.APIForwardDestProtocolRTMP,
+			State:         defs.APIForwardDestStateForwarding,
+			OutboundBytes: 321,
+		}},
+	}, nil
 }
 
 type dummyHLSServer struct{}
@@ -340,6 +368,7 @@ func (dummyMoQServer) APISessionsList() (*defs.APIMoQSessionList, error) {
 			RemoteAddr:    "127.0.0.2:3456",
 			State:         defs.APIMoQSessionStatePublish,
 			Path:          "mypath",
+			Version:       defs.APIMoQVersionDraft19,
 			InboundBytes:  321,
 			OutboundBytes: 654,
 		}},
@@ -361,6 +390,14 @@ func (emptyPathManager) APIPathsList() (*defs.APIPathList, error) {
 }
 
 func (emptyPathManager) APIPathsGet(string) (*defs.APIPath, error) {
+	panic("unused")
+}
+
+func (emptyPathManager) APIForwardDestList(string) (*defs.APIForwardDestList, error) {
+	return &defs.APIForwardDestList{}, nil
+}
+
+func (emptyPathManager) APIForwardDestGet(string, uuid.UUID) (*defs.APIForwardDest, error) {
 	panic("unused")
 }
 
@@ -482,7 +519,6 @@ func TestPreflightRequest(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", res.Header.Get("Access-Control-Allow-Credentials"))
 	require.Equal(t, "OPTIONS, GET", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
@@ -1050,6 +1086,44 @@ func TestZeroMetricsFallback(t *testing.T) {
 			"moq_sessions 0\n"+
 			"moq_sessions_inbound_bytes 0\n"+
 			"moq_sessions_outbound_bytes 0\n"+
+			"\n",
+		string(byts))
+}
+
+func TestForwardMetrics(t *testing.T) {
+	m := Metrics{
+		Address:      "localhost:9998",
+		AllowOrigins: []string{"*"},
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		AuthManager:  test.NilAuthManager,
+		Parent:       test.NilLogger,
+	}
+	err := m.Initialize()
+	require.NoError(t, err)
+	defer m.Close()
+
+	m.SetPathManager(&forwardPathManager{})
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	res, err := hc.Get("http://localhost:9998/metrics?type=forward_dests")
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	require.Equal(t, http.StatusOK, res.StatusCode)
+
+	byts, err := io.ReadAll(res.Body)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		"# Forward destinations\n"+
+			"forward_dests{id=\"5b9a82ca-3cb8-46d1-a80b-6b716ccfcafe\","+
+			"path=\"mypath\",protocol=\"rtmp\",state=\"forwarding\"} 1\n"+
+			"forward_dests_outbound_bytes{id=\"5b9a82ca-3cb8-46d1-a80b-6b716ccfcafe\",path=\"mypath\","+
+			"protocol=\"rtmp\",state=\"forwarding\"} 321\n"+
 			"\n",
 		string(byts))
 }
@@ -1663,8 +1737,6 @@ func TestFilterByType(t *testing.T) {
 }
 
 func TestAuthError(t *testing.T) {
-	n := 0
-
 	m := Metrics{
 		Address:      "localhost:9998",
 		AllowOrigins: []string{"*"},
@@ -1678,14 +1750,7 @@ func TestAuthError(t *testing.T) {
 				return "", &auth.Error{Wrapped: fmt.Errorf("auth error")}
 			},
 		},
-		Parent: test.Logger(func(l logger.Level, s string, i ...any) {
-			if l == logger.Info {
-				if n == 1 {
-					require.Regexp(t, "failed to authenticate: auth error$", fmt.Sprintf(s, i...))
-				}
-				n++
-			}
-		}),
+		Parent: test.NilLogger,
 	}
 	err := m.Initialize()
 	require.NoError(t, err)
@@ -1707,8 +1772,6 @@ func TestAuthError(t *testing.T) {
 	defer res.Body.Close()
 
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-
-	require.Equal(t, 2, n)
 }
 
 func TestMetricsConcurrentSettersAndReads(t *testing.T) {

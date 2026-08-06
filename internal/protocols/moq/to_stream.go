@@ -9,6 +9,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/catalog"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/property"
 	"github.com/bluenviron/mediamtx/internal/protocols/moq/subgroup"
@@ -25,11 +26,8 @@ func findTimestamp(props []property.Property) (int64, bool) {
 	return 0, false
 }
 
-// ToStream maps a Media-over-QUIC stream to a MediaMTX stream.
-func ToStream(
-	cat *catalog.Catalog,
-	subStream **stream.SubStream,
-) (
+// ToStream maps a Media-over-QUIC catalog and published tracks to a MediaMTX stream.
+func ToStream(cat *catalog.Catalog, subStream **stream.SubStream) (
 	[]*description.Media,
 	map[uint64]func(sg *subgroup.SubGroup) error,
 	error,

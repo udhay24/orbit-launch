@@ -8,11 +8,11 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/google/uuid"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/google/uuid"
-	"github.com/quic-go/webtransport-go"
 )
 
 // ErrSessionNotFound is returned when a session is not found.
@@ -37,7 +37,8 @@ type newSessionReq struct {
 	pathName  string
 	query     string
 	userAgent string
-	wt        *webtransport.Session
+	version   defs.APIMoQVersion
+	conn      conn
 	res       chan newSessionRes
 }
 
@@ -78,8 +79,9 @@ type serverMetrics interface {
 
 // Server is a Media over QUIC server.
 type Server struct {
-	HTTPS2Address     string
-	HTTPS3Address     string
+	HTTP2Address      string
+	HTTP3Address      string
+	QUICAddress       string
 	ServerKey         string
 	ServerCert        string
 	AllowOrigins      []string
@@ -91,10 +93,11 @@ type Server struct {
 	Metrics           serverMetrics
 	Parent            serverParent
 
-	ctx        context.Context
-	ctxCancel  context.CancelFunc
-	httpServer *httpServer
-	sessions   map[*session]struct{}
+	ctx            context.Context
+	ctxCancel      context.CancelFunc
+	httpServer     *httpServer
+	nativeListener *nativeListener
+	sessions       map[*session]struct{}
 
 	chNewSession      chan newSessionReq
 	chCloseSession    chan *session
@@ -106,9 +109,21 @@ type Server struct {
 
 // Initialize initializes the server.
 func (s *Server) Initialize() error {
+	ctx, ctxCancel := context.WithCancel(context.Background())
+
+	s.ctx = ctx
+	s.ctxCancel = ctxCancel
+	s.sessions = make(map[*session]struct{})
+	s.chNewSession = make(chan newSessionReq)
+	s.chCloseSession = make(chan *session)
+	s.chAPISessionsList = make(chan serverAPISessionsListReq)
+	s.chAPISessionsGet = make(chan serverAPISessionsGetReq)
+	s.chAPISessionsKick = make(chan serverAPISessionsKickReq)
+	s.done = make(chan struct{})
+
 	s.httpServer = &httpServer{
-		https2Address:     s.HTTPS2Address,
-		https3Address:     s.HTTPS3Address,
+		http2Address:      s.HTTP2Address,
+		http3Address:      s.HTTP3Address,
 		serverKey:         s.ServerKey,
 		serverCert:        s.ServerCert,
 		allowOrigins:      s.AllowOrigins,
@@ -121,19 +136,29 @@ func (s *Server) Initialize() error {
 	}
 	err := s.httpServer.initialize()
 	if err != nil {
+		ctxCancel()
 		return err
 	}
 
-	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
-	s.sessions = make(map[*session]struct{})
-	s.chNewSession = make(chan newSessionReq)
-	s.chCloseSession = make(chan *session)
-	s.chAPISessionsList = make(chan serverAPISessionsListReq)
-	s.chAPISessionsGet = make(chan serverAPISessionsGetReq)
-	s.chAPISessionsKick = make(chan serverAPISessionsKickReq)
-	s.done = make(chan struct{})
+	s.nativeListener = &nativeListener{
+		address:           s.QUICAddress,
+		serverKey:         s.ServerKey,
+		serverCert:        s.ServerCert,
+		udpReadBufferSize: s.UDPReadBufferSize,
+		parent:            s,
+	}
+	err = s.nativeListener.initialize()
+	if err != nil {
+		s.httpServer.close()
+		ctxCancel()
+		return err
+	}
 
-	s.Log(logger.Info, "started with listeners on %s (TCP/HTTPS2), %s (UDP/HTTP3)", s.HTTPS2Address, s.HTTPS3Address)
+	s.Log(logger.Info,
+		"started with listeners on %s (TCP/HTTP2), %s (UDP/HTTP3), %s (UDP/QUIC)",
+		s.HTTP2Address,
+		s.HTTP3Address,
+		s.QUICAddress)
 
 	go s.run()
 
@@ -171,11 +196,13 @@ outer:
 		select {
 		case req := <-s.chNewSession:
 			sx := &session{
-				wt:          req.wt,
+				conn:        req.conn,
 				wg:          &wg,
 				pathName:    req.pathName,
 				query:       req.query,
 				userAgent:   req.userAgent,
+				transport:   req.conn.Transport(),
+				version:     req.version,
 				pathManager: s.PathManager,
 				parent:      s,
 			}
@@ -230,9 +257,13 @@ outer:
 		}
 	}
 
-	// close sessions before closing UDP packet listener
+	// close sessions before closing packet listeners
 	for sx := range s.sessions {
 		sx.Close()
+	}
+
+	if s.nativeListener != nil {
+		s.nativeListener.close()
 	}
 
 	s.httpServer.close()

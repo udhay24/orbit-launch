@@ -178,16 +178,11 @@ func (c *conn) runRead() error {
 				User: query.Get("user"),
 				Pass: query.Get("pass"),
 			},
-			IP: c.ip(),
+			IP:                   c.ip(),
+			EnableAskCredentials: false,
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
-			// wait some seconds to delay brute force attacks
-			<-time.After(auth.PauseAfterError)
-			return terr
-		}
 		return err
 	}
 
@@ -202,7 +197,14 @@ func (c *conn) runRead() error {
 
 	r := &stream.Reader{Parent: c}
 
-	err = rtmp.FromStream(res.Stream.Desc, r, c.rconn, c.nconn, time.Duration(c.writeTimeout))
+	err = rtmp.FromStream(
+		res.Stream.OrigDesc,
+		res.Stream.OutDescCopy(),
+		r,
+		c.rconn,
+		c.nconn,
+		time.Duration(c.writeTimeout),
+		c.rconn.FourCcList)
 	if err != nil {
 		return err
 	}
@@ -278,16 +280,11 @@ func (c *conn) runPublish() error {
 				User: query.Get("user"),
 				Pass: query.Get("pass"),
 			},
-			IP: c.ip(),
+			IP:                   c.ip(),
+			EnableAskCredentials: false,
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
-			// wait some seconds to delay brute force attacks
-			<-time.After(auth.PauseAfterError)
-			return terr
-		}
 		return err
 	}
 

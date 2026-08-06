@@ -33,7 +33,8 @@ import (
 type bindingRequest struct {
 	timestamp       time.Time
 	transactionID   [stun.TransactionIDSize]byte
-	destination     net.Addr
+	destination     netip.AddrPort
+	networkType     NetworkType // Transport the request was sent over; destination alone omits it.
 	isUseCandidate  bool
 	nominationValue *uint32 // Tracks nomination value for renomination requests
 }
@@ -41,6 +42,9 @@ type bindingRequest struct {
 // Agent represents the ICE agent.
 type Agent struct {
 	loop *taskloop.Loop
+
+	startedCandidatesMu sync.Mutex
+	startedCandidates   map[*candidateBase]struct{}
 
 	// constructed is set to true after the agent is fully initialized.
 	// Options can check this flag to reject updates that are only valid during construction.
@@ -353,6 +357,7 @@ func createAgentBase(config *AgentConfig) (*Agent, error) {
 		lite:                            config.Lite,
 		gatheringState:                  GatheringStateNew,
 		connectionState:                 ConnectionStateNew,
+		startedCandidates:               make(map[*candidateBase]struct{}),
 		localCandidates:                 make(map[NetworkType][]Candidate),
 		remoteCandidates:                make(map[NetworkType][]Candidate),
 		pairsByID:                       make(map[uint64]*CandidatePair),
@@ -1163,8 +1168,8 @@ func replacePairRemote(pair *CandidatePair, remote Candidate) *CandidatePair {
 	atomic.StoreUint64(&replacement.responsesReceived, atomic.LoadUint64(&pair.responsesReceived))
 	atomic.StoreUint64(&replacement.responsesSent, atomic.LoadUint64(&pair.responsesSent))
 
-	copyAtomicValue(&replacement.lastPacketSentAt, &pair.lastPacketSentAt)
-	copyAtomicValue(&replacement.lastPacketReceivedAt, &pair.lastPacketReceivedAt)
+	replacement.lastPacketSentAt.Store(pair.lastPacketSentAt.Load())
+	replacement.lastPacketReceivedAt.Store(pair.lastPacketReceivedAt.Load())
 	copyAtomicValue(&replacement.firstRequestSentAt, &pair.firstRequestSentAt)
 	copyAtomicValue(&replacement.lastRequestSentAt, &pair.lastRequestSentAt)
 	copyAtomicValue(&replacement.firstResponseReceivedAt, &pair.firstResponseReceivedAt)
@@ -1485,7 +1490,7 @@ func (a *Agent) GracefulClose() error {
 
 func (a *Agent) close(graceful bool) error {
 	// the loop is safe to wait on no matter what
-	a.loop.Close()
+	a.loop.CloseWithPreStop(a.abortStartedCandidateIO)
 
 	// but we are in less control of the notifiers, so we will
 	// pass through `graceful`.
@@ -1494,6 +1499,36 @@ func (a *Agent) close(graceful bool) error {
 	a.selectedCandidatePairNotifier.Close(graceful)
 
 	return nil
+}
+
+func (a *Agent) registerStartedCandidate(c *candidateBase) {
+	a.startedCandidatesMu.Lock()
+	defer a.startedCandidatesMu.Unlock()
+
+	if a.startedCandidates == nil {
+		a.startedCandidates = make(map[*candidateBase]struct{})
+	}
+	a.startedCandidates[c] = struct{}{}
+}
+
+func (a *Agent) unregisterStartedCandidate(c *candidateBase) {
+	a.startedCandidatesMu.Lock()
+	defer a.startedCandidatesMu.Unlock()
+
+	delete(a.startedCandidates, c)
+}
+
+func (a *Agent) abortStartedCandidateIO() {
+	a.startedCandidatesMu.Lock()
+	candidates := make([]*candidateBase, 0, len(a.startedCandidates))
+	for c := range a.startedCandidates {
+		candidates = append(candidates, c)
+	}
+	a.startedCandidatesMu.Unlock()
+
+	for _, c := range candidates {
+		_ = c.abortIO()
+	}
 }
 
 // Remove all candidates. This closes any listening sockets
@@ -1519,17 +1554,10 @@ func (a *Agent) deleteAllCandidates() {
 	}
 }
 
-func (a *Agent) findRemoteCandidate(networkType NetworkType, addr net.Addr) Candidate {
-	ip, port, _, err := parseAddr(addr)
-	if err != nil {
-		a.log.Warnf("Failed to parse address: %s; error: %s", addr, err)
-
-		return nil
-	}
-
+func (a *Agent) findRemoteCandidate(networkType NetworkType, addr netip.AddrPort) Candidate {
 	set := a.remoteCandidates[networkType]
 	for _, c := range set {
-		if c.Address() == ip.String() && c.Port() == port {
+		if addrPortEqual(c.addrPort(), addr) {
 			return c
 		}
 	}
@@ -1551,7 +1579,8 @@ func (a *Agent) sendBindingRequest(msg *stun.Message, local, remote Candidate) {
 	a.pendingBindingRequests = append(a.pendingBindingRequests, bindingRequest{
 		timestamp:       time.Now(),
 		transactionID:   msg.TransactionID,
-		destination:     remote.addr(),
+		destination:     remote.addrPort(),
+		networkType:     remote.NetworkType(),
 		isUseCandidate:  msg.Contains(stun.AttrUseCandidate),
 		nominationValue: nominationValue,
 	})
@@ -1667,7 +1696,7 @@ func (a *Agent) handleRoleConflict(msg *stun.Message, local, remote Candidate, r
 }
 
 // handleInbound processes STUN traffic from a remote candidate.
-func (a *Agent) handleInbound(msg *stun.Message, local Candidate, remote net.Addr) {
+func (a *Agent) handleInbound(msg *stun.Message, local Candidate, remote netip.AddrPort) {
 	if msg == nil || local == nil {
 		return
 	}
@@ -1706,7 +1735,7 @@ func canHandleInbound(msg *stun.Message) bool {
 }
 
 func (a *Agent) handleInboundResponse(
-	remoteCandidate, local Candidate, remote net.Addr, msg *stun.Message,
+	remoteCandidate, local Candidate, remote netip.AddrPort, msg *stun.Message,
 ) bool {
 	if err := stun.MessageIntegrity([]byte(a.remotePwd)).Check(msg); err != nil {
 		a.log.Warnf("Discard success response with broken integrity from (%s), %v", remote, err)
@@ -1726,7 +1755,7 @@ func (a *Agent) handleInboundResponse(
 }
 
 func (a *Agent) handleInboundRequest(
-	remoteCandidate, local Candidate, remote net.Addr, msg *stun.Message,
+	remoteCandidate, local Candidate, remote netip.AddrPort, msg *stun.Message,
 ) (remoteCand Candidate, ok bool) {
 	a.log.Tracef(
 		"Inbound STUN (Request) from %s to %s, useCandidate: %v",
@@ -1746,17 +1775,20 @@ func (a *Agent) handleInboundRequest(
 	}
 
 	if remoteCandidate == nil {
-		ip, port, networkType, err := parseAddr(remote)
+		// Use the local candidate's transport to determine the network
+		// type. Peer-reflexive candidates by definition are reached
+		// over the same transport as the local candidate.
+		networkType, err := determineNetworkType(local.NetworkType().NetworkShort(), remote.Addr())
 		if err != nil {
-			a.log.Errorf("Failed to create parse remote net.Addr when creating remote prflx candidate: %s", err)
+			a.log.Errorf("Failed to determine network type for remote prflx candidate: %s", err)
 
 			return nil, false
 		}
 
 		prflxCandidateConfig := CandidatePeerReflexiveConfig{
 			Network:   networkType.String(),
-			Address:   ip.String(),
-			Port:      port,
+			Address:   canonicalAddr(remote.Addr()).String(),
+			Port:      int(remote.Port()),
 			Component: local.Component(),
 			RelAddr:   "",
 			RelPort:   0,
@@ -1800,7 +1832,7 @@ func (a *Agent) handleInboundRequest(
 
 // validateNonSTUNTraffic processes non STUN traffic from a remote candidate,
 // and returns true if it is an actual remote candidate.
-func (a *Agent) validateNonSTUNTraffic(local Candidate, remote net.Addr) (Candidate, bool) {
+func (a *Agent) validateNonSTUNTraffic(local Candidate, remote netip.AddrPort) (Candidate, bool) {
 	var remoteCandidate Candidate
 	if err := a.loop.Run(local.context(), func(context.Context) {
 		remoteCandidate = a.findRemoteCandidate(local.NetworkType(), remote)
@@ -1919,9 +1951,10 @@ func (a *Agent) Restart(ufrag, pwd string) error { //nolint:cyclop
 
 	var err error
 	if runErr := a.loop.Run(a.loop, func(_ context.Context) {
-		if a.gatheringState == GatheringStateGathering {
-			a.gatherCandidateCancel()
-		}
+		// Cancel unconditionally: a gather goroutine that has started but not yet
+		// marked Gathering would otherwise outlive the restart and later
+		// overwrite the fresh New state.
+		a.gatherCandidateCancel()
 
 		// Clear all agent needed to take back to fresh state
 		a.removeUfragFromMux()
@@ -1949,22 +1982,32 @@ func (a *Agent) Restart(ufrag, pwd string) error { //nolint:cyclop
 	return err
 }
 
-func (a *Agent) setGatheringState(newState GatheringState) error {
+// setGatheringState applies newState and reports whether it was applied. A write
+// from a cycle canceled by Restart is dropped and reported false, so it can't
+// clobber the fresh New state and wedge the next gather.
+func (a *Agent) setGatheringState(gatherCtx context.Context, newState GatheringState) (bool, error) {
 	done := make(chan struct{})
-	if err := a.loop.Run(a.loop, func(context.Context) {
+	applied := false
+	if err := a.loop.Run(a.loop, func(context.Context) { //nolint:contextcheck
+		defer close(done)
+
+		if gatherCtx.Err() != nil {
+			return
+		}
+
 		if a.gatheringState != newState && newState == GatheringStateComplete {
 			a.candidateNotifier.EnqueueCandidate(nil)
 		}
 
 		a.gatheringState = newState
-		close(done)
+		applied = true
 	}); err != nil {
-		return err
+		return false, err
 	}
 
 	<-done
 
-	return nil
+	return applied, nil
 }
 
 func (a *Agent) needsToCheckPriorityOnNominated() bool {

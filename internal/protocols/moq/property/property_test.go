@@ -1,15 +1,17 @@
-package property
+package property_test
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/property"
 )
 
 var cases = []struct {
 	name string
 	enc  []byte
-	dec  Properties
+	dec  property.Properties
 }{
 	{
 		name: "no properties",
@@ -22,8 +24,8 @@ var cases = []struct {
 			0x06,       // type delta = 6 (Timestamp)
 			0x83, 0xe8, // value = 1000
 		},
-		dec: Properties{
-			new(Timestamp(1000)),
+		dec: property.Properties{
+			new(property.Timestamp(1000)),
 		},
 	},
 }
@@ -31,7 +33,7 @@ var cases = []struct {
 func TestUnmarshal(t *testing.T) {
 	for _, ca := range cases {
 		t.Run(ca.name, func(t *testing.T) {
-			var props Properties
+			var props property.Properties
 			err := props.Unmarshal(ca.enc)
 			require.NoError(t, err)
 			require.Equal(t, ca.dec, props)
@@ -47,4 +49,21 @@ func TestMarshal(t *testing.T) {
 			require.Equal(t, ca.enc, buf)
 		})
 	}
+}
+
+func FuzzUnmarshal(f *testing.F) {
+	for _, ca := range cases {
+		f.Add(ca.enc)
+	}
+
+	f.Fuzz(func(_ *testing.T, buf []byte) {
+		var props property.Properties
+		err := props.Unmarshal(buf)
+		if err != nil {
+			return
+		}
+
+		buf = make([]byte, props.MarshalSize())
+		props.MarshalTo(buf)
+	})
 }

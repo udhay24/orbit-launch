@@ -2,7 +2,6 @@
 
 [![Test](https://github.com/bluenviron/gortmplib/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bluenviron/gortmplib/actions/workflows/test.yml?query=branch%3Amain)
 [![Lint](https://github.com/bluenviron/gortmplib/actions/workflows/lint.yml/badge.svg?branch=main)](https://github.com/bluenviron/gortmplib/actions/workflows/lint.yml?query=branch%3Amain)
-[![Go Report Card](https://goreportcard.com/badge/github.com/bluenviron/gortmplib)](https://goreportcard.com/report/github.com/bluenviron/gortmplib)
 [![CodeCov](https://codecov.io/gh/bluenviron/gortmplib/branch/main/graph/badge.svg)](https://app.codecov.io/gh/bluenviron/gortmplib/tree/main)
 [![PkgGoDev](https://pkg.go.dev/badge/github.com/bluenviron/gortmplib)](https://pkg.go.dev/github.com/bluenviron/gortmplib#pkg-index)
 
@@ -14,14 +13,12 @@ Go &ge; 1.25 is required.
 
 Features:
 
-* Read and write multiple video and audio tracks
-* Read and write tracks encoded with AV1, VP9, H265, H264, Opus, FLAC, MPEG-4 Audio (AAC), MPEG-1/2 Audio (MP3), AC-3, G711 (PCMA, PCMU), LPCM
+* Play and publish multiple video and audio tracks
+* Play and publish tracks encoded with AV1, VP9, H265, H264, Opus, FLAC, MPEG-4 Audio (AAC), MPEG-1/2 Audio (MP3), AC-3, G711 (PCMA, PCMU), LPCM
 * Support most Enhanced RTMP features
 * Support TLS encryption (RTMPS)
 * Support Diffie-hellman based encryption (RTMPE)
 * Support encoding and decoding data with the AMF0 format
-
-**WARNING**: API is not stable and might be subjected to breaking changes.
 
 ## Table of contents
 
@@ -32,9 +29,10 @@ Features:
 
 ## Examples
 
-* [client-read](examples/client-read/main.go)
+* [client-play](examples/client-play/main.go)
 * [client-publish-h264](examples/client-publish-h264/main.go)
 * [client-publish-mpeg4audio](examples/client-publish-mpeg4audio/main.go)
+* [client-republish](examples/client-republish/main.go)
 * [server](examples/server/main.go)
 
 ## API Documentation

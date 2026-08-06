@@ -1417,7 +1417,7 @@ func (pc *PeerConnection) startReceiver(incoming trackDetails, receiver *RTPRece
 		}
 		go func(track *TrackRemote) {
 			b := make([]byte, pc.api.settingEngine.getReceiveMTU())
-			n, _, err := track.peek(b)
+			n, err := track.peek(b)
 			if err != nil {
 				pc.log.Warnf("Could not determine PayloadType for SSRC %d (%s)", track.SSRC(), err)
 
@@ -1945,7 +1945,16 @@ func (pc *PeerConnection) handleIncomingSSRC(rtpStream *srtp.ReadStreamSRTP, ssr
 			}
 
 			if rsid != "" {
-				return receiver.receiveForRtx(SSRC(0), rsid, streamInfo, readStream, interceptor, rtcpReadStream, rtcpInterceptor)
+				return receiver.receiveForRtx(
+					SSRC(0),
+					rsid,
+					streamInfo,
+					readStream,
+					interceptor,
+					result.startRTPReaderImmediately,
+					rtcpReadStream,
+					rtcpInterceptor,
+				)
 			}
 
 			track, err := receiver.receiveForRid(
@@ -1954,6 +1963,7 @@ func (pc *PeerConnection) handleIncomingSSRC(rtpStream *srtp.ReadStreamSRTP, ssr
 				streamInfo,
 				readStream,
 				interceptor,
+				result.startRTPReaderImmediately,
 				rtcpReadStream,
 				rtcpInterceptor,
 				peekedPackets,
@@ -2841,9 +2851,12 @@ func (pc *PeerConnection) startRTP(
 	}
 
 	pc.startRTPReceivers(remoteDesc, currentTransceivers)
-	if d := haveDataChannel(remoteDesc); d != nil && d.MediaName.Port.Value != 0 {
-		remoteSctpInit, _ := getSctpInit(d)
-		pc.startSCTP(getMaxMessageSize(d), remoteSctpInit)
+	if d := haveDataChannel(remoteDesc); d != nil {
+		// RFC 8843 Section 6 permits bundle-only media sections to use port zero.
+		if _, bundleOnly := d.Attribute("bundle-only"); d.MediaName.Port.Value != 0 || bundleOnly {
+			remoteSctpInit, _ := getSctpInit(d)
+			pc.startSCTP(getMaxMessageSize(d), remoteSctpInit)
+		}
 	}
 }
 
@@ -3093,6 +3106,9 @@ func (pc *PeerConnection) generateMatchedSDP(
 			if detectedPlanB {
 				mediaSections = append(mediaSections, mediaSection{id: "data", data: true})
 			} else {
+				if localSctpInit == nil && pc.api.settingEngine.sctp.enableSnap {
+					localSctpInit = pc.sctpTransport.GetSctpInit()
+				}
 				mediaSections = append(mediaSections, mediaSection{
 					id:       strconv.Itoa(len(mediaSections)),
 					data:     true,

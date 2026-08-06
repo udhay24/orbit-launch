@@ -1,16 +1,18 @@
-package varint
+package varint_test
 
 import (
 	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/varint"
 )
 
 var cases = []struct {
 	name string
 	enc  []byte
-	dec  Varint
+	dec  varint.Varint
 }{
 	{
 		name: "1 byte",
@@ -62,7 +64,7 @@ var cases = []struct {
 func TestRead(t *testing.T) {
 	for _, ca := range cases {
 		t.Run(ca.name, func(t *testing.T) {
-			var v Varint
+			var v varint.Varint
 			err := v.Read(bytes.NewReader(ca.enc))
 			require.NoError(t, err)
 			require.Equal(t, ca.dec, v)
@@ -73,7 +75,7 @@ func TestRead(t *testing.T) {
 func TestUnmarshal(t *testing.T) {
 	for _, ca := range cases {
 		t.Run(ca.name, func(t *testing.T) {
-			var v Varint
+			var v varint.Varint
 			n, err := v.Unmarshal(ca.enc)
 			require.NoError(t, err)
 			require.Equal(t, len(ca.enc), n)
@@ -88,4 +90,36 @@ func TestMarshal(t *testing.T) {
 			require.Equal(t, ca.enc, ca.dec.Marshal())
 		})
 	}
+}
+
+func FuzzUnmarshal(f *testing.F) {
+	for _, ca := range cases {
+		f.Add(ca.enc)
+	}
+
+	f.Fuzz(func(_ *testing.T, buf []byte) {
+		var v varint.Varint
+		_, err := v.Unmarshal(buf)
+		if err != nil {
+			return
+		}
+
+		v.Marshal()
+	})
+}
+
+func FuzzRead(f *testing.F) {
+	for _, ca := range cases {
+		f.Add(ca.enc)
+	}
+
+	f.Fuzz(func(_ *testing.T, buf []byte) {
+		var v varint.Varint
+		err := v.Read(bytes.NewReader(buf))
+		if err != nil {
+			return
+		}
+
+		v.Marshal()
+	})
 }

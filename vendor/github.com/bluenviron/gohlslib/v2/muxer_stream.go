@@ -14,16 +14,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bluenviron/gohlslib/v2/pkg/codecparams"
-	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
-	"github.com/bluenviron/gohlslib/v2/pkg/playlist"
-	"github.com/bluenviron/gohlslib/v2/pkg/storage"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4/seekablebuffer"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+
+	"github.com/bluenviron/gohlslib/v2/pkg/codecparams"
+	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
+	"github.com/bluenviron/gohlslib/v2/pkg/playlist"
+	"github.com/bluenviron/gohlslib/v2/pkg/storage"
 )
 
 func mediaPlaylistPath(streamID string) string {
@@ -587,7 +588,7 @@ func (s *muxerStream) generateAndCacheInitFile() error {
 	for _, track := range s.tracks {
 		init.Tracks = append(init.Tracks, &fmp4.InitTrack{
 			ID:        trackID,
-			TimeScale: fmp4TimeScale(track.Codec),
+			TimeScale: uint32(track.ClockRate),
 			Codec:     toFMP4(track.Codec),
 		})
 		trackID++
@@ -730,6 +731,7 @@ func (s *muxerStream) rotateParts(
 
 				for {
 					if s.closed {
+						s.mutex.Unlock()
 						w.WriteHeader(http.StatusInternalServerError)
 						return
 					}

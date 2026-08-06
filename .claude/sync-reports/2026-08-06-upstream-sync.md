@@ -112,6 +112,48 @@ Recipe (per `project-fork-delta` memory): rebuild `gortmplib-patched/` from pris
 `git merge-file -p --diff3 <patched> <v0.4.0> <v1.0.0>`, and copy the other 4 patched files across
 unchanged. Then re-run the chaos suite — non-negotiable after a gortmplib bump.
 
+## Outcome — COMPLETED 2026-08-06
+
+Merged as `1f837a82` on branch `sync/upstream-2026-08-06` (base `718d3b9d`). **Not pushed.**
+
+5 conflicts, all resolved:
+| File | Resolution |
+|---|---|
+| `internal/core/path_manager.go` | Union — kept `maxPublishers`/`publisherHysteresis`/`chSetStreamRegistry`, took upstream's `udpMaxPayloadSize` + `chAPIForwardDest{List,Get}` |
+| `internal/core/core.go` | Union — same shape, struct-literal fields |
+| `go.mod` | Took upstream versions; kept `miniredis`, `go-redis`, and the `gortmplib => ./gortmplib-patched` replace. **Dropped the `pion/ice` replace** — that was upstream's own, removed in `de7b4d5a` ("restore pion/ice"); added upstream's new `gosrt` replace |
+| `go.sum` | Regenerated via `go mod tidy`, then `go mod vendor` (fork vendors; upstream does not) |
+| `mediamtx.yml` | 4 regions — see below |
+
+`mediamtx.yml` decisions:
+- Kept fork's stream-registry + publisher-limit block **and** added upstream's MoQ block.
+- **Set `moq: false`.** Upstream's sample ships `moq: true`, which would open `:8892` and `:8893`
+  on production. Production runs no MoQ today; enabling a brand-new QUIC subsystem (20 commits of
+  panics/OOM/races in this batch alone) should be an explicit opt-in, not a side effect of a sync.
+- Took upstream's unified `rpiCameraH264Profile` / `rpiCameraH264Level` (we don't use rpicamera).
+- Renamed our two hooks to the new keys, commands preserved verbatim:
+  `runOnAvailable: sh -c 'echo connect:$MTX_PATH | nc -q0 localhost 50052'`
+  `runOnUnavailable: sh -c 'echo disconnect:$MTX_PATH | nc -q0 localhost 50052'`
+
+gortmplib v0.4.0 → v1.0.0: `git merge-file --diff3` merged `server_conn.go` with **zero conflicts**;
+result is pristine v1.0.0 + exactly our 3 hunks (28 added lines, 1 removed). Other 4 files copied
+verbatim. Rebuilt tree differs from pristine v1.0.0 in exactly the same 5 files as before.
+
+### Verification
+- `go build`, `go vet`, `gofmt -l internal/` — clean
+- Fork-delta check — 23/23 sentinels intact
+- **Chaos suite 49/49, resilience 100/100**
+- `scripts/pre-merge-check.sh` Layers 1-4 — **PASSED**, exit 0
+
+### Pre-existing failures, ruled out as regressions
+Confirmed by running the same tests on pristine upstream `main` with no fork code:
+- `TestPathMaxReaders`, `TestPathResolveSource` — RTSP DESCRIBE 404, **fails identically on upstream `main`**
+- `TestAPIProtocolListGet/webrtc` — flaky under parallel load, passes 3/3 isolated on both
+- `staticsources/{rtp,mpegts}` `TestSourceUDP/multicast_with_interface` — 10-min hang; fork does not
+  touch `internal/staticsources/`
+
+All macOS-environment issues. Layer 2b (`--full`) cannot pass on this machine; use Linux CI.
+
 ## Recommendation
 
 **MERGE (review).** No blocking issues. Order of operations:

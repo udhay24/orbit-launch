@@ -79,6 +79,10 @@ type pathSetStreamRegistryReq struct {
 	res chan pathSetStreamRegistryRes
 }
 
+type pathManagerPublishAllowlist interface {
+	Check(pathName string) error
+}
+
 type pathManagerAuthManager interface {
 	Authenticate(req *auth.Request) (*auth.Result, *auth.Error)
 }
@@ -105,6 +109,7 @@ type pathManager struct {
 	parent              pathManagerParent
 	maxPublishers       int
 	publisherHysteresis int
+	publishAllowlist    pathManagerPublishAllowlist
 
 	ctx               context.Context
 	ctxCancel         func()
@@ -642,8 +647,29 @@ func (pm *pathManager) closePathIfIdle(pa *path) {
 	}
 }
 
+// checkPublishAllowlist runs outside of the run() loop since it performs network I/O.
+// Requests with SkipAuth were already checked by FindPathConf.
+func (pm *pathManager) checkPublishAllowlist(author logger.Writer, req *defs.PathAccessRequest) error {
+	if pm.publishAllowlist == nil || !req.Publish || req.SkipAuth {
+		return nil
+	}
+
+	err := pm.publishAllowlist.Check(req.Name)
+	if err != nil {
+		terr := &auth.Error{Wrapped: err}
+		auth.LogAndDelayError(author, terr)
+		return terr
+	}
+
+	return nil
+}
+
 // FindPathConf is called by a reader or publisher.
 func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+
 	req.Res = make(chan defs.PathFindPathConfRes)
 	select {
 	case pm.chFindPathConf <- req:
@@ -690,6 +716,10 @@ func (pm *pathManager) Describe(req defs.PathDescribeReq) (*defs.PathDescribeRes
 
 // AddPublisher is called by a publisher.
 func (pm *pathManager) AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+
 	req.Res = make(chan defs.PathAddPublisherRes)
 	select {
 	case pm.chAddPublisher <- req:

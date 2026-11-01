@@ -41,10 +41,10 @@ jobs:
         # Mirror upstream's `make test-nodocker`: run non-core and core as
         # separate invocations so core's integration servers don't collide on
         # ports (e.g. :8888) with the per-package server tests run in parallel.
-        # Skip TestSampleConfFile: it asserts the shipped mediamtx.yml equals
+        # Skip TestDefaultConfFile: it asserts the shipped mediamtx.yml equals
         # upstream defaults, but the fork uses it as a real deployment config.
         run: |
-          go test -race -skip 'TestSampleConfFile' $(go list ./internal/... | grep -v /core)
+          go test -race -skip 'TestDefaultConfFile' $(go list ./internal/... | grep -v /core)
           go test -race ./internal/core
 
   chaos:

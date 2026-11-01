@@ -419,6 +419,15 @@ type Conf struct {
 	StreamRegistryServerID string   `json:"streamRegistryServerID"`
 	StreamRegistryTTL      Duration `json:"streamRegistryTTL"`
 
+	// Publish allowlist
+	PublishAllowlist           bool   `json:"publishAllowlist"`
+	PublishAllowlistAddress    string `json:"publishAllowlistAddress"`
+	PublishAllowlistPassword   string `json:"publishAllowlistPassword"`
+	PublishAllowlistDB         int    `json:"publishAllowlistDB"`
+	PublishAllowlistKey        string `json:"publishAllowlistKey"`
+	PublishAllowlistPathPrefix string `json:"publishAllowlistPathPrefix"`
+	PublishAllowlistFailOpen   bool   `json:"publishAllowlistFailOpen"`
+
 	// Publisher limits
 	MaxPublishers       int `json:"maxPublishers"`
 	PublisherHysteresis int `json:"publisherHysteresis"`
@@ -556,6 +565,10 @@ func (conf *Conf) setDefaults() {
 	// Stream registry
 	conf.StreamRegistryAddress = "localhost:6379"
 	conf.StreamRegistryTTL = 60 * Duration(time.Second)
+	conf.PublishAllowlistAddress = "localhost:6379"
+	conf.PublishAllowlistKey = "camera:stream_ids"
+	conf.PublishAllowlistPathPrefix = "live/"
+	conf.PublishAllowlistFailOpen = true
 
 	// Publisher limits
 	conf.MaxPublishers = 2000
@@ -1231,7 +1244,17 @@ func (conf *Conf) PatchGlobal(optional *OptionalGlobal) error {
 		}
 	}
 
+	streamRegistryPassword := conf.StreamRegistryPassword
+	publishAllowlistPassword := conf.PublishAllowlistPassword
+
 	copyStructFields(conf, optional.Values)
+
+	if conf.StreamRegistryPassword == redactedCredential {
+		conf.StreamRegistryPassword = streamRegistryPassword
+	}
+	if conf.PublishAllowlistPassword == redactedCredential {
+		conf.PublishAllowlistPassword = publishAllowlistPassword
+	}
 
 	return conf.validate(nil)
 }

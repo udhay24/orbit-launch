@@ -43,9 +43,9 @@ go test -race -run TestPathManagerPublisherLimit ./internal/core/
 if [ "$RUN_FULL" -eq 1 ]; then
   step "Layer 2b — full upstream test suite"
   # Mirror upstream's core/non-core split so integration servers don't collide
-  # on ports. Skip TestSampleConfFile — the fork's mediamtx.yml is a deployment
+  # on ports. Skip TestDefaultConfFile — the fork's mediamtx.yml is a deployment
   # config, not the upstream "equals defaults" sample it asserts against.
-  go test -skip 'TestSampleConfFile' $(go list ./internal/... | grep -v /core)
+  go test -skip 'TestDefaultConfFile' $(go list ./internal/... | grep -v /core)
   go test ./internal/core
 fi
 

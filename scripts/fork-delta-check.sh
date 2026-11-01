@@ -59,6 +59,11 @@ exists   internal/streamregistry/registry.go "streamregistry package present"
 contains internal/conf/conf.go "StreamRegistry"        "conf: StreamRegistry fields"
 contains mediamtx.yml          "streamRegistry"        "mediamtx.yml: streamRegistry key"
 
+echo "== publish allowlist =="
+exists   internal/publishallowlist/allowlist.go "publishallowlist package present"
+contains internal/core/path_manager.go "checkPublishAllowlist" "path_manager: publish allowlist hook"
+contains mediamtx.yml "publishAllowlist" "mediamtx.yml: publishAllowlist key"
+
 echo "== chaos suite present =="
 exists .ai/chaos_test.py "chaos suite present"
 

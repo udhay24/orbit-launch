@@ -12,6 +12,13 @@ func Redact(c *Conf) *Conf {
 		}
 	}
 
+	if c.StreamRegistryPassword != "" {
+		c.StreamRegistryPassword = redactedCredential
+	}
+	if c.PublishAllowlistPassword != "" {
+		c.PublishAllowlistPassword = redactedCredential
+	}
+
 	if c.PathDefaults.PublishPass != nil && *c.PathDefaults.PublishPass != "" {
 		*c.PathDefaults.PublishPass = Credential(redactedCredential)
 	}

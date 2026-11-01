@@ -137,7 +137,13 @@ authJWTJWKSFingerprint:
 authJWTClaimKey: mediamtx_permissions
 # Actions to exclude from JWT-based authentication.
 # Format is the same as the one of user permissions.
-authJWTExclude: []
+# Cameras cannot obtain JWTs: publishers are checked by publishAllowlist instead.
+# The control API, metrics and pprof stay reachable by the orchestrator.
+authJWTExclude:
+- action: publish
+- action: api
+- action: metrics
+- action: pprof
 # allow passing the JWT through query parameters of HTTP requests (i.e. ?jwt=JWT).
 # This is a security risk and will be disabled in the future.
 authJWTInHTTPQuery: true
@@ -443,8 +449,9 @@ srtAddress: :8890
 streamRegistry: true
 # Address of the Redis server.
 streamRegistryAddress: 143.110.182.161:6379
-# Password for the Redis server. Empty string means no authentication.
-streamRegistryPassword: "ece150735454f22037f7c248d453c511e8fabb2ee58bc79b"
+# Password for the Redis server. This file is published with every release, so never
+# set it here: provide it through the MTX_STREAMREGISTRYPASSWORD environment variable.
+streamRegistryPassword: ""
 # Redis database number.
 streamRegistryDB: 0
 # Unique identifier for this server instance. Empty uses the hostname.
@@ -457,6 +464,27 @@ streamRegistryTTL: 60s
 maxPublishers: 2000
 # Resume accepting publishers once active count drops below maxPublishers - publisherHysteresis.
 publisherHysteresis: 300
+
+###############################################
+# Global settings -> Publish allowlist
+
+# Reject publishers whose stream ID is not in a Redis set maintained by the backend.
+publishAllowlist: false
+# Address of the Redis server holding the set.
+publishAllowlistAddress: localhost:6379
+# Password of the Redis server. Never set it here: provide it through the
+# MTX_PUBLISHALLOWLISTPASSWORD environment variable.
+publishAllowlistPassword: ""
+# Redis database number.
+publishAllowlistDB: 0
+# Redis set containing the allowed stream IDs.
+publishAllowlistKey: camera:stream_ids
+# Publishers must use the path <publishAllowlistPathPrefix><stream ID>.
+publishAllowlistPathPrefix: live/
+# What to do when the set cannot be read, because Redis is unreachable or the backend
+# has not filled the set yet. "yes" lets publishers in and logs a warning, so a Redis
+# outage cannot block camera reconnections. "no" rejects them.
+publishAllowlistFailOpen: yes
 
 ###############################################
 # Global settings -> MoQ server

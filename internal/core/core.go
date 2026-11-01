@@ -31,6 +31,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
 	"github.com/bluenviron/mediamtx/internal/pprof"
+	"github.com/bluenviron/mediamtx/internal/publishallowlist"
 	"github.com/bluenviron/mediamtx/internal/recordcleaner"
 	"github.com/bluenviron/mediamtx/internal/rlimit"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
@@ -199,29 +200,30 @@ var cli struct {
 
 // Core is an instance of MediaMTX.
 type Core struct {
-	ctx             context.Context
-	ctxCancel       func()
-	confPath        string
-	supportsIPv6    bool
-	logger          *logger.Logger
-	externalCmdPool *externalcmd.Pool
-	authManager     *auth.Manager
-	metrics         *metrics.Metrics
-	pprof           *pprof.PPROF
-	recordCleaner   *recordcleaner.Cleaner
-	playbackServer  *playback.Server
-	pathManager     *pathManager
-	rtspServer      *rtsp.Server
-	rtspsServer     *rtsp.Server
-	rtmpServer      *rtmp.Server
-	rtmpsServer     *rtmp.Server
-	hlsServer       *hls.Server
-	webRTCServer    *webrtc.Server
-	srtServer       *srt.Server
-	streamRegistry  *streamregistry.Registry
-	moqServer       *moq.Server
-	api             *api.API
-	confWatcher     *confwatcher.ConfWatcher
+	ctx              context.Context
+	ctxCancel        func()
+	confPath         string
+	supportsIPv6     bool
+	logger           *logger.Logger
+	externalCmdPool  *externalcmd.Pool
+	authManager      *auth.Manager
+	metrics          *metrics.Metrics
+	pprof            *pprof.PPROF
+	recordCleaner    *recordcleaner.Cleaner
+	playbackServer   *playback.Server
+	pathManager      *pathManager
+	rtspServer       *rtsp.Server
+	rtspsServer      *rtsp.Server
+	rtmpServer       *rtmp.Server
+	rtmpsServer      *rtmp.Server
+	hlsServer        *hls.Server
+	webRTCServer     *webrtc.Server
+	srtServer        *srt.Server
+	streamRegistry   *streamregistry.Registry
+	publishAllowlist *publishallowlist.Allowlist
+	moqServer        *moq.Server
+	api              *api.API
+	confWatcher      *confwatcher.ConfWatcher
 
 	confMutex       sync.RWMutex
 	conf            *conf.Conf
@@ -716,8 +718,26 @@ func (p *Core) createResources(initial bool) error {
 		p.playbackServer = i
 	}
 
+	if p.conf.PublishAllowlist && p.publishAllowlist == nil {
+		p.publishAllowlist = &publishallowlist.Allowlist{
+			RedisAddress:  p.conf.PublishAllowlistAddress,
+			RedisPassword: p.conf.PublishAllowlistPassword,
+			RedisDB:       p.conf.PublishAllowlistDB,
+			Key:           p.conf.PublishAllowlistKey,
+			PathPrefix:    p.conf.PublishAllowlistPathPrefix,
+			FailOpen:      p.conf.PublishAllowlistFailOpen,
+			Parent:        p,
+		}
+		p.publishAllowlist.Initialize()
+	}
+
 	if p.pathManager == nil {
 		rtpMaxPayloadSize := getRTPMaxPayloadSize(p.conf.UDPMaxPayloadSize, p.conf.RTSPEncryption)
+
+		var allowlist pathManagerPublishAllowlist
+		if p.publishAllowlist != nil {
+			allowlist = p.publishAllowlist
+		}
 
 		p.pathManager = &pathManager{
 			logLevel:            p.conf.LogLevel,
@@ -736,6 +756,7 @@ func (p *Core) createResources(initial bool) error {
 			metrics:             p.metrics,
 			maxPublishers:       p.conf.MaxPublishers,
 			publisherHysteresis: p.conf.PublisherHysteresis,
+			publishAllowlist:    allowlist,
 			parent:              p,
 		}
 		p.pathManager.initialize()
@@ -1157,6 +1178,15 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		p.playbackServer.ReloadPathConfs(newConf.Paths)
 	}
 
+	closePublishAllowlist := newConf == nil ||
+		newConf.PublishAllowlist != p.conf.PublishAllowlist ||
+		newConf.PublishAllowlistAddress != p.conf.PublishAllowlistAddress ||
+		newConf.PublishAllowlistPassword != p.conf.PublishAllowlistPassword ||
+		newConf.PublishAllowlistDB != p.conf.PublishAllowlistDB ||
+		newConf.PublishAllowlistKey != p.conf.PublishAllowlistKey ||
+		newConf.PublishAllowlistPathPrefix != p.conf.PublishAllowlistPathPrefix ||
+		newConf.PublishAllowlistFailOpen != p.conf.PublishAllowlistFailOpen
+
 	closePathManager := newConf == nil ||
 		newConf.LogLevel != p.conf.LogLevel ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
@@ -1168,7 +1198,8 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		newConf.UDPMaxPayloadSize != p.conf.UDPMaxPayloadSize ||
 		newConf.RTSPEncryption != p.conf.RTSPEncryption ||
 		closeMetrics ||
-		closeAuthManager
+		closeAuthManager ||
+		closePublishAllowlist
 	if !closePathManager && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
 		p.pathManager.ReloadPathConfs(newConf.Paths)
 	}
@@ -1420,6 +1451,11 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 	if closePathManager && p.pathManager != nil {
 		p.pathManager.close()
 		p.pathManager = nil
+	}
+
+	if closePublishAllowlist && p.publishAllowlist != nil {
+		p.publishAllowlist.Close()
+		p.publishAllowlist = nil
 	}
 
 	if closePlaybackServer && p.playbackServer != nil {

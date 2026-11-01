@@ -78,7 +78,9 @@ func (a *Allowlist) Check(pathName string) error {
 
 func (a *Allowlist) onUnavailable(pathName string, err error) error {
 	if a.FailOpen {
-		a.Parent.Log(logger.Warn, "[publish allowlist] allowing '%s' without a check: %v", pathName, err)
+		// Error, because the shipped logLevel hides warnings and cameras would then be
+		// let in with no trace of it.
+		a.Parent.Log(logger.Error, "[publish allowlist] allowing '%s' without a check: %v", pathName, err)
 		return nil
 	}
 	return fmt.Errorf("publish allowlist unavailable: %w", err)

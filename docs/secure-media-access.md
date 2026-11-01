@@ -8,10 +8,10 @@ release asset. Templates: `orbit_play_state/scripts/systemd/`.
 
 | Goal | Where | Setting |
 |---|---|---|
-| Watching needs a token | MediaMTX | `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS`, `MTX_AUTHJWTISSUER`, `MTX_AUTHJWTAUDIENCE` |
+| Watching needs a token | MediaMTX | `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS` (the orchestrator's `/load-balancer/api/media-access/jwks`, because media servers take one URL and several applications run at once), `MTX_AUTHJWTISSUER`, `MTX_AUTHJWTAUDIENCE` |
 | Issue tokens | Orbit-NestJS `POST /api/v1/media-access/view-tokens` | `MEDIA_JWT_PRIVATE_KEY_BASE64`, `MEDIA_VIEW_TOKEN_TTL_SECONDS` (default 12h), `MEDIA_VIEW_TOKEN_MAX_TTL_SECONDS` (default 24h) |
 | Only registered cameras publish | MediaMTX reading Redis set `camera:stream_ids` | `MTX_PUBLISHALLOWLIST=yes`, `MTX_PUBLISHALLOWLISTADDRESS`, `MTX_PUBLISHALLOWLISTPASSWORD` |
-| Keep that set current | Orbit-NestJS | `ENABLE_REDIS_FILTER=true`, `RUN_CAMERA_STREAM_WATCHER=true` on one process |
+| Keep that set current | Orbit-NestJS | `ENABLE_REDIS_FILTER=true`, `CAMERA_ALLOWLIST_REDIS_URL` (the Redis the media servers read), `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
 | Browsers play only from the web app | MediaMTX | `MTX_HLSALLOWORIGINS`, `MTX_WEBRTCALLOWORIGINS` |
 
 Tokens above the default lifetime need a CEO or ADMINCONFIG login. A session ends when
@@ -44,8 +44,11 @@ The web app renews tokens by itself; share links just stop.
    `AdminApiKey` parameter, and Orbit-API-Manager, which still has to be changed to send
    one. Put all of them in `API_KEYS` last: until then nothing is enforced.
 9. Ship the CIS app update. Older versions keep working.
-10. Turn on `MTX_PUBLISHALLOWLIST=yes` on one server. Watch for
-   `is not registered` in the log against cameras you expect to be valid.
+10. Check `GET /api/v1/cameras/debug/redis-stream-id-count` matches your camera count,
+   then turn on `MTX_PUBLISHALLOWLIST=yes` and `MTX_LOGLEVEL=warn` on one server. Watch
+   for `is not registered` against cameras you expect to be valid, publish a made-up
+   stream ID to confirm it is refused, and look for `allowing ... without a check`,
+   which means the list is missing or Redis is unreachable and nothing is being checked.
 11. Turn on `MTX_AUTHMETHOD=jwt` and the allowed origins on one server, then the rest.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.

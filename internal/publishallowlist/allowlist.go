@@ -4,6 +4,7 @@ package publishallowlist
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,7 +23,9 @@ type Allowlist struct {
 	Key           string
 	PathPrefix    string
 	FailOpen      bool
-	Parent        logger.Writer
+	// ExemptKeys may read any camera, like the orchestrator's key.
+	ExemptKeys []string
+	Parent     logger.Writer
 
 	client *redis.Client
 }
@@ -74,6 +77,33 @@ func (a *Allowlist) Check(pathName string) error {
 	}
 
 	return fmt.Errorf("stream '%s' is not registered", streamID)
+}
+
+// CheckViewToken returns an error when a token signed with keyID cannot read pathName.
+// Each application has its own key, so a key stolen from one must not open another's
+// cameras. Like Check, it performs network I/O.
+func (a *Allowlist) CheckViewToken(keyID string, pathName string) error {
+	if slices.Contains(a.ExemptKeys, keyID) {
+		return nil
+	}
+
+	streamID, ok := strings.CutPrefix(pathName, a.PathPrefix)
+	if !ok || streamID == "" {
+		return fmt.Errorf("path '%s' is not a registered stream path", pathName)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
+	defer cancel()
+
+	owned, err := a.client.SIsMember(ctx, a.Key+":owned:"+keyID, streamID).Result()
+	if err != nil {
+		return a.onUnavailable(pathName, err)
+	}
+	if !owned {
+		return fmt.Errorf("key '%s' does not own stream '%s'", keyID, streamID)
+	}
+
+	return nil
 }
 
 func (a *Allowlist) onUnavailable(pathName string, err error) error {

@@ -25,7 +25,8 @@ import (
 
 const (
 	maxInboundBodySize = 128 * 1024
-	jwksRefreshPeriod  = 60 * 60 * time.Second
+	// applications add and remove their keys while running.
+	jwksRefreshPeriod = 60 * time.Second
 )
 
 func isHTTP(req *Request) bool {
@@ -62,6 +63,28 @@ func matchesPermission(perms []conf.AuthInternalUserPermission, req *Request) bo
 	}
 
 	return false
+}
+
+// TokenKeyID returns the key a request's token says it was signed with, or an empty
+// string. The token is not verified here: Authenticate() still does that, so a forged
+// key ID only gets the request rejected later.
+func TokenKeyID(req *Request, tokenInHTTPQuery bool) string {
+	if req.Credentials == nil {
+		return ""
+	}
+
+	token := getToken(tokenInHTTPQuery, req)
+	if token == "" {
+		return ""
+	}
+
+	parsed, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
+	if err != nil {
+		return ""
+	}
+
+	keyID, _ := parsed.Header["kid"].(string)
+	return keyID
 }
 
 func getToken(tokenInHTTPQuery bool, req *Request) string {
@@ -111,6 +134,7 @@ type Manager struct {
 	wrapTransport   func(http.RoundTripper) http.RoundTripper
 	mutex           sync.RWMutex
 	jwksLastRefresh time.Time
+	jwksRefreshing  bool
 	jwtKeyFunc      keyfunc.Keyfunc
 }
 
@@ -318,49 +342,77 @@ func (m *Manager) authenticateJWT(req *Request, token string) (*Result, error) {
 	return res, nil
 }
 
+// pullJWTJWKS only blocks on the first fetch. Authenticate() runs inside the path manager
+// loop, so later refreshes happen in the background, and a JWKS server that is slow or
+// down leaves the keys already fetched in place rather than stopping every reader.
 func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
-	now := time.Now()
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+
+	if m.jwtKeyFunc != nil {
+		if time.Since(m.jwksLastRefresh) >= jwksRefreshPeriod && !m.jwksRefreshing {
+			m.jwksRefreshing = true
+			go m.refreshJWKSInBackground()
+		}
+		return m.jwtKeyFunc.Keyfunc, nil
+	}
+
+	tmp, err := m.fetchJWKS()
+	if err != nil {
+		return nil, err
+	}
+
+	m.jwtKeyFunc = tmp
+	m.jwksLastRefresh = time.Now()
+
+	return m.jwtKeyFunc.Keyfunc, nil
+}
+
+func (m *Manager) refreshJWKSInBackground() {
+	tmp, err := m.fetchJWKS()
 
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if now.Sub(m.jwksLastRefresh) >= jwksRefreshPeriod {
-		tr := &http.Transport{
-			TLSClientConfig: tls.MakeConfig(m.JWTJWKSFingerprint),
-		}
-		defer tr.CloseIdleConnections()
+	m.jwksRefreshing = false
+	m.jwksLastRefresh = time.Now()
 
-		httpClient := &http.Client{
-			Timeout:   m.ReadTimeout,
-			Transport: m.wrapTransport(tr),
-		}
-
-		res, err := httpClient.Get(m.JWTJWKS)
-		if err != nil {
-			return nil, err
-		}
-		defer res.Body.Close()
-
-		if res.StatusCode < 200 || res.StatusCode > 299 {
-			return nil, fmt.Errorf("JWKS server replied with code %d", res.StatusCode)
-		}
-
-		var raw json.RawMessage
-		err = json.NewDecoder(&customLimitReader{res.Body, maxInboundBodySize}).Decode(&raw)
-		if err != nil {
-			return nil, err
-		}
-
-		tmp, err := keyfunc.NewJWKSetJSON(raw)
-		if err != nil {
-			return nil, err
-		}
-
-		m.jwtKeyFunc = tmp
-		m.jwksLastRefresh = now
+	if err != nil {
+		m.Parent.Log(logger.Error, "unable to refresh JWKS, keeping the last keys: %v", err)
+		return
 	}
 
-	return m.jwtKeyFunc.Keyfunc, nil
+	m.jwtKeyFunc = tmp
+}
+
+func (m *Manager) fetchJWKS() (keyfunc.Keyfunc, error) {
+	tr := &http.Transport{
+		TLSClientConfig: tls.MakeConfig(m.JWTJWKSFingerprint),
+	}
+	defer tr.CloseIdleConnections()
+
+	httpClient := &http.Client{
+		Timeout:   m.ReadTimeout,
+		Transport: m.wrapTransport(tr),
+	}
+
+	res, err := httpClient.Get(m.JWTJWKS)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode < 200 || res.StatusCode > 299 {
+		return nil, fmt.Errorf("JWKS server replied with code %d", res.StatusCode)
+	}
+
+	var raw json.RawMessage
+	err = json.NewDecoder(&customLimitReader{res.Body, maxInboundBodySize}).Decode(&raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return keyfunc.NewJWKSetJSON(raw)
 }
 
 // RefreshJWTJWKS refreshes the JWT JWKS.
@@ -368,5 +420,5 @@ func (m *Manager) RefreshJWTJWKS() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	m.jwksLastRefresh = time.Time{}
+	m.jwtKeyFunc = nil
 }

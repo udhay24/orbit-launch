@@ -746,6 +746,7 @@ func (p *Core) createResources(initial bool) error {
 			Key:           p.conf.PublishAllowlistKey,
 			PathPrefix:    p.conf.PublishAllowlistPathPrefix,
 			FailOpen:      p.conf.PublishAllowlistFailOpen,
+			ExemptKeys:    p.conf.ViewTokenOwnerExemptKeys,
 			Parent:        p,
 		}
 		p.publishAllowlist.Initialize()
@@ -777,6 +778,8 @@ func (p *Core) createResources(initial bool) error {
 			maxPublishers:       p.conf.MaxPublishers,
 			publisherHysteresis: p.conf.PublisherHysteresis,
 			publishAllowlist:    allowlist,
+			viewTokenOwnerCheck: p.conf.ViewTokenOwnerCheck,
+			jwtInHTTPQuery:      p.conf.AuthJWTInHTTPQuery != nil && *p.conf.AuthJWTInHTTPQuery,
 			parent:              p,
 		}
 		p.pathManager.initialize()
@@ -1214,7 +1217,9 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		newConf.PublishAllowlistDB != p.conf.PublishAllowlistDB ||
 		newConf.PublishAllowlistKey != p.conf.PublishAllowlistKey ||
 		newConf.PublishAllowlistPathPrefix != p.conf.PublishAllowlistPathPrefix ||
-		newConf.PublishAllowlistFailOpen != p.conf.PublishAllowlistFailOpen
+		newConf.PublishAllowlistFailOpen != p.conf.PublishAllowlistFailOpen ||
+		newConf.ViewTokenOwnerCheck != p.conf.ViewTokenOwnerCheck ||
+		!slices.Equal(newConf.ViewTokenOwnerExemptKeys, p.conf.ViewTokenOwnerExemptKeys)
 
 	closePathManager := newConf == nil ||
 		newConf.LogLevel != p.conf.LogLevel ||

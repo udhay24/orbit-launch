@@ -86,3 +86,23 @@ func TestCheckFailurePolicy(t *testing.T) {
 		require.NoError(t, newAllowlist(t, s.Addr(), "secret", false).Check("live/CAM1"))
 	})
 }
+
+func TestCheckViewToken(t *testing.T) {
+	s := miniredis.RunT(t)
+	_, err := s.SAdd("camera:stream_ids:owned:one", "CAM1")
+	require.NoError(t, err)
+	_, err = s.SAdd("camera:stream_ids:owned:two", "CAM2")
+	require.NoError(t, err)
+
+	a := newAllowlist(t, s.Addr(), "", false)
+	a.ExemptKeys = []string{"orchestrator"}
+
+	require.NoError(t, a.CheckViewToken("one", "live/CAM1"))
+	require.NoError(t, a.CheckViewToken("orchestrator", "live/CAM2"))
+	require.EqualError(t, a.CheckViewToken("one", "live/CAM2"), "key 'one' does not own stream 'CAM2'")
+	require.EqualError(t, a.CheckViewToken("unknown", "live/CAM1"), "key 'unknown' does not own stream 'CAM1'")
+	require.Error(t, a.CheckViewToken("one", "other/CAM1"))
+
+	s.Close()
+	require.ErrorContains(t, a.CheckViewToken("one", "live/CAM1"), "unavailable")
+}

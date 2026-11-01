@@ -432,6 +432,10 @@ type Conf struct {
 	DynamicAllowOrigins    bool   `json:"dynamicAllowOrigins"`
 	DynamicAllowOriginsKey string `json:"dynamicAllowOriginsKey"`
 
+	// View token owner check, using the publish allowlist
+	ViewTokenOwnerCheck      bool     `json:"viewTokenOwnerCheck"`
+	ViewTokenOwnerExemptKeys []string `json:"viewTokenOwnerExemptKeys"`
+
 	// Publisher limits
 	MaxPublishers       int `json:"maxPublishers"`
 	PublisherHysteresis int `json:"publisherHysteresis"`
@@ -574,6 +578,7 @@ func (conf *Conf) setDefaults() {
 	conf.PublishAllowlistPathPrefix = "live/"
 	conf.PublishAllowlistFailOpen = true
 	conf.DynamicAllowOriginsKey = "media:allowed_origins"
+	conf.ViewTokenOwnerExemptKeys = []string{"orchestrator"}
 
 	// Publisher limits
 	conf.MaxPublishers = 2000

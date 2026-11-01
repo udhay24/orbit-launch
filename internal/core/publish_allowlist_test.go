@@ -7,6 +7,7 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
@@ -80,4 +81,84 @@ func TestPathManagerPublishAllowlist(t *testing.T) {
 
 	// reading is not subject to the allowlist.
 	require.NoError(t, findPathConf("live/UNKNOWN", false))
+}
+
+type fakeOwnerCheck struct {
+	allowed bool
+	keys    []string
+}
+
+func (f *fakeOwnerCheck) Check(string) error {
+	return nil
+}
+
+func (f *fakeOwnerCheck) CheckViewToken(keyID string, _ string) error {
+	f.keys = append(f.keys, keyID)
+	if !f.allowed {
+		return errors.New("not owned")
+	}
+	return nil
+}
+
+func TestPathManagerViewTokenOwner(t *testing.T) {
+	signed := func(kid string) string {
+		token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{})
+		token.Header["kid"] = kid
+		res, err := token.SignedString([]byte("key"))
+		require.NoError(t, err)
+		return res
+	}
+
+	run := func(check *fakeOwnerCheck, req defs.PathAccessRequest) error {
+		pm := &pathManager{
+			authManager: test.NilAuthManager,
+			pathConfs: map[string]*conf.Path{
+				"all_others": {Regexp: regexp.MustCompile("^.*$"), Name: "all_others", Source: "publisher"},
+			},
+			parent:              test.NilLogger,
+			publishAllowlist:    check,
+			viewTokenOwnerCheck: true,
+			jwtInHTTPQuery:      true,
+		}
+		pm.initialize()
+		defer pm.close()
+
+		_, err := pm.FindPathConf(defs.PathFindPathConfReq{Author: &dummyPublisher{}, AccessRequest: req})
+		return err
+	}
+
+	check := &fakeOwnerCheck{}
+	err := run(check, defs.PathAccessRequest{
+		Name:        "live/CAM1",
+		Proto:       auth.ProtocolHLS,
+		Query:       "token=" + signed("one"),
+		Credentials: &auth.Credentials{},
+	})
+	_, ok := errors.AsType[*auth.Error](err)
+	require.True(t, ok)
+	require.Equal(t, []string{"one"}, check.keys)
+
+	check = &fakeOwnerCheck{allowed: true}
+	require.NoError(t, run(check, defs.PathAccessRequest{
+		Name:        "live/CAM1",
+		Credentials: &auth.Credentials{Token: signed("one")},
+	}))
+
+	// a request without credentials must not crash the check.
+	require.NoError(t, run(&fakeOwnerCheck{}, defs.PathAccessRequest{Name: "live/CAM1"}))
+
+	// no token: left to normal authentication.
+	check = &fakeOwnerCheck{}
+	require.NoError(t, run(check, defs.PathAccessRequest{Name: "live/CAM1", Credentials: &auth.Credentials{}}))
+	require.Empty(t, check.keys)
+
+	// publishers are covered by the allowlist instead.
+	check = &fakeOwnerCheck{}
+	require.NoError(t, run(check, defs.PathAccessRequest{
+		Name:        "live/CAM1",
+		Publish:     true,
+		Query:       "token=" + signed("one"),
+		Credentials: &auth.Credentials{},
+	}))
+	require.Empty(t, check.keys)
 }

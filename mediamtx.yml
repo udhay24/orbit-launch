@@ -492,6 +492,12 @@ publishAllowlistFailOpen: yes
 dynamicAllowOrigins: false
 # Redis set holding the registered origins.
 dynamicAllowOriginsKey: media:allowed_origins
+# Refuse a view token when its signing key does not own the camera. Each application signs
+# with its own key, whose name matches the set <publishAllowlistKey>:owned:<key>, so a key
+# stolen from one application cannot open another's cameras. Needs publishAllowlist.
+viewTokenOwnerCheck: false
+# Keys that may read any camera.
+viewTokenOwnerExemptKeys: [orchestrator]
 
 ###############################################
 # Global settings -> MoQ server

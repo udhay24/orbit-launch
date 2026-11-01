@@ -63,6 +63,8 @@ echo "== publish allowlist =="
 exists   internal/publishallowlist/allowlist.go "publishallowlist package present"
 contains internal/core/path_manager.go "checkPublishAllowlist" "path_manager: publish allowlist hook"
 contains mediamtx.yml "publishAllowlist" "mediamtx.yml: publishAllowlist key"
+contains internal/core/path_manager.go "checkViewTokenOwner" "path_manager: view token owner hook"
+contains internal/auth/manager.go "refreshJWKSInBackground" "auth: background JWKS refresh"
 
 echo "== dynamic origins =="
 exists   internal/dynamicorigins/origins.go "dynamicorigins package present"

@@ -81,6 +81,7 @@ type pathSetStreamRegistryReq struct {
 
 type pathManagerPublishAllowlist interface {
 	Check(pathName string) error
+	CheckViewToken(keyID string, pathName string) error
 }
 
 type pathManagerAuthManager interface {
@@ -110,6 +111,8 @@ type pathManager struct {
 	maxPublishers       int
 	publisherHysteresis int
 	publishAllowlist    pathManagerPublishAllowlist
+	viewTokenOwnerCheck bool
+	jwtInHTTPQuery      bool
 
 	ctx               context.Context
 	ctxCancel         func()
@@ -664,9 +667,33 @@ func (pm *pathManager) checkPublishAllowlist(author logger.Writer, req *defs.Pat
 	return nil
 }
 
+// checkViewTokenOwner runs outside of the run() loop since it performs network I/O.
+func (pm *pathManager) checkViewTokenOwner(author logger.Writer, req *defs.PathAccessRequest) error {
+	if !pm.viewTokenOwnerCheck || req.Publish || req.SkipAuth {
+		return nil
+	}
+
+	keyID := auth.TokenKeyID(req.ToAuthRequest(), pm.jwtInHTTPQuery)
+	if keyID == "" {
+		return nil
+	}
+
+	err := pm.publishAllowlist.CheckViewToken(keyID, req.Name)
+	if err != nil {
+		terr := &auth.Error{Wrapped: err}
+		auth.LogAndDelayError(author, terr)
+		return terr
+	}
+
+	return nil
+}
+
 // FindPathConf is called by a reader or publisher.
 func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
 	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+	if err := pm.checkViewTokenOwner(req.Author, &req.AccessRequest); err != nil {
 		return nil, err
 	}
 
@@ -690,6 +717,10 @@ func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFin
 
 // Describe is called by a reader or publisher.
 func (pm *pathManager) Describe(req defs.PathDescribeReq) (*defs.PathDescribeRes, error) {
+	if err := pm.checkViewTokenOwner(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+
 	req.Res = make(chan defs.PathDescribeRes)
 	select {
 	case pm.chDescribe <- req:
@@ -748,6 +779,10 @@ func (pm *pathManager) AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAdd
 
 // AddReader is called by a reader.
 func (pm *pathManager) AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
+	if err := pm.checkViewTokenOwner(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+
 	req.Res = make(chan defs.PathAddReaderRes)
 	select {
 	case pm.chAddReader <- req:

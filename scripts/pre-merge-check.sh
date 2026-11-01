@@ -39,8 +39,9 @@ GOOS=linux go vet ./...
 
 step "Layer 3 — custom-feature tests"
 go test -race ./internal/streamregistry/ ./internal/publishallowlist/ ./internal/dynamicorigins/
-go test -race -run 'TestPathManagerPublisherLimit|TestPathManagerPublishAllowlist' ./internal/core/
+go test -race -run 'TestPathManagerPublisherLimit|TestPathManagerPublishAllowlist|TestPathManagerViewTokenOwner' ./internal/core/
 go test -run TestRedactRedisPasswords ./internal/conf/
+go test -race -run 'TestJWKS' ./internal/auth/
 
 if [ "$RUN_FULL" -eq 1 ]; then
   step "Layer 2b — full upstream test suite"

@@ -33,9 +33,14 @@ The web app renews tokens by itself; share links just stop.
 5. Issue a Sentinel token with `node scripts/issue-media-service-token.js sentinel 30`
    (from Orbit-NestJS) and set `MEDIA_READ_TOKEN` and `MEDIA_TOKEN_HOST_SUFFIX`.
 6. Publish the release and let servers pull it.
-7. Turn on `MTX_PUBLISHALLOWLIST=yes` on one server. Watch for
+7. Deploy the orchestrator and Orbit-Play-FrontEnd together, since the old admin login
+   stops working. Set on the orchestrator: `ADMIN_USERS` (from
+   `scripts/hash_admin_password.py`), `ADMIN_SESSION_SECRET`, and the same
+   `MEDIA_JWT_PRIVATE_KEY_BASE64` as Nest. Rotate `API_KEY` and update
+   `fetch-ssl-certs.sh` on the media servers at the same time.
+8. Turn on `MTX_PUBLISHALLOWLIST=yes` on one server. Watch for
    `is not registered` in the log against cameras you expect to be valid.
-8. Turn on `MTX_AUTHMETHOD=jwt` and the allowed origins on one server, then the rest.
+9. Turn on `MTX_AUTHMETHOD=jwt` and the allowed origins on one server, then the rest.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.
 

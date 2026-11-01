@@ -12,7 +12,7 @@ release asset. Templates: `orbit_play_state/scripts/systemd/`.
 | Issue tokens | Orbit-NestJS `POST /api/v1/media-access/view-tokens` | `MEDIA_JWT_PRIVATE_KEY_BASE64`, `MEDIA_VIEW_TOKEN_TTL_SECONDS` (default 12h), `MEDIA_VIEW_TOKEN_MAX_TTL_SECONDS` (default 24h) |
 | Only registered cameras publish | MediaMTX reading Redis set `camera:stream_ids` | `MTX_PUBLISHALLOWLIST=yes`, `MTX_PUBLISHALLOWLISTADDRESS`, `MTX_PUBLISHALLOWLISTPASSWORD` |
 | Keep that set current | Orbit-NestJS | `ENABLE_REDIS_FILTER=true`, `CAMERA_ALLOWLIST_REDIS_URL` (the Redis the media servers read), `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
-| Browsers play only from the web app | MediaMTX | `MTX_HLSALLOWORIGINS`, `MTX_WEBRTCALLOWORIGINS` |
+| Browsers play only from the web apps | MediaMTX | `MTX_HLSALLOWORIGINS`, `MTX_WEBRTCALLOWORIGINS`, comma separated. Media servers are shared, so list a wildcard for each parent domain your applications use: `https://*.s2tlive.com,https://*.snre.live` |
 
 Tokens above the default lifetime need a CEO or ADMINCONFIG login. A session ends when
 its token expires, so the lifetime is also the longest someone can watch on one token.
@@ -56,11 +56,20 @@ The web app renews tokens by itself; share links just stop.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.
 
+## Launching a new application
+
+If its web address is under a parent domain already in `MTX_HLSALLOWORIGINS` and
+`MTX_WEBRTCALLOWORIGINS`, nothing is needed. If not, add the new parent domain to both on
+every media server and restart `orbit-play` first. Otherwise its video fails in the
+browser, with a CORS error in the console, even for a signed-in user with a valid token.
+
 ## Known limits
 
 - Installation: validating a stream ID in the CIS app adds it to the allowlist until the
   next sync (10 minutes), because a device must be online before it can be installed.
 - The CIS app signs in with a supervisor ID and no password.
+- A wildcard lets any site under that parent domain play video in a browser, so only list
+  domains you control. Viewers still need a token.
 - CORS binds browsers only. A copied token works in VLC or curl until it expires.
 - There is no way to cancel a token before it expires.
 - A camera removed from the database keeps streaming until it reconnects.

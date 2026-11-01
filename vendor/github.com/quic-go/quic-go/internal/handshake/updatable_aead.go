@@ -16,10 +16,13 @@ import (
 	"github.com/quic-go/quic-go/qlogwriter"
 )
 
+// defaultKeyUpdateInterval is the maximum number of packets we send or receive before initiating a key update.
+const defaultKeyUpdateInterval = 100 * 1000
+
 var keyUpdateInterval atomic.Uint64
 
 func init() {
-	keyUpdateInterval.Store(protocol.KeyUpdateInterval)
+	keyUpdateInterval.Store(defaultKeyUpdateInterval)
 }
 
 func SetKeyUpdateInterval(v uint64) (reset func()) {
@@ -32,7 +35,7 @@ func SetKeyUpdateInterval(v uint64) (reset func()) {
 var FirstKeyUpdateInterval uint64 = 100
 
 type updatableAEAD struct {
-	suite *cipherSuite
+	suite cipherSuite
 
 	keyPhase           protocol.KeyPhase
 	largestAcked       protocol.PacketNumber
@@ -136,10 +139,10 @@ func (a *updatableAEAD) getNextTrafficSecret(hash crypto.Hash, ts []byte) []byte
 // SetReadKey sets the read key.
 // For the client, this function is called before SetWriteKey.
 // For the server, this function is called after SetWriteKey.
-func (a *updatableAEAD) SetReadKey(suite *cipherSuite, trafficSecret []byte) {
+func (a *updatableAEAD) SetReadKey(suite cipherSuite, trafficSecret []byte) {
 	a.rcvAEAD = createAEAD(suite, trafficSecret, a.version)
 	a.headerDecrypter = newHeaderProtector(suite, trafficSecret, false, a.version)
-	if a.suite == nil {
+	if a.suite.ID == 0 { // suite is not set yet
 		a.setAEADParameters(a.rcvAEAD, suite)
 	}
 
@@ -150,10 +153,10 @@ func (a *updatableAEAD) SetReadKey(suite *cipherSuite, trafficSecret []byte) {
 // SetWriteKey sets the write key.
 // For the client, this function is called after SetReadKey.
 // For the server, this function is called before SetReadKey.
-func (a *updatableAEAD) SetWriteKey(suite *cipherSuite, trafficSecret []byte) {
+func (a *updatableAEAD) SetWriteKey(suite cipherSuite, trafficSecret []byte) {
 	a.sendAEAD = createAEAD(suite, trafficSecret, a.version)
 	a.headerEncrypter = newHeaderProtector(suite, trafficSecret, false, a.version)
-	if a.suite == nil {
+	if a.suite.ID == 0 { // suite is not set yet
 		a.setAEADParameters(a.sendAEAD, suite)
 	}
 
@@ -161,7 +164,7 @@ func (a *updatableAEAD) SetWriteKey(suite *cipherSuite, trafficSecret []byte) {
 	a.nextSendAEAD = createAEAD(suite, a.nextSendTrafficSecret, a.version)
 }
 
-func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite *cipherSuite) {
+func (a *updatableAEAD) setAEADParameters(aead cipher.AEAD, suite cipherSuite) {
 	a.nonceBuf = make([]byte, aead.NonceSize())
 	a.aeadOverhead = aead.Overhead()
 	a.suite = suite

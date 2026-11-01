@@ -1,5 +1,11 @@
 package main
 
+// #cgo pkg-config: libavcodec libavutil libswscale
+// #include <libavcodec/avcodec.h>
+// #include <libswscale/swscale.h>
+// #include <libavutil/opt.h>
+import "C"
+
 import (
 	"fmt"
 	"image"
@@ -8,12 +14,6 @@ import (
 
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 )
-
-// #cgo pkg-config: libavcodec libavutil libswscale
-// #include <libavcodec/avcodec.h>
-// #include <libswscale/swscale.h>
-// #include <libavutil/opt.h>
-import "C"
 
 func frameData(frame *C.AVFrame) **C.uint8_t {
 	return (**C.uint8_t)(unsafe.Pointer(&frame.data[0]))
@@ -61,23 +61,23 @@ func (d *h264Encoder) initialize() error {
 	C.av_opt_set(d.codecCtx.priv_data, key, val, 0)
 
 	d.codecCtx.pix_fmt = C.AV_PIX_FMT_YUV420P
-	d.codecCtx.width = (C.int)(d.Width)
-	d.codecCtx.height = (C.int)(d.Height)
+	d.codecCtx.width = C.int(d.Width)
+	d.codecCtx.height = C.int(d.Height)
 	d.codecCtx.time_base.num = 1
-	d.codecCtx.time_base.den = (C.int)(d.FPS)
+	d.codecCtx.time_base.den = C.int(d.FPS)
 	d.codecCtx.gop_size = 10
 	d.codecCtx.max_b_frames = 0
 	d.codecCtx.bit_rate = 600000
 
 	res := C.avcodec_open2(d.codecCtx, codec, nil)
 	if res < 0 {
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("avcodec_open2() failed")
 	}
 
 	d.rgbaFrame = C.av_frame_alloc()
 	if d.rgbaFrame == nil {
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("av_frame_alloc() failed")
 	}
 
@@ -88,14 +88,14 @@ func (d *h264Encoder) initialize() error {
 	res = C.av_frame_get_buffer(d.rgbaFrame, 0)
 	if res < 0 {
 		C.av_frame_free(&d.rgbaFrame)
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("av_frame_get_buffer() failed")
 	}
 
 	d.yuv420Frame = C.av_frame_alloc()
 	if d.rgbaFrame == nil {
 		C.av_frame_free(&d.rgbaFrame)
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("av_frame_alloc() failed")
 	}
 
@@ -107,16 +107,16 @@ func (d *h264Encoder) initialize() error {
 	if res < 0 {
 		C.av_frame_free(&d.yuv420Frame)
 		C.av_frame_free(&d.rgbaFrame)
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("av_frame_get_buffer() failed")
 	}
 
-	d.swsCtx = C.sws_getContext(d.rgbaFrame.width, d.rgbaFrame.height, (int32)(d.rgbaFrame.format),
-		d.yuv420Frame.width, d.yuv420Frame.height, (int32)(d.yuv420Frame.format), C.SWS_BILINEAR, nil, nil, nil)
+	d.swsCtx = C.sws_getContext(d.rgbaFrame.width, d.rgbaFrame.height, int32(d.rgbaFrame.format),
+		d.yuv420Frame.width, d.yuv420Frame.height, int32(d.yuv420Frame.format), C.SWS_BILINEAR, nil, nil, nil)
 	if d.swsCtx == nil {
 		C.av_frame_free(&d.yuv420Frame)
 		C.av_frame_free(&d.rgbaFrame)
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("sws_getContext() failed")
 	}
 
@@ -124,7 +124,7 @@ func (d *h264Encoder) initialize() error {
 	if d.pkt == nil {
 		C.av_frame_free(&d.yuv420Frame)
 		C.av_frame_free(&d.rgbaFrame)
-		C.avcodec_close(d.codecCtx)
+		C.avcodec_free_context(&d.codecCtx)
 		return fmt.Errorf("av_packet_alloc() failed")
 	}
 
@@ -137,7 +137,7 @@ func (d *h264Encoder) close() {
 	C.sws_freeContext(d.swsCtx)
 	C.av_frame_free(&d.yuv420Frame)
 	C.av_frame_free(&d.rgbaFrame)
-	C.avcodec_close(d.codecCtx)
+	C.avcodec_free_context(&d.codecCtx)
 }
 
 // encode encodes a RGBA image into H264.
@@ -153,7 +153,7 @@ func (d *h264Encoder) encode(img *image.RGBA, pts time.Duration) ([][]byte, time
 	}
 
 	// send frame to the encoder
-	d.yuv420Frame.pts = (C.int64_t)(pts)
+	d.yuv420Frame.pts = C.int64_t(pts)
 	res = C.avcodec_send_frame(d.codecCtx, d.yuv420Frame)
 	if res < 0 {
 		return nil, 0, fmt.Errorf("avcodec_send_frame() failed")
@@ -170,7 +170,7 @@ func (d *h264Encoder) encode(img *image.RGBA, pts time.Duration) ([][]byte, time
 
 	// perform a deep copy of the data before unreferencing the packet
 	data := C.GoBytes(unsafe.Pointer(d.pkt.data), d.pkt.size)
-	pts = (time.Duration)(d.pkt.pts)
+	pts = time.Duration(d.pkt.pts)
 	C.av_packet_unref(d.pkt)
 
 	// decompress

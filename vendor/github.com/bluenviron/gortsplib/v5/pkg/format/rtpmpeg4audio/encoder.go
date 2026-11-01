@@ -13,10 +13,6 @@ const (
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 )
 
-func ptrOf[T any](v T) *T {
-	return &v
-}
-
 func randUint32() (uint32, error) {
 	var b [4]byte
 	_, err := rand.Read(b[:])
@@ -78,7 +74,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -89,6 +85,8 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes AUs (non-LATM) or AudioMuxElements (LATM) into RTP packets.
+// AUs must contain at least 1 element, each element must contain at least 1 byte.
+// The method might panic otherwise.
 func (e *Encoder) Encode(aus [][]byte) ([]*rtp.Packet, error) {
 	var rets []*rtp.Packet
 	var batch [][]byte
@@ -141,7 +139,8 @@ func (e *Encoder) writeFragmented(au []byte, timestamp uint32) ([]*rtp.Packet, e
 	}
 
 	avail := e.PayloadMaxSize - 2 - auHeadersLenBytes
-	le := len(au)
+	auSize := len(au)
+	le := auSize
 	packetCount := packetCount(avail, le)
 
 	ret := make([]*rtp.Packet, packetCount)
@@ -160,7 +159,7 @@ func (e *Encoder) writeFragmented(au []byte, timestamp uint32) ([]*rtp.Packet, e
 
 		// AU-headers
 		pos := 0
-		bits.WriteBitsUnsafe(payload[2:], &pos, uint64(le), e.SizeLength)
+		bits.WriteBitsUnsafe(payload[2:], &pos, uint64(auSize), e.SizeLength)
 		bits.WriteBitsUnsafe(payload[2:], &pos, 0, e.IndexLength)
 
 		// AU

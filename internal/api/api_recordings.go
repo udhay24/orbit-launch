@@ -4,19 +4,67 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
-	"github.com/gin-gonic/gin"
 )
 
+// this prevents directory traversal.
+// functionally it's useless since there's already conf.IsValidPathName, but it's needed by CodeQL.
+func absolutePathInside(base string, candidate string) (string, error) {
+	baseAbs, err := filepath.Abs(filepath.Clean(base))
+	if err != nil {
+		return "", err
+	}
+
+	candidateAbs, err := filepath.Abs(filepath.Clean(candidate))
+	if err != nil {
+		return "", err
+	}
+
+	if !strings.HasPrefix(candidateAbs, baseAbs) {
+		return "", fmt.Errorf("path escapes base directory")
+	}
+
+	return candidateAbs, nil
+}
+
+func recordingsOfPath(
+	pathConf *conf.Path,
+	pathName string,
+) *defs.APIRecording {
+	ret := &defs.APIRecording{
+		Name: pathName,
+	}
+
+	segments, _ := recordstore.FindSegments(pathConf, pathName, nil, nil)
+
+	ret.Segments = make([]defs.APIRecordingSegment, len(segments))
+
+	for i, seg := range segments {
+		ret.Segments[i] = defs.APIRecordingSegment{
+			Start: seg.Start,
+		}
+
+		if pathConf.RecordFormat == conf.RecordFormatFMP4 {
+			_, duration, err := recordstore.SegmentFMP4ReadHeaderAndDuration(seg.Fpath)
+			if err == nil {
+				ret.Segments[i].Duration = new(duration.Seconds())
+			}
+		}
+	}
+
+	return ret
+}
+
 func (a *API) onRecordingsList(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
+	c := a.Parent.APIConfigSnapshot()
 
 	pathNames := recordstore.FindAllPathsWithSegments(c.Paths)
 
@@ -47,9 +95,7 @@ func (a *API) onRecordingsGet(ctx *gin.Context) {
 		return
 	}
 
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
+	c := a.Parent.APIConfigSnapshot()
 
 	pathConf, _, err := conf.FindPathConf(c.Paths, pathName)
 	if err != nil {
@@ -60,7 +106,7 @@ func (a *API) onRecordingsGet(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, recordingsOfPath(pathConf, pathName))
 }
 
-func (a *API) onRecordingDeleteSegment(ctx *gin.Context) {
+func (a *API) onRecordingsSegmentsDelete(ctx *gin.Context) {
 	pathName := ctx.Query("path")
 
 	start, err := time.Parse(time.RFC3339, ctx.Query("start"))
@@ -69,9 +115,7 @@ func (a *API) onRecordingDeleteSegment(ctx *gin.Context) {
 		return
 	}
 
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
+	c := a.Parent.APIConfigSnapshot()
 
 	pathConf, _, err := conf.FindPathConf(c.Paths, pathName)
 	if err != nil {
@@ -79,14 +123,28 @@ func (a *API) onRecordingDeleteSegment(ctx *gin.Context) {
 		return
 	}
 
+	commonPath := recordstore.CommonPath(pathConf.RecordPath)
+
 	pathFormat := recordstore.PathAddExtension(
 		strings.ReplaceAll(pathConf.RecordPath, "%path", pathName),
 		pathConf.RecordFormat,
 	)
 
+	pathFormat, err = absolutePathInside(commonPath, pathFormat)
+	if err != nil {
+		a.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
+
 	segmentPath := recordstore.Path{
 		Start: start,
 	}.Encode(pathFormat)
+
+	segmentPath, err = absolutePathInside(commonPath, segmentPath)
+	if err != nil {
+		a.writeError(ctx, http.StatusBadRequest, err)
+		return
+	}
 
 	err = os.Remove(segmentPath)
 	if err != nil {

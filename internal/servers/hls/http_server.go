@@ -3,9 +3,10 @@ package hls
 import (
 	_ "embed"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
-	gopath "path"
+	"path"
 	"strings"
 	"time"
 
@@ -26,11 +27,27 @@ var hlsIndex []byte
 //go:embed hls.min.js
 var hlsMinJS []byte
 
-func mergePathAndQuery(path string, rawQuery string) string {
-	res := path
+func trailingSlashLocation(rawPath string, rawQuery string) string {
+	res := path.Clean(rawPath)
+	res = strings.TrimLeft(res, "/\\")
+	res = "/" + res + "/"
+
 	if rawQuery != "" {
 		res += "?" + rawQuery
 	}
+
+	return res
+}
+
+func sanitizeLocation(rawPath string, rawQuery string) string {
+	res := path.Clean(rawPath)
+	res = strings.TrimLeft(res, "/\\")
+	res = "/" + res
+
+	if rawQuery != "" {
+		res += "?" + rawQuery
+	}
+
 	return res
 }
 
@@ -44,6 +61,7 @@ type httpServer struct {
 	trustedProxies conf.IPNetworks
 	readTimeout    conf.Duration
 	writeTimeout   conf.Duration
+	cdnSecret      string
 	pathManager    serverPathManager
 	parent         *Server
 
@@ -53,16 +71,21 @@ type httpServer struct {
 func (s *httpServer) initialize() error {
 	router := gin.New()
 	router.SetTrustedProxies(s.trustedProxies.ToTrustedProxies()) //nolint:errcheck
-
 	router.Use(s.middlewarePreflightRequests)
-
 	router.Use(s.onRequest)
+
+	var proto string
+	if s.encryption {
+		proto = "hlss"
+	} else {
+		proto = "hls"
+	}
 
 	s.inner = &httpp.Server{
 		Address:           s.address,
 		AllowOrigins:      s.allowOrigins,
 		DumpPackets:       s.dumpPackets,
-		DumpPacketsPrefix: "hls_server_conn",
+		DumpPacketsPrefix: proto + "_server_conn",
 		ReadTimeout:       time.Duration(s.readTimeout),
 		WriteTimeout:      time.Duration(s.writeTimeout),
 		Encryption:        s.encryption,
@@ -70,6 +93,7 @@ func (s *httpServer) initialize() error {
 		ServerKey:         s.serverKey,
 		Handler:           router,
 		Parent:            s,
+		OnListenError:     s.parent.onListenError,
 	}
 	err := s.inner.Initialize()
 	if err != nil {
@@ -98,6 +122,13 @@ func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
 	}
 }
 
+func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
+	ctx.AbortWithStatusJSON(status, &defs.APIError{
+		Status: defs.APIErrorStatusError,
+		Error:  err.Error(),
+	})
+}
+
 func (s *httpServer) onRequest(ctx *gin.Context) {
 	if ctx.Request.Method != http.MethodGet {
 		return
@@ -108,6 +139,17 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	var dir string
 	var fname string
+
+	type contentType int
+
+	const (
+		index contentType = iota
+		multivariantPlaylist
+		mediaPlaylist
+		segment
+	)
+
+	var contentTyp contentType
 
 	switch {
 	case strings.HasSuffix(pa, "/hls.min.js"):
@@ -120,96 +162,160 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 	case pa == "", pa == "favicon.ico", strings.HasSuffix(pa, "/hls.min.js.map"):
 		return
 
-	case strings.HasSuffix(pa, ".m3u8") ||
-		strings.HasSuffix(pa, ".ts") ||
+	case strings.HasSuffix(pa, ".m3u8"):
+		dir, fname = path.Dir(pa), path.Base(pa)
+
+		if fname == "index.m3u8" {
+			contentTyp = multivariantPlaylist
+		} else {
+			contentTyp = mediaPlaylist
+		}
+
+	case strings.HasSuffix(pa, ".ts") ||
 		strings.HasSuffix(pa, ".mp4") ||
 		strings.HasSuffix(pa, ".mp"):
-		dir, fname = gopath.Dir(pa), gopath.Base(pa)
+		dir, fname = path.Dir(pa), path.Base(pa)
 
 		if strings.HasSuffix(fname, ".mp") {
 			fname += "4"
 		}
 
+		contentTyp = segment
+
 	default:
-		dir, fname = pa, ""
+		dir = pa
 
 		if !strings.HasSuffix(dir, "/") {
-			ctx.Header("Location", mergePathAndQuery(ctx.Request.URL.Path+"/", ctx.Request.URL.RawQuery))
-			ctx.Writer.WriteHeader(http.StatusMovedPermanently)
+			ctx.Header("Location", trailingSlashLocation(ctx.Request.URL.Path, ctx.Request.URL.RawQuery))
+			ctx.Writer.WriteHeader(http.StatusFound)
 			return
 		}
+
+		dir = dir[:len(dir)-1]
+		contentTyp = index
 	}
 
-	dir = strings.TrimSuffix(dir, "/")
-	if dir == "" {
-		return
-	}
+	if contentTyp == index {
+		creds := &auth.Credentials{}
+		creds.FromHTTP(ctx.Request)
 
-	pathConf, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
-		AccessRequest: defs.PathAccessRequest{
-			Name:        dir,
-			Query:       ctx.Request.URL.RawQuery,
-			Publish:     false,
-			Proto:       auth.ProtocolHLS,
-			Credentials: httpp.Credentials(ctx.Request),
-			IP:          net.ParseIP(ctx.ClientIP()),
-		},
-	})
-	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
-			if terr.AskCredentials {
-				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
-				ctx.AbortWithStatusJSON(http.StatusUnauthorized, &defs.APIError{
-					Status: "error",
-					Error:  "authentication error",
-				})
+		_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+			Author: &logger.InlineWriter{
+				Parent: s,
+				Prefix: fmt.Sprintf("[conn %v]", httpp.RemoteAddr(ctx)),
+			},
+			AccessRequest: defs.PathAccessRequest{
+				Name:                 dir,
+				Query:                ctx.Request.URL.RawQuery,
+				Publish:              false,
+				Proto:                auth.ProtocolHLS,
+				Credentials:          creds,
+				IP:                   net.ParseIP(ctx.ClientIP()),
+				EnableAskCredentials: true,
+			},
+		})
+		if err != nil {
+			if terr, ok := errors.AsType[*auth.Error](err); ok {
+				if terr.AskCredentials {
+					ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
+					s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+					return
+				}
+
+				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 				return
 			}
 
-			s.Log(logger.Info, "connection %v failed to authenticate: %v", httpp.RemoteAddr(ctx), terr.Wrapped)
-
-			// wait some seconds to delay brute force attacks
-			<-time.After(auth.PauseAfterError)
-
-			ctx.AbortWithStatusJSON(http.StatusUnauthorized, &defs.APIError{
-				Status: "error",
-				Error:  "authentication error",
-			})
+			s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 			return
 		}
 
-		ctx.Writer.WriteHeader(http.StatusNotFound)
-		return
-	}
-
-	switch fname {
-	case "":
 		ctx.Header("Cache-Control", "max-age=3600")
 		ctx.Header("Content-Type", "text/html")
 		ctx.Writer.WriteHeader(http.StatusOK)
 		ctx.Writer.Write(hlsIndex)
+		return
+	}
+
+	isCDN := (s.cdnSecret != "" && ctx.Request.Header.Get("Authorization") == "Bearer "+s.cdnSecret)
+	q := ctx.Request.URL.Query()
+
+	var sx *session
+
+	switch {
+	case isCDN:
+		sx = s.parent.findOrCreateCDNSession(dir)
+		if sx == nil {
+			s.writeErrorNoLog(ctx, http.StatusInternalServerError, fmt.Errorf("server is closing"))
+			return
+		}
+
+	case contentTyp == multivariantPlaylist:
+		if q.Get("cookieCheck") != "1" {
+			// Use exclusively partitioned cookies, which are not shared between different pages/domains.
+			// Unfortunately they are available on HTTPS only. In case of HTTP, fall back to query parameters,
+			// which are still not shared between different pages/domains but are visible in the URL.
+			http.SetCookie(ctx.Writer, &http.Cookie{
+				Name:        "cookieCheck",
+				Value:       "1",
+				SameSite:    http.SameSiteNoneMode,
+				Secure:      true,
+				Partitioned: true,
+				HttpOnly:    true,
+			})
+
+			q.Set("cookieCheck", "1")
+			ctx.Request.URL.RawQuery = q.Encode()
+			ctx.Writer.Header().Set("Location", sanitizeLocation(ctx.Request.URL.Path, ctx.Request.URL.RawQuery))
+
+			ctx.Writer.WriteHeader(http.StatusFound)
+			return
+		}
+
+		q.Del("cookieCheck")
+		ctx.Request.URL.RawQuery = q.Encode()
+
+		sx = s.parent.createNonCDNSession(dir, ctx)
+		if sx == nil {
+			s.writeErrorNoLog(ctx, http.StatusInternalServerError, fmt.Errorf("server is closing"))
+			return
+		}
 
 	default:
-		var mux *muxer
-		mux, err = s.parent.getMuxer(serverGetMuxerReq{
-			path:           dir,
-			remoteAddr:     httpp.RemoteAddr(ctx),
-			query:          ctx.Request.URL.RawQuery,
-			sourceOnDemand: pathConf.SourceOnDemand,
-		})
+		var err error
+		sx, err = s.parent.findNonCDNSession(dir, ctx)
 		if err != nil {
-			ctx.Writer.WriteHeader(http.StatusNotFound)
+			s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
 			return
 		}
 
-		mi := mux.getInstance()
-		if mi == nil {
-			ctx.Writer.WriteHeader(http.StatusNotFound)
+		if sx == nil {
+			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("session not found"))
+			return
+		}
+	}
+
+	ctx.Request.URL.Path = fname
+
+	err := sx.handleRequest(ctx, q)
+	if err != nil {
+		if terr, ok := errors.AsType[*auth.Error](err); ok {
+			if terr.AskCredentials {
+				ctx.Header("WWW-Authenticate", `Basic realm="mediamtx"`)
+				s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
+				return
+			}
+
+			s.writeErrorNoLog(ctx, http.StatusUnauthorized, fmt.Errorf("authentication error"))
 			return
 		}
 
-		ctx.Request.URL.Path = fname
-		mi.handleRequest(ctx)
+		if _, ok := errors.AsType[*defs.PathNoStreamAvailableError](err); ok {
+			s.writeErrorNoLog(ctx, http.StatusNotFound, err)
+			return
+		}
+
+		s.writeErrorNoLog(ctx, http.StatusInternalServerError, err)
+		return
 	}
 }

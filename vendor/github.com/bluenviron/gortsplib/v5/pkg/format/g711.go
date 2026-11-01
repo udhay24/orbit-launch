@@ -60,6 +60,8 @@ func (f *G711) unmarshal(ctx *unmarshalContext) error {
 }
 
 // Codec implements Format.
+//
+// Deprecated: will be removed in the next version.
 func (f *G711) Codec() string {
 	return "G711"
 }
@@ -105,10 +107,7 @@ func (f *G711) PTSEqualsDTS(*rtp.Packet) bool {
 
 // CreateDecoder creates a decoder able to decode the content of the format.
 func (f *G711) CreateDecoder() (*rtplpcm.Decoder, error) {
-	d := &rtplpcm.Decoder{
-		BitDepth:     8,
-		ChannelCount: f.ChannelCount,
-	}
+	d := &rtplpcm.Decoder{}
 
 	err := d.Init()
 	if err != nil {

@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -19,15 +21,10 @@ import (
 
 const (
 	fmp4StartDTS               = 10 * time.Second
-	mpegtsSegmentMinAUCount    = 100
 	multivariantPlaylistMaxAge = "30"
-	initMaxAge                 = "30"
 	segmentMaxAge              = "3600"
+	mpegtsAACPTSDriftTolerance = 500 * time.Millisecond
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func parseMSNPart(msn string, part string) (uint64, uint64, error) {
 	var msnint uint64
@@ -105,14 +102,6 @@ func generatePrefix() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-func mediaPlaylistPath(streamID string) string {
-	return streamID + "_stream.m3u8"
-}
-
-func initFilePath(prefix string, streamID string) string {
-	return prefix + "_" + streamID + "_init.mp4"
-}
-
 func segmentPath(prefix string, streamID string, segmentID uint64, mp4 bool) string {
 	if mp4 {
 		return prefix + "_" + streamID + "_seg" + strconv.FormatUint(segmentID, 10) + ".mp4"
@@ -124,16 +113,34 @@ func partPath(prefix string, streamID string, partID uint64) string {
 	return prefix + "_" + streamID + "_part" + strconv.FormatUint(partID, 10) + ".mp4"
 }
 
-func fmp4TimeScale(c codecs.Codec) uint32 {
+func codecRequiredClockRate(c codecs.Codec) int {
 	switch codec := c.(type) {
-	case *codecs.MPEG4Audio:
-		return uint32(codec.Config.SampleRate)
+	case *codecs.AV1:
+		return 90000
+
+	case *codecs.VP9:
+		return 90000
+
+	case *codecs.H265:
+		return 90000
+
+	case *codecs.H264:
+		return 90000
 
 	case *codecs.Opus:
 		return 48000
+
+	case *codecs.MPEG4Audio:
+		return codec.Config.SampleRate
+
+	case *codecs.FLAC:
+		return int(codec.StreamInfo.SampleRate)
+
+	case *codecs.KLV:
+		return 90000
 	}
 
-	return 90000
+	return 0
 }
 
 type switchableWriter struct {
@@ -177,9 +184,10 @@ type Muxer struct {
 	// This prevents RAM exhaustion.
 	// It defaults to 50MB.
 	SegmentMaxSize uint64
-	// Directory in which to save segments.
-	// This decreases performance, since saving segments on disk is less performant
-	// than saving them on RAM, but allows to preserve RAM.
+	// Directory to store segments and (non low-latency) playlists on disk.
+	// This can be used to:
+	// - offload segments from RAM to disk
+	// - produce self-contained folders to pass to a CDN (only in case of non low-latency)
 	Directory string
 
 	//
@@ -232,6 +240,15 @@ func (m *Muxer) Start() error {
 		return fmt.Errorf("at least one track must be provided")
 	}
 
+	// supporting non-standard clock rates requires some computations that we're not doing right now.
+	// it's not worth the effort, for now.
+	for i, track := range m.Tracks {
+		requiredClockRate := codecRequiredClockRate(track.Codec)
+		if track.ClockRate != requiredClockRate {
+			return fmt.Errorf("track %d requires clock rate %d, but is %d", i, requiredClockRate, track.ClockRate)
+		}
+	}
+
 	hasVideo := false
 	hasAudio := false
 
@@ -246,7 +263,7 @@ func (m *Muxer) Start() error {
 						"the MPEG-TS variant of HLS supports H264 video only")
 				}
 				hasVideo = true
-			} else {
+			} else if _, isKLV := track.Codec.(*codecs.KLV); !isKLV {
 				if hasAudio {
 					return fmt.Errorf("the MPEG-TS variant of HLS supports a single audio track only")
 				}
@@ -257,6 +274,15 @@ func (m *Muxer) Start() error {
 				hasAudio = true
 			}
 		}
+
+		// Validate that KLV tracks are accompanied by at least one video or audio track
+		if !hasVideo && !hasAudio {
+			for _, track := range m.Tracks {
+				if _, ok := track.Codec.(*codecs.KLV); ok {
+					return fmt.Errorf("KLV tracks require at least one video or audio track to drive segment creation")
+				}
+			}
+		}
 	} else {
 		for _, track := range m.Tracks {
 			if track.Codec.IsVideo() {
@@ -264,6 +290,8 @@ func (m *Muxer) Start() error {
 					return fmt.Errorf("only one video track is currently supported")
 				}
 				hasVideo = true
+			} else if _, ok := track.Codec.(*codecs.KLV); ok {
+				return fmt.Errorf("KLV tracks are only supported with the MPEG-TS muxer variant")
 			} else {
 				hasAudio = true //nolint:ineffassign,wastedassign
 			}
@@ -309,11 +337,25 @@ func (m *Muxer) Start() error {
 
 	m.server.registerPath("index.m3u8", m.handleMultivariantPlaylist)
 
+	// Find the leading track index
+	// Video tracks are preferred; if no video, use the first non-KLV track
+	leadingTrackIndex := -1
+	for i, track := range m.Tracks {
+		if track.Codec.IsVideo() {
+			leadingTrackIndex = i
+			break
+		}
+		_, isKLV := track.Codec.(*codecs.KLV)
+		if leadingTrackIndex == -1 && !isKLV {
+			leadingTrackIndex = i
+		}
+	}
+
 	for i, track := range m.Tracks {
 		mtrack := &muxerTrack{
 			Track:     track,
 			variant:   m.Variant,
-			isLeading: track.Codec.IsVideo() || (!hasVideo && i == 0),
+			isLeading: i == leadingTrackIndex,
 		}
 		mtrack.initialize()
 		m.mtracks = append(m.mtracks, mtrack)
@@ -350,6 +392,7 @@ func (m *Muxer) Start() error {
 			cond:           m.cond,
 			prefix:         m.prefix,
 			storageFactory: m.storageFactory,
+			directory:      m.Directory,
 			server:         m.server,
 			tracks:         m.mtracks,
 			id:             "main",
@@ -402,6 +445,7 @@ func (m *Muxer) Start() error {
 				cond:           m.cond,
 				prefix:         m.prefix,
 				storageFactory: m.storageFactory,
+				directory:      m.Directory,
 				server:         m.server,
 				tracks:         []*muxerTrack{track},
 				id:             id,
@@ -507,7 +551,37 @@ func (m *Muxer) WriteMPEG4Audio(
 	return m.segmenter.writeMPEG4Audio(m.mtracksByTrack[track], ntp, pts, aus)
 }
 
+// WriteFLAC writes a FLAC audio frame.
+func (m *Muxer) WriteFLAC(
+	track *Track,
+	ntp time.Time,
+	pts int64,
+	frame []byte,
+) error {
+	return m.segmenter.writeFLAC(m.mtracksByTrack[track], ntp, pts, frame)
+}
+
+// WriteKLV writes KLV data.
+func (m *Muxer) WriteKLV(
+	track *Track,
+	ntp time.Time,
+	pts int64,
+	data []byte,
+) error {
+	// KLV writing is currently only supported for the MPEG-TS muxer variant.
+	if m.Variant != MuxerVariantMPEGTS {
+		return fmt.Errorf("WriteKLV is only supported with the MPEG-TS muxer variant")
+	}
+
+	// Ensure that the provided track carries KLV data.
+	if _, ok := track.Codec.(*codecs.KLV); !ok {
+		return fmt.Errorf("WriteKLV called with a non-KLV track")
+	}
+	return m.segmenter.writeKLV(m.mtracksByTrack[track], ntp, pts, data)
+}
+
 // Handle handles a HTTP request.
+// This can be safely called in parallel with Write*() and Close() methods.
 func (m *Muxer) Handle(w http.ResponseWriter, r *http.Request) {
 	m.server.handle(w, r)
 }
@@ -559,10 +633,9 @@ func (m *Muxer) rotatePartsInner(nextDTS time.Duration) error {
 func (m *Muxer) rotateSegments(
 	nextDTS time.Duration,
 	nextNTP time.Time,
-	force bool,
 ) error {
 	m.mutex.Lock()
-	err := m.rotateSegmentsInner(nextDTS, nextNTP, force)
+	err := m.rotateSegmentsInner(nextDTS, nextNTP)
 	m.mutex.Unlock()
 
 	if err != nil {
@@ -577,16 +650,15 @@ func (m *Muxer) rotateSegments(
 func (m *Muxer) rotateSegmentsInner(
 	nextDTS time.Duration,
 	nextNTP time.Time,
-	force bool,
 ) error {
-	err := m.leadingStream.rotateSegments(nextDTS, nextNTP, force)
+	err := m.leadingStream.rotateSegments(nextDTS, nextNTP)
 	if err != nil {
 		return err
 	}
 
 	for _, stream := range m.streams {
 		if !stream.isLeading {
-			err = stream.rotateSegments(nextDTS, nextNTP, force)
+			err = stream.rotateSegments(nextDTS, nextNTP)
 			if err != nil {
 				return err
 			}
@@ -595,7 +667,35 @@ func (m *Muxer) rotateSegmentsInner(
 		}
 	}
 
+	if m.Directory != "" && m.Variant != MuxerVariantLowLatency {
+		err = m.savePlaylists()
+		if err != nil {
+			return err
+		}
+	}
+
 	return nil
+}
+
+func (m *Muxer) savePlaylists() error {
+	for _, stream := range m.streams {
+		byts, err := stream.generateMediaPlaylist(false, "")
+		if err != nil {
+			return err
+		}
+
+		err = os.WriteFile(filepath.Join(m.Directory, mediaPlaylistPath(stream.id)), byts, 0o644)
+		if err != nil {
+			return err
+		}
+	}
+
+	byts, err := m.generateMultivariantPlaylist("")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(filepath.Join(m.Directory, "index.m3u8"), byts, 0o644)
 }
 
 func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -605,6 +705,7 @@ func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Reques
 
 		for {
 			if m.closed {
+				w.WriteHeader(http.StatusNotFound)
 				return nil
 			}
 
@@ -617,6 +718,7 @@ func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Reques
 
 		buf, err := m.generateMultivariantPlaylist(r.URL.RawQuery)
 		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return nil
 		}
 
@@ -624,13 +726,12 @@ func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Reques
 	}()
 
 	if buf == nil {
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
 	// allow caching but use a small period in order to
 	// allow a stream to change tracks or bitrate
-	w.Header().Set("Cache-Control", "max-age="+multivariantPlaylistMaxAge)
+	w.Header().Set("Cache-Control", "public, max-age="+multivariantPlaylistMaxAge)
 	w.Header().Set("Content-Type", `application/vnd.apple.mpegurl`)
 	w.WriteHeader(http.StatusOK)
 	w.Write(buf)
@@ -645,7 +746,7 @@ func (m *Muxer) generateMultivariantPlaylist(rawQuery string) ([]byte, error) {
 			if m.Variant == MuxerVariantMPEGTS {
 				return 3
 			}
-			return 9
+			return 10
 		}(),
 		IndependentSegments: true,
 		Variants: []*playlist.MultivariantVariant{{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -15,8 +16,26 @@ import (
 
 // StreamInfo contains the server information for a stream.
 type StreamInfo struct {
-	Server string `json:"server"`
-	API    string `json:"api"`
+	Server   string `json:"server"`
+	API      string `json:"api"`
+	ServerIP string `json:"serverIP"`
+}
+
+// privateIP returns the first non-loopback IPv4 address reported by the OS
+// (the private NIC / VPC address, e.g. 10.x / 172.x). Empty on failure.
+func privateIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, address := range addrs {
+		if ipNet, ok := address.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ip4 := ipNet.IP.To4(); ip4 != nil {
+				return ip4.String()
+			}
+		}
+	}
+	return ""
 }
 
 // Registry is a Redis-backed stream-to-server registry.
@@ -29,12 +48,13 @@ type Registry struct {
 	TTL           time.Duration
 	Parent        logger.Writer
 
-	client *redis.Client
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	paths  map[string]struct{}
+	client   *redis.Client
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+	paths    map[string]struct{}
+	serverIP string
 }
 
 func (r *Registry) log(level logger.Level, format string, args ...any) {
@@ -70,7 +90,10 @@ func (r *Registry) Initialize() error {
 		return fmt.Errorf("stream registry: Redis connection failed: %w", err)
 	}
 
-	r.log(logger.Info, "connected to Redis at %s (server ID: %s)", r.RedisAddress, r.ServerID)
+	// Detect this server's private IP once at startup (best-effort).
+	r.serverIP = privateIP()
+
+	r.log(logger.Info, "connected to Redis at %s (server ID: %s, server IP: %s)", r.RedisAddress, r.ServerID, r.serverIP)
 
 	r.wg.Add(1)
 	go r.refreshLoop()
@@ -108,8 +131,9 @@ func (r *Registry) Close() {
 
 func (r *Registry) infoJSON() string {
 	info := StreamInfo{
-		Server: r.ServerID,
-		API:    r.APIAddress,
+		Server:   r.ServerID,
+		API:      r.APIAddress,
+		ServerIP: r.serverIP,
 	}
 	b, _ := json.Marshal(info)
 	return string(b)

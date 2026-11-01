@@ -9,26 +9,25 @@ import (
 )
 
 func defaultClockRate(mimeType string) uint32 {
-	defaults := map[string]uint32{
-		"audio/opus": 48000,
-		"audio/pcmu": 8000,
-		"audio/pcma": 8000,
-	}
-
-	if def, ok := defaults[strings.ToLower(mimeType)]; ok {
-		return def
+	switch {
+	case strings.EqualFold(mimeType, "audio/opus"):
+		return 48000
+	case strings.EqualFold(mimeType, "audio/pcmu"), strings.EqualFold(mimeType, "audio/pcma"):
+		return 8000
 	}
 
 	return 90000
 }
 
+// defaultChannels returns the channel count implied by an omitted encoding
+// parameter: RFC 8866 says one for audio, except Opus which RFC 7587 fixes
+// at two. Video has no channel count, so it returns zero.
 func defaultChannels(mimeType string) uint16 {
-	defaults := map[string]uint16{
-		"audio/opus": 2,
-	}
-
-	if def, ok := defaults[strings.ToLower(mimeType)]; ok {
-		return def
+	switch {
+	case strings.EqualFold(mimeType, "audio/opus"):
+		return 2
+	case len(mimeType) >= 6 && strings.EqualFold(mimeType[:6], "audio/"):
+		return 1
 	}
 
 	return 0
@@ -37,7 +36,7 @@ func defaultChannels(mimeType string) uint16 {
 func parseParameters(line string) map[string]string {
 	parameters := make(map[string]string)
 
-	for _, p := range strings.Split(line, ";") {
+	for p := range strings.SplitSeq(line, ";") {
 		pp := strings.SplitN(strings.TrimSpace(p), "=", 2)
 		key := strings.ToLower(pp[0])
 		var value string
@@ -128,6 +127,11 @@ func Parse(mimeType string, clockRate uint32, channels uint16, line string) FMTP
 	switch {
 	case strings.EqualFold(mimeType, "video/h264"):
 		fmtp = &h264FMTP{
+			parameters: parameters,
+		}
+
+	case strings.EqualFold(mimeType, "video/h265"):
+		fmtp = &h265FMTP{
 			parameters: parameters,
 		}
 

@@ -3,6 +3,7 @@ package rtpmpeg1video
 import (
 	"bytes"
 	"crypto/rand"
+	"fmt"
 
 	"github.com/pion/rtp"
 )
@@ -12,10 +13,6 @@ const (
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 	payloadType           = 32
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func randUint32() (uint32, error) {
 	var b [4]byte
@@ -74,7 +71,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -85,6 +82,9 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes frames into RTP packets.
+// Frame must contain at least 4 bytes and must be a sequence of slices,
+// each prefixed with 001 and at least 4 bytes long.
+// The method might panic otherwise.
 func (e *Encoder) Encode(frame []byte) ([]*rtp.Packet, error) {
 	var rets []*rtp.Packet
 	var batch [][]byte
@@ -124,6 +124,10 @@ func (e *Encoder) Encode(frame []byte) ([]*rtp.Packet, error) {
 
 		switch slice[3] {
 		case 0:
+			if len(slice) < 6 {
+				return nil, fmt.Errorf("invalid slice")
+			}
+
 			temporalReference = uint16(slice[4])<<2 | uint16(slice[5])>>6
 			frameType = (slice[5] >> 3) & 0b111
 

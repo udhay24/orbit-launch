@@ -1,4 +1,4 @@
-package pprof //nolint:revive
+package pprof_test //nolint:revive
 
 import (
 	"fmt"
@@ -7,15 +7,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
-	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/pprof"
 	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPreflightRequest(t *testing.T) {
-	s := &PPROF{
+	s := &pprof.PPROF{
 		Address:      "127.0.0.1:9999",
 		AllowOrigins: []string{"*"},
 		ReadTimeout:  conf.Duration(10 * time.Second),
@@ -33,6 +34,7 @@ func TestPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:9999", nil)
 	require.NoError(t, err)
 
+	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -44,8 +46,7 @@ func TestPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", res.Header.Get("Access-Control-Allow-Credentials"))
+	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "OPTIONS, GET", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
@@ -54,18 +55,18 @@ func TestPreflightRequest(t *testing.T) {
 func TestPprof(t *testing.T) {
 	checked := false
 
-	s := &PPROF{
+	s := &pprof.PPROF{
 		Address:      "127.0.0.1:9999",
 		AllowOrigins: []string{"*"},
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) *auth.Error {
+			AuthenticateImpl: func(req *auth.Request) (*auth.Result, *auth.Error) {
 				require.Equal(t, conf.AuthActionPprof, req.Action)
 				require.Equal(t, "myuser", req.Credentials.User)
 				require.Equal(t, "mypass", req.Credentials.Pass)
 				checked = true
-				return nil
+				return &auth.Result{User: req.Credentials.User}, nil
 			},
 		},
 		Parent: test.NilLogger,
@@ -95,29 +96,20 @@ func TestPprof(t *testing.T) {
 }
 
 func TestAuthError(t *testing.T) {
-	n := 0
-
-	s := &PPROF{
+	s := &pprof.PPROF{
 		Address:      "127.0.0.1:9999",
 		AllowOrigins: []string{"*"},
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) *auth.Error {
+			AuthenticateImpl: func(req *auth.Request) (*auth.Result, *auth.Error) {
 				if req.Credentials.User == "" {
-					return &auth.Error{AskCredentials: true}
+					return nil, &auth.Error{AskCredentials: true, Wrapped: fmt.Errorf("auth error")}
 				}
-				return &auth.Error{Wrapped: fmt.Errorf("auth error")}
+				return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
 			},
 		},
-		Parent: test.Logger(func(l logger.Level, s string, i ...any) {
-			if l == logger.Info {
-				if n == 1 {
-					require.Regexp(t, "failed to authenticate: auth error$", fmt.Sprintf(s, i...))
-				}
-				n++
-			}
-		}),
+		Parent: test.NilLogger,
 	}
 	err := s.Initialize()
 	require.NoError(t, err)
@@ -145,6 +137,4 @@ func TestAuthError(t *testing.T) {
 	defer res.Body.Close()
 
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
-
-	require.Equal(t, 2, n)
 }

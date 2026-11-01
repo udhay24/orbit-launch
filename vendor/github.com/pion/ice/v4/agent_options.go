@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/stun/v3"
-	"github.com/pion/transport/v4"
+	"github.com/pion/stun/v4"
+	"github.com/pion/transport/v5"
 	"golang.org/x/net/proxy"
 )
 
@@ -115,6 +115,10 @@ func appendAddressRewriteRules(agent *Agent, rules ...AddressRewriteRule) error 
 }
 
 func sanitizeAddressRewriteRule(rule AddressRewriteRule) (AddressRewriteRule, error) {
+	if !validPortMapping(rule.OriginalPort, rule.NewPort) {
+		return AddressRewriteRule{}, ErrInvalidNAT1To1IPMapping
+	}
+
 	cleaned, err := sanitizeExternalIPs(rule.External)
 	if err != nil {
 		return AddressRewriteRule{}, err
@@ -140,6 +144,10 @@ func sanitizeAddressRewriteRule(rule AddressRewriteRule) (AddressRewriteRule, er
 	}
 
 	return normalized, nil
+}
+
+func validPortMapping(original, mapped int) bool {
+	return original == 0 && mapped == 0 || original >= 0 && original <= 65535 && mapped > 0 && mapped <= 65535
 }
 
 func defaultAddressRewriteMode(candidateType CandidateType) AddressRewriteMode {
@@ -175,7 +183,6 @@ func sanitizeExternalIPs(ips []string) ([]string, error) {
 		seen[trimmed] = struct{}{}
 		sanitized = append(sanitized, trimmed)
 	}
-
 	if len(sanitized) == 0 {
 		return nil, ErrInvalidNAT1To1IPMapping
 	}
@@ -386,6 +393,7 @@ func WithDisconnectedTimeout(timeout time.Duration) AgentOption {
 		}
 
 		a.disconnectedTimeout = timeout
+		a.disconnectedTimeoutExplicit = true
 
 		return nil
 	}
@@ -497,6 +505,20 @@ func WithIPFilter(filter func(net.IP) bool) AgentOption {
 	}
 }
 
+// WithRemoteIPFilter sets a filter for remote candidate IP addresses.
+// Candidates for which this function returns false are ignored.
+func WithRemoteIPFilter(filter func(net.IP) bool) AgentOption {
+	return func(a *Agent) error {
+		if a.constructed {
+			return ErrAgentOptionNotUpdatable
+		}
+
+		a.remoteIPFilter = filter
+
+		return nil
+	}
+}
+
 // WithNet sets the underlying network implementation for the agent.
 func WithNet(net transport.Net) AgentOption {
 	return func(a *Agent) error {
@@ -548,11 +570,8 @@ func WithLocalCredentials(ufrag, pwd string) AgentOption {
 			return ErrAgentOptionNotUpdatable
 		}
 
-		if ufrag != "" && len([]rune(ufrag))*8 < 24 {
-			return ErrLocalUfragInsufficientBits
-		}
-		if pwd != "" && len([]rune(pwd))*8 < 128 {
-			return ErrLocalPwdInsufficientBits
+		if err := validateLocalCredentials(ufrag, pwd); err != nil {
+			return err
 		}
 
 		a.localUfrag = ufrag
@@ -668,7 +687,7 @@ func WithRenomination(generator NominationValueGenerator) AgentOption {
 }
 
 // WithNominationAttribute sets the STUN attribute type to use for ICE renomination.
-// The default value is 0x0030. This can be configured until the attribute is officially
+// The default value is 0xC001. This can be configured until the attribute is officially
 // assigned by IANA for draft-thatcher-ice-renomination.
 //
 // This option returns an error if the provided attribute type is invalid.
@@ -842,7 +861,9 @@ func WithNetworkMonitorInterval(interval time.Duration) AgentOption {
 	}
 }
 
-// WithNetworkTypes sets the enabled network types for candidate gathering.
+// WithNetworkTypes sets the enabled candidate network types for candidate gathering.
+// This controls the network types exposed in ICE candidates and used for pairing.
+// Use WithTURNTransportProtocols to control the local TURN client-to-server transport.
 // By default, all network types are enabled.
 //
 // Example:
@@ -856,10 +877,61 @@ func WithNetworkTypes(networkTypes []NetworkType) AgentOption {
 			return ErrAgentOptionNotUpdatable
 		}
 
-		a.networkTypes = networkTypes
+		normalized, err := sanitizeTransportNetworkTypes(networkTypes)
+		if err != nil {
+			return err
+		}
+
+		a.networkTypes = normalized
 
 		return nil
 	}
+}
+
+// WithTURNTransportProtocols restricts protocols used by this agent when
+// connecting to TURN servers (TURN client <-> TURN server transport).
+//
+// This is independent from WithNetworkTypes, which controls ICE candidate
+// network types announced to the peer. Supported values are
+// NetworkTypeUDP4/UDP6 and NetworkTypeTCP4/TCP6.
+func WithTURNTransportProtocols(protocols []NetworkType) AgentOption {
+	return func(a *Agent) error {
+		if a.constructed {
+			return ErrAgentOptionNotUpdatable
+		}
+
+		normalized, err := sanitizeTransportNetworkTypes(protocols)
+		if err != nil {
+			return err
+		}
+
+		a.turnTransportProtocols = normalized
+
+		return nil
+	}
+}
+
+func sanitizeTransportNetworkTypes(types []NetworkType) ([]NetworkType, error) {
+	if len(types) == 0 {
+		return nil, nil
+	}
+
+	seen := map[NetworkType]struct{}{}
+	out := make([]NetworkType, 0, len(types))
+	for _, networkType := range types {
+		if !networkType.IsUDP() && !networkType.IsTCP() {
+			return nil, ErrProtoType
+		}
+
+		if _, ok := seen[networkType]; ok {
+			continue
+		}
+
+		seen[networkType] = struct{}{}
+		out = append(out, networkType)
+	}
+
+	return out, nil
 }
 
 // WithCandidateTypes sets the enabled candidate types for gathering.
@@ -955,6 +1027,8 @@ func WithLoggerFactory(loggerFactory logging.LoggerFactory) AgentOption {
 			return ErrAgentOptionNotUpdatable
 		}
 
+		// Logger factory will be passed down to objects created by the agent
+		a.loggerFactory = loggerFactory
 		a.log = loggerFactory.NewLogger("ice")
 
 		return nil

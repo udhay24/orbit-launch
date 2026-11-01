@@ -1,9 +1,11 @@
-package rtsp
+package rtsp_test
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
-	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,19 +14,17 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
 	"github.com/pion/rtp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/staticsources/rtsp"
 	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/bluenviron/mediamtx/internal/unit"
 )
-
-func ptrOf[T any](v T) *T {
-	p := new(T)
-	*p = v
-	return p
-}
 
 type testServer struct {
 	onDescribe func(*gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error)
@@ -46,12 +46,16 @@ func (sh *testServer) OnPlay(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Respo
 }
 
 func TestSource(t *testing.T) {
-	for _, source := range []string{
+	for _, ca := range []string{
 		"udp",
 		"tcp",
-		"tls",
+		"rtsps",
+		"rtsp+http",
+		"rtsps+http",
+		"rtsp+ws",
+		"rtsps+ws",
 	} {
-		t.Run(source, func(t *testing.T) {
+		t.Run(ca, func(t *testing.T) {
 			var strm *gortsplib.ServerStream
 
 			nonce, err := auth.GenerateNonce()
@@ -63,6 +67,20 @@ func TestSource(t *testing.T) {
 				Handler: &testServer{
 					onDescribe: func(ctx *gortsplib.ServerHandlerOnDescribeCtx,
 					) (*base.Response, *gortsplib.ServerStream, error) {
+						switch ca {
+						case "rtsp+http", "rtsps+http":
+							require.Equal(t, gortsplib.TunnelHTTP, ctx.Conn.Transport().Tunnel)
+						case "rtsp+ws", "rtsps+ws":
+							require.Equal(t, gortsplib.TunnelWebSocket, ctx.Conn.Transport().Tunnel)
+						}
+
+						switch ca {
+						case "rtsps", "rtsps+http", "rtsps+ws":
+							require.Equal(t, "rtsps", ctx.Request.URL.Scheme)
+						default:
+							require.Equal(t, "rtsp", ctx.Request.URL.Scheme)
+						}
+
 						err2 := auth.Verify(ctx.Request, "testuser", "testpass", nil, "IPCAM", nonce)
 						if err2 != nil {
 							return &base.Response{ //nolint:nilerr
@@ -86,15 +104,13 @@ func TestSource(t *testing.T) {
 						go func() {
 							time.Sleep(100 * time.Millisecond)
 							err2 := strm.WritePacketRTP(media0, &rtp.Packet{
-								Header: rtp.Header{
-									Version:        0x02,
-									PayloadType:    96,
-									SequenceNumber: 57899,
-									Timestamp:      345234345,
-									SSRC:           978651231,
-									Marker:         true,
-								},
-								Payload: []byte{5, 1, 2, 3, 4},
+								Version:        0x02,
+								PayloadType:    96,
+								SequenceNumber: 57899,
+								Timestamp:      345234345,
+								SSRC:           978651231,
+								Marker:         true,
+								Payload:        []byte{5, 1, 2, 3, 4},
 							})
 							require.NoError(t, err2)
 						}()
@@ -107,21 +123,14 @@ func TestSource(t *testing.T) {
 				RTSPAddress: "127.0.0.1:8555",
 			}
 
-			switch source {
+			switch ca {
 			case "udp":
 				s.UDPRTPAddress = "127.0.0.1:8002"
 				s.UDPRTCPAddress = "127.0.0.1:8003"
 
-			case "tls":
-				var serverCertFpath string
-				serverCertFpath, err = test.CreateTempFile(test.TLSCertPub)
-				require.NoError(t, err)
-				defer os.Remove(serverCertFpath)
-
-				var serverKeyFpath string
-				serverKeyFpath, err = test.CreateTempFile(test.TLSCertKey)
-				require.NoError(t, err)
-				defer os.Remove(serverKeyFpath)
+			case "rtsps", "rtsps+http", "rtsps+ws":
+				serverCertFpath := test.CreateTempFile(t, test.TLSCertPub)
+				serverKeyFpath := test.CreateTempFile(t, test.TLSCertKey)
 
 				var cert tls.Certificate
 				cert, err = tls.LoadX509KeyPair(serverCertFpath, serverKeyFpath)
@@ -144,24 +153,33 @@ func TestSource(t *testing.T) {
 
 			var ur string
 			cnf := &conf.Path{
-				RTSPUDPSourcePortRange: []uint{10000, 65535},
+				RTSPUDPSourcePortRange: []uint{32768, 60999},
 			}
 
-			if source != "tls" {
+			switch ca {
+			case "udp", "tcp":
 				ur = "rtsp://testuser:testpass@localhost:8555/teststream"
 				var sp conf.RTSPTransport
-				sp.UnmarshalJSON([]byte(`"` + source + `"`)) //nolint:errcheck
+				sp.UnmarshalJSON([]byte(`"` + ca + `"`)) //nolint:errcheck
 				cnf.RTSPTransport = sp
-			} else {
-				ur = "rtsps://testuser:testpass@localhost:8555/teststream"
+
+				if ca == "udp" {
+					cnf.RTSPUDPReadBufferSize = new(uint(100000))
+				}
+
+			case "rtsps", "rtsps+http", "rtsps+ws":
+				ur = ca + "://testuser:testpass@localhost:8555/teststream"
 				cnf.SourceFingerprint = "33949E05FFFB5FF3E8AA16F8213A6251B4D9363804BA53233C4DA9A46D6F2739"
+
+			case "rtsp+http", "rtsp+ws":
+				ur = ca + "://testuser:testpass@localhost:8555/teststream"
 			}
 
 			p := &test.StaticSourceParent{}
 			p.Initialize()
 			defer p.Close()
 
-			so := &Source{
+			so := &rtsp.Source{
 				ReadTimeout:    conf.Duration(10 * time.Second),
 				WriteTimeout:   conf.Duration(10 * time.Second),
 				WriteQueueSize: 2048,
@@ -187,6 +205,12 @@ func TestSource(t *testing.T) {
 			}()
 
 			<-p.Unit
+
+			require.Eventually(t, func() bool {
+				info := so.Info()
+				typeSpecific, ok := info.TypeSpecific.(*defs.APIStaticSourceTypeSpecificRTSP)
+				return ok && typeSpecific.RemoteAddr != "" && typeSpecific.InboundRTPPackets > 0
+			}, 5*time.Second, 10*time.Millisecond)
 
 			// the source must be listening on ReloadConf
 			reloadConf <- nil
@@ -223,15 +247,13 @@ func TestNoPassword(t *testing.T) {
 				go func() {
 					time.Sleep(100 * time.Millisecond)
 					err2 := strm.WritePacketRTP(media0, &rtp.Packet{
-						Header: rtp.Header{
-							Version:        0x02,
-							PayloadType:    96,
-							SequenceNumber: 57899,
-							Timestamp:      345234345,
-							SSRC:           978651231,
-							Marker:         true,
-						},
-						Payload: []byte{5, 1, 2, 3, 4},
+						Version:        0x02,
+						PayloadType:    96,
+						SequenceNumber: 57899,
+						Timestamp:      345234345,
+						SSRC:           978651231,
+						Marker:         true,
+						Payload:        []byte{5, 1, 2, 3, 4},
 					})
 					require.NoError(t, err2)
 				}()
@@ -268,7 +290,7 @@ func TestNoPassword(t *testing.T) {
 	p.Initialize()
 	defer p.Close()
 
-	so := &Source{
+	so := &rtsp.Source{
 		ReadTimeout:    conf.Duration(10 * time.Second),
 		WriteTimeout:   conf.Duration(10 * time.Second),
 		WriteQueueSize: 2048,
@@ -287,8 +309,96 @@ func TestNoPassword(t *testing.T) {
 			ResolvedSource: "rtsp://testuser:@127.0.0.1:8555/teststream",
 			Conf: &conf.Path{
 				RTSPTransport:          sp,
-				RTSPUDPSourcePortRange: []uint{10000, 65535},
+				RTSPUDPSourcePortRange: []uint{32768, 60999},
 			},
+		})
+		close(done)
+	}()
+
+	<-p.Unit
+}
+
+func TestScale(t *testing.T) {
+	var strm *gortsplib.ServerStream
+
+	media0 := test.UniqueMediaH264()
+
+	s := gortsplib.Server{
+		Handler: &testServer{
+			onDescribe: func(_ *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, strm, nil
+			},
+			onSetup: func(_ *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, strm, nil
+			},
+			onPlay: func(ctx *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+				require.Equal(t, base.HeaderValue{"-1.0"}, ctx.Request.Header["Scale"])
+
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+					err := strm.WritePacketRTP(media0, &rtp.Packet{
+						Version:        0x02,
+						PayloadType:    96,
+						SequenceNumber: 57899,
+						Timestamp:      345234345,
+						SSRC:           978651231,
+						Marker:         true,
+						Payload:        []byte{5, 1, 2, 3, 4},
+					})
+					require.NoError(t, err)
+				}()
+
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+		RTSPAddress: "127.0.0.1:8555",
+	}
+
+	err := s.Start()
+	require.NoError(t, err)
+	defer s.Close()
+
+	strm = &gortsplib.ServerStream{
+		Server: &s,
+		Desc:   &description.Session{Medias: []*description.Media{media0}},
+	}
+	err = strm.Initialize()
+	require.NoError(t, err)
+	defer strm.Close()
+
+	cnf := &conf.Path{
+		RTSPUDPSourcePortRange: []uint{32768, 60999},
+		RTSPScale:              "-1.0",
+	}
+
+	p := &test.StaticSourceParent{}
+	p.Initialize()
+	defer p.Close()
+
+	so := &rtsp.Source{
+		ReadTimeout:    conf.Duration(10 * time.Second),
+		WriteTimeout:   conf.Duration(10 * time.Second),
+		WriteQueueSize: 2048,
+		Parent:         p,
+	}
+
+	done := make(chan struct{})
+	defer func() { <-done }()
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	go func() {
+		so.Run(defs.StaticSourceRunParams{ //nolint:errcheck
+			Context:        ctx,
+			ResolvedSource: "rtsp://127.0.0.1:8555/teststream",
+			Conf:           cnf,
 		})
 		close(done)
 	}()
@@ -330,15 +440,13 @@ func TestRange(t *testing.T) {
 						go func() {
 							time.Sleep(100 * time.Millisecond)
 							err := strm.WritePacketRTP(media0, &rtp.Packet{
-								Header: rtp.Header{
-									Version:        0x02,
-									PayloadType:    96,
-									SequenceNumber: 57899,
-									Timestamp:      345234345,
-									SSRC:           978651231,
-									Marker:         true,
-								},
-								Payload: []byte{5, 1, 2, 3, 4},
+								Version:        0x02,
+								PayloadType:    96,
+								SequenceNumber: 57899,
+								Timestamp:      345234345,
+								SSRC:           978651231,
+								Marker:         true,
+								Payload:        []byte{5, 1, 2, 3, 4},
 							})
 							require.NoError(t, err)
 						}()
@@ -364,7 +472,7 @@ func TestRange(t *testing.T) {
 			defer strm.Close()
 
 			cnf := &conf.Path{
-				RTSPUDPSourcePortRange: []uint{10000, 65535},
+				RTSPUDPSourcePortRange: []uint{32768, 60999},
 			}
 
 			switch ca {
@@ -385,7 +493,7 @@ func TestRange(t *testing.T) {
 			p.Initialize()
 			defer p.Close()
 
-			so := &Source{
+			so := &rtsp.Source{
 				ReadTimeout:    conf.Duration(10 * time.Second),
 				WriteTimeout:   conf.Duration(10 * time.Second),
 				WriteQueueSize: 2048,
@@ -441,15 +549,13 @@ func TestSkipBackChannel(t *testing.T) {
 				go func() {
 					time.Sleep(100 * time.Millisecond)
 					err := strm.WritePacketRTP(media0, &rtp.Packet{
-						Header: rtp.Header{
-							Version:        0x02,
-							PayloadType:    96,
-							SequenceNumber: 57899,
-							Timestamp:      345234345,
-							SSRC:           978651231,
-							Marker:         true,
-						},
-						Payload: []byte{5, 1, 2, 3, 4},
+						Version:        0x02,
+						PayloadType:    96,
+						SequenceNumber: 57899,
+						Timestamp:      345234345,
+						SSRC:           978651231,
+						Marker:         true,
+						Payload:        []byte{5, 1, 2, 3, 4},
 					})
 					require.NoError(t, err)
 				}()
@@ -481,7 +587,7 @@ func TestSkipBackChannel(t *testing.T) {
 	p.Initialize()
 	defer p.Close()
 
-	so := &Source{
+	so := &rtsp.Source{
 		ReadTimeout:    conf.Duration(10 * time.Second),
 		WriteTimeout:   conf.Duration(10 * time.Second),
 		WriteQueueSize: 2048,
@@ -499,8 +605,8 @@ func TestSkipBackChannel(t *testing.T) {
 			Context:        ctx,
 			ResolvedSource: "rtsp://127.0.0.1:8555/teststream",
 			Conf: &conf.Path{
-				RTSPTransport:          conf.RTSPTransport{Protocol: ptrOf(gortsplib.ProtocolTCP)},
-				RTSPUDPSourcePortRange: []uint{10000, 65535},
+				RTSPTransport:          conf.RTSPTransport{Protocol: new(gortsplib.ProtocolTCP)},
+				RTSPUDPSourcePortRange: []uint{32768, 60999},
 			},
 		})
 		close(done)
@@ -561,7 +667,7 @@ func TestOnlyBackChannelsError(t *testing.T) {
 	p := &test.StaticSourceParent{}
 	p.Initialize()
 
-	so := &Source{
+	so := &rtsp.Source{
 		ReadTimeout:    conf.Duration(10 * time.Second),
 		WriteTimeout:   conf.Duration(10 * time.Second),
 		WriteQueueSize: 2048,
@@ -575,11 +681,187 @@ func TestOnlyBackChannelsError(t *testing.T) {
 		Context:        ctx,
 		ResolvedSource: "rtsp://127.0.0.1:8555/teststream",
 		Conf: &conf.Path{
-			RTSPTransport:          conf.RTSPTransport{Protocol: ptrOf(gortsplib.ProtocolTCP)},
-			RTSPUDPSourcePortRange: []uint{10000, 65535},
+			RTSPTransport:          conf.RTSPTransport{Protocol: new(gortsplib.ProtocolTCP)},
+			RTSPUDPSourcePortRange: []uint{32768, 60999},
 		},
 	})
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no media")
+}
+
+func TestSourceMPEGTSDemux(t *testing.T) {
+	var strm *gortsplib.ServerStream
+
+	media0 := &description.Media{
+		Type:    description.MediaTypeApplication,
+		Formats: []format.Format{&format.MPEGTS{}},
+	}
+
+	playCtx, playCancel := context.WithCancel(context.Background())
+	defer playCancel()
+
+	s := gortsplib.Server{
+		Handler: &testServer{
+			onDescribe: func(_ *gortsplib.ServerHandlerOnDescribeCtx) (*base.Response, *gortsplib.ServerStream, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, strm, nil
+			},
+			onSetup: func(_ *gortsplib.ServerHandlerOnSetupCtx) (*base.Response, *gortsplib.ServerStream, error) {
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, strm, nil
+			},
+			onPlay: func(_ *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, error) {
+				go func() {
+					time.Sleep(100 * time.Millisecond)
+
+					track := &mpegts.Track{Codec: &tscodecs.H264{}}
+
+					var buf bytes.Buffer
+					bw := bufio.NewWriter(&buf)
+					w := &mpegts.Writer{W: bw, Tracks: []*mpegts.Track{track}}
+					err2 := w.Initialize()
+					require.NoError(t, err2)
+
+					encoder, err2 := media0.Formats[0].(*format.MPEGTS).CreateEncoder()
+					require.NoError(t, err2)
+
+					offset := 0
+					n := 0
+
+					sendNew := func() {
+						err2 = bw.Flush()
+						require.NoError(t, err2)
+
+						raw := buf.Bytes()
+						if len(raw) <= offset {
+							return
+						}
+
+						chunk := raw[offset:]
+						offset = len(raw)
+						require.Zero(t, len(chunk)%188)
+
+						tsPackets := make([][]byte, 0, len(chunk)/188)
+						for len(chunk) > 0 {
+							tsPackets = append(tsPackets, chunk[:188:188])
+							chunk = chunk[188:]
+						}
+
+						rtpPackets, err3 := encoder.Encode(tsPackets)
+						require.NoError(t, err3)
+
+						for _, pkt := range rtpPackets {
+							err3 = strm.WritePacketRTP(media0, pkt)
+							if err3 != nil {
+								return
+							}
+						}
+					}
+
+					writeAU := func(au [][]byte) {
+						pts := int64(n) * 3600
+						err2 = w.WriteH264(track, pts, pts, au)
+						require.NoError(t, err2)
+						n++
+						sendNew()
+					}
+
+					// MPEG-TS muxer delays the first PES until a second AU is written.
+					// Keep writing after that: pull demux probes PAT/PMT before OnData is hooked.
+					writeAU([][]byte{
+						test.FormatH264.SPS,
+						test.FormatH264.PPS,
+						{5, 1},
+					})
+					writeAU([][]byte{{5, 2}})
+
+					ticker := time.NewTicker(40 * time.Millisecond)
+					defer ticker.Stop()
+
+					for {
+						select {
+						case <-playCtx.Done():
+							return
+						case <-ticker.C:
+							writeAU([][]byte{{5, 2}})
+						}
+					}
+				}()
+
+				return &base.Response{
+					StatusCode: base.StatusOK,
+				}, nil
+			},
+		},
+		RTSPAddress: "127.0.0.1:8556",
+	}
+
+	err := s.Start()
+	require.NoError(t, err)
+	defer s.Close()
+
+	strm = &gortsplib.ServerStream{
+		Server: &s,
+		Desc:   &description.Session{Medias: []*description.Media{media0}},
+	}
+	err = strm.Initialize()
+	require.NoError(t, err)
+	defer strm.Close()
+
+	p := &test.StaticSourceParent{}
+	p.Initialize()
+	var parentClosed sync.Once
+	closeParent := func() {
+		parentClosed.Do(func() {
+			p.Close()
+		})
+	}
+	defer closeParent()
+
+	so := &rtsp.Source{
+		ReadTimeout:    conf.Duration(10 * time.Second),
+		WriteTimeout:   conf.Duration(10 * time.Second),
+		WriteQueueSize: 2048,
+		Parent:         p,
+	}
+
+	done := make(chan struct{})
+	defer func() { <-done }()
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+
+	reloadConf := make(chan *conf.Path)
+
+	go func() {
+		so.Run(defs.StaticSourceRunParams{ //nolint:errcheck
+			Context:        ctx,
+			ResolvedSource: "rtsp://127.0.0.1:8556/teststream",
+			Conf: &conf.Path{
+				RTSPDemuxMpegts:        true,
+				RTSPTransport:          conf.RTSPTransport{Protocol: new(gortsplib.ProtocolTCP)},
+				RTSPUDPSourcePortRange: []uint{32768, 60999},
+			},
+			ReloadConf: reloadConf,
+		})
+		close(done)
+	}()
+
+	select {
+	case u := <-p.Unit:
+		require.Equal(t, unit.PayloadH264{
+			test.FormatH264.SPS,
+			test.FormatH264.PPS,
+			{5, 1},
+		}, u.Payload)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for demuxed H264")
+	}
+
+	playCancel()
+	closeParent()
+	reloadConf <- nil
 }

@@ -3,6 +3,7 @@ package stream
 
 import (
 	"os"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,9 +94,10 @@ func mediasFromAlwaysAvailableFile(alwaysAvailableFile string) ([]*description.M
 					IndexLength:      3,
 					IndexDeltaLength: 3,
 					Config: &mpeg4audio.AudioSpecificConfig{
-						Type:          mpeg4audio.ObjectTypeAACLC,
+						Type:          codec.Config.Type,
 						SampleRate:    codec.Config.SampleRate,
 						ChannelConfig: codec.Config.ChannelConfig,
+						ChannelCount:  codec.Config.ChannelCount, //nolint:staticcheck
 					},
 				}},
 			})
@@ -142,6 +144,9 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 				Type: description.MediaTypeVideo,
 				Formats: []format.Format{&format.H265{
 					PayloadTyp: 96,
+					VPS:        offlineH265VPS,
+					SPS:        offlineH265SPS,
+					PPS:        offlineH265PPS,
 				}},
 			})
 
@@ -151,6 +156,8 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 				Formats: []format.Format{&format.H264{
 					PayloadTyp:        96,
 					PacketizationMode: 1,
+					SPS:               offlineH264SPS,
+					PPS:               offlineH264PPS,
 				}},
 			})
 
@@ -164,6 +171,13 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 			})
 
 		case conf.CodecMPEG4Audio:
+			channelConfig := uint8(track.ChannelCount)
+
+			// channel configuration 7 stands for 8 channels
+			if track.ChannelCount == 8 {
+				channelConfig = 7
+			}
+
 			medias = append(medias, &description.Media{
 				Type: description.MediaTypeAudio,
 				Formats: []format.Format{&format.MPEG4Audio{
@@ -174,8 +188,8 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 					Config: &mpeg4audio.AudioSpecificConfig{
 						Type:          mpeg4audio.ObjectTypeAACLC,
 						SampleRate:    track.SampleRate,
-						ChannelConfig: uint8(track.ChannelCount),
-						ChannelCount:  track.ChannelCount,
+						ChannelConfig: channelConfig,
+						ChannelCount:  track.ChannelCount, //nolint:staticcheck
 					},
 				}},
 			})
@@ -216,28 +230,79 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 	return medias
 }
 
+func buildOfflineDesc(
+	alwaysAvailableTracks []conf.AlwaysAvailableTrack,
+	alwaysAvailableFile string,
+) (*description.Session, error) {
+	out := &description.Session{}
+
+	if alwaysAvailableFile != "" {
+		var err error
+		out.Medias, err = mediasFromAlwaysAvailableFile(alwaysAvailableFile)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		out.Medias = mediasFromAlwaysAvailableTracks(alwaysAvailableTracks)
+	}
+
+	return out, nil
+}
+
+func cloneFormatShallow(forma format.Format) format.Format {
+	v := reflect.New(reflect.TypeOf(forma).Elem())
+	v.Elem().Set(reflect.ValueOf(forma).Elem())
+	return v.Interface().(format.Format)
+}
+
+func cloneDesc(desc *description.Session) *description.Session {
+	out := &description.Session{
+		Title:  desc.Title,
+		Medias: make([]*description.Media, len(desc.Medias)),
+	}
+
+	for i, media := range desc.Medias {
+		formats := make([]format.Format, len(media.Formats))
+
+		for j, forma := range media.Formats {
+			formats[j] = cloneFormatShallow(forma)
+		}
+
+		out.Medias[i] = &description.Media{
+			Type:    media.Type,
+			Formats: formats,
+		}
+	}
+
+	return out
+}
+
 // Stream is a media stream.
 // It stores tracks, readers and allows to write data to readers, remuxing it when needed.
 type Stream struct {
-	Desc                  *description.Session
+	OrigDesc              *description.Session
 	AlwaysAvailable       bool
-	AlwaysAvailableFile   string
 	AlwaysAvailableTracks []conf.AlwaysAvailableTrack
+	AlwaysAvailableFile   string
 	WriteQueueSize        int
 	RTPMaxPayloadSize     int
 	ReplaceNTP            bool
 	Parent                logger.Writer
 
-	mutex            sync.RWMutex
-	subStream        *SubStream
-	offlineSubStream *offlineSubStream
-	bytesReceived    *uint64
-	bytesSent        *uint64
-	medias           map[*description.Media]*streamMedia
-	rtspStream       *gortsplib.ServerStream
-	rtspsStream      *gortsplib.ServerStream
-	readers          map[*Reader]struct{}
-	processingErrors *errordumper.Dumper
+	outDescMutex sync.RWMutex
+	outDesc      *description.Session
+
+	offlineDesc          *description.Session
+	mutex                sync.RWMutex
+	subStream            *SubStream
+	offlineSubStream     *offlineSubStream
+	inboundBytes         atomic.Uint64
+	outboundBytes        atomic.Uint64
+	medias               map[*description.Media]*streamMedia
+	rtspStream           *gortsplib.ServerStream
+	rtspsStream          *gortsplib.ServerStream
+	readers              map[*Reader]struct{}
+	inboundFramesInError *errordumper.Dumper
 
 	timeMutex         sync.Mutex
 	firstTimeReceived bool
@@ -250,37 +315,27 @@ type Stream struct {
 // Initialize initializes a Stream.
 func (s *Stream) Initialize() error {
 	if s.AlwaysAvailable {
-		if s.Desc != nil {
+		if s.OrigDesc != nil {
 			panic("should not happen")
 		}
 		if !s.ReplaceNTP {
 			panic("should not happen")
 		}
 
-		var medias []*description.Media
-
-		if s.AlwaysAvailableFile != "" {
-			var err error
-			medias, err = mediasFromAlwaysAvailableFile(s.AlwaysAvailableFile)
-			if err != nil {
-				return err
-			}
-		} else {
-			medias = mediasFromAlwaysAvailableTracks(s.AlwaysAvailableTracks)
+		var err error
+		s.offlineDesc, err = buildOfflineDesc(s.AlwaysAvailableTracks, s.AlwaysAvailableFile)
+		if err != nil {
+			return err
 		}
 
-		s.Desc = &description.Session{
-			Medias: medias,
-		}
+		s.OrigDesc = s.offlineDesc
 	}
 
-	s.bytesReceived = new(uint64)
-	s.bytesSent = new(uint64)
 	s.medias = make(map[*description.Media]*streamMedia)
 	s.readers = make(map[*Reader]struct{})
 	s.hasReaders = make(chan struct{})
 
-	s.processingErrors = &errordumper.Dumper{
+	s.inboundFramesInError = &errordumper.Dumper{
 		OnReport: func(val uint64, last error) {
 			if val == 1 {
 				s.Parent.Log(logger.Warn, "processing error: %v", last)
@@ -289,28 +344,36 @@ func (s *Stream) Initialize() error {
 			}
 		},
 	}
-	s.processingErrors.Start()
+	s.inboundFramesInError.Start()
 
 	s.lastSystemTime = time.Now()
 
-	for _, media := range s.Desc.Medias {
+	s.outDesc = &description.Session{
+		Title:  s.OrigDesc.Title,
+		Medias: make([]*description.Media, len(s.OrigDesc.Medias)),
+	}
+
+	for i, origMedia := range s.OrigDesc.Medias {
 		sm := &streamMedia{
-			media:             media,
-			alwaysAvailable:   s.AlwaysAvailable,
-			rtpMaxPayloadSize: s.RTPMaxPayloadSize,
-			replaceNTP:        s.ReplaceNTP,
-			addBytesReceived:  s.addBytesReceived,
-			addBytesSent:      s.addBytesSent,
-			updateLastTime:    s.updateLastTime,
-			writeRTSP:         s.writeRTSP,
-			processingErrors:  s.processingErrors,
-			parent:            s.Parent,
+			origMedia:            origMedia,
+			alwaysAvailable:      s.AlwaysAvailable,
+			rtpMaxPayloadSize:    s.RTPMaxPayloadSize,
+			replaceNTP:           s.ReplaceNTP,
+			inboundBytes:         &s.inboundBytes,
+			outboundBytes:        &s.outboundBytes,
+			updateLastTime:       s.updateLastTime,
+			writeRTSP:            s.writeRTSP,
+			updateOutDesc:        s.updateOutDesc,
+			inboundFramesInError: s.inboundFramesInError,
+			parent:               s.Parent,
 		}
 		err := sm.initialize()
 		if err != nil {
 			return err
 		}
-		s.medias[media] = sm
+
+		s.medias[origMedia] = sm
+		s.outDesc.Medias[i] = sm.outMedia
 	}
 
 	if s.AlwaysAvailable {
@@ -329,7 +392,7 @@ func (s *Stream) Close() {
 		s.offlineSubStream.close(false)
 	}
 
-	s.processingErrors.Stop()
+	s.inboundFramesInError.Stop()
 
 	if s.rtspStream != nil {
 		s.rtspStream.Close()
@@ -362,85 +425,96 @@ func (s *Stream) StartOfflineSubStream() error {
 	return nil
 }
 
-// BytesReceived returns received bytes.
-func (s *Stream) BytesReceived() uint64 {
-	return atomic.LoadUint64(s.bytesReceived)
+// InboundBytes returns received bytes.
+func (s *Stream) InboundBytes() uint64 {
+	return s.inboundBytes.Load()
 }
 
-// BytesSent returns sent bytes.
-func (s *Stream) BytesSent() uint64 {
-	bytesSent := atomic.LoadUint64(s.bytesSent)
+// OutboundBytes returns sent bytes.
+func (s *Stream) OutboundBytes() uint64 {
+	outboundBytes := s.outboundBytes.Load()
 
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
 	if s.rtspStream != nil {
 		stats := s.rtspStream.Stats()
-		bytesSent += stats.BytesSent
+		outboundBytes += stats.OutboundBytes
 	}
 	if s.rtspsStream != nil {
 		stats := s.rtspsStream.Stats()
-		bytesSent += stats.BytesSent
+		outboundBytes += stats.OutboundBytes
 	}
 
-	return bytesSent
+	return outboundBytes
+}
+
+// InboundFramesInError returns the number of frames received with processing errors.
+func (s *Stream) InboundFramesInError() uint64 {
+	return s.inboundFramesInError.Get()
 }
 
 // RTSPStream returns the RTSP stream.
-func (s *Stream) RTSPStream(server *gortsplib.Server) *gortsplib.ServerStream {
+func (s *Stream) RTSPStream(server *gortsplib.Server) (*gortsplib.ServerStream, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	if s.rtspStream == nil {
-		s.rtspStream = &gortsplib.ServerStream{
+		strm := &gortsplib.ServerStream{
 			Server: server,
-			Desc:   s.Desc,
+			Desc:   s.outDesc,
 		}
-		err := s.rtspStream.Initialize()
+		err := strm.Initialize()
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
+
+		s.rtspStream = strm
 	}
-	return s.rtspStream
+
+	return s.rtspStream, nil
 }
 
 // RTSPSStream returns the RTSPS stream.
-func (s *Stream) RTSPSStream(server *gortsplib.Server) *gortsplib.ServerStream {
+func (s *Stream) RTSPSStream(server *gortsplib.Server) (*gortsplib.ServerStream, error) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	if s.rtspsStream == nil {
-		s.rtspsStream = &gortsplib.ServerStream{
+		strm := &gortsplib.ServerStream{
 			Server: server,
-			Desc:   s.Desc,
+			Desc:   s.outDesc,
 		}
-		err := s.rtspsStream.Initialize()
+		err := strm.Initialize()
 		if err != nil {
-			panic(err)
+			return nil, err
 		}
+
+		s.rtspsStream = strm
 	}
-	return s.rtspsStream
+
+	return s.rtspsStream, nil
 }
 
 // AddReader adds a reader.
 // Used by all protocols except RTSP.
 func (s *Stream) AddReader(r *Reader) {
+	r.queueSize = s.WriteQueueSize
+	r.start()
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
 	s.readers[r] = struct{}{}
 
-	for medi, formats := range r.onDatas {
-		sm := s.medias[medi]
+	for origMedia, origFormats := range r.onDatas {
+		sm := s.medias[origMedia]
 
-		for forma, onData := range formats {
-			sf := sm.formats[forma]
+		for origFormat, onData := range origFormats {
+			sf := sm.formats[origFormat]
 			sf.onDatas[r] = onData
 		}
 	}
-
-	r.queueSize = s.WriteQueueSize
-	r.start()
 
 	select {
 	case <-s.hasReaders:
@@ -453,9 +527,6 @@ func (s *Stream) AddReader(r *Reader) {
 // Used by all protocols except RTSP.
 func (s *Stream) RemoveReader(r *Reader) {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	r.stop()
 
 	for medi, formats := range r.onDatas {
 		sm := s.medias[medi]
@@ -467,6 +538,10 @@ func (s *Stream) RemoveReader(r *Reader) {
 	}
 
 	delete(s.readers, r)
+
+	s.mutex.Unlock()
+
+	r.stop()
 }
 
 // WaitForReaders waits for the stream to have at least one reader.
@@ -474,12 +549,27 @@ func (s *Stream) WaitForReaders() {
 	<-s.hasReaders
 }
 
-func (s *Stream) addBytesReceived(v uint64) {
-	atomic.AddUint64(s.bytesReceived, v)
+// OutDescCopy returns a copy of the output description.
+func (s *Stream) OutDescCopy() *description.Session {
+	s.outDescMutex.RLock()
+	defer s.outDescMutex.RUnlock()
+
+	return cloneDesc(s.outDesc)
 }
 
-func (s *Stream) addBytesSent(v uint64) {
-	atomic.AddUint64(s.bytesSent, v)
+func (s *Stream) updateOutDesc(update func()) {
+	s.outDescMutex.Lock()
+	defer s.outDescMutex.Unlock()
+
+	update()
+
+	if s.rtspStream != nil {
+		s.rtspStream.ReloadDesc()
+	}
+
+	if s.rtspsStream != nil {
+		s.rtspsStream.ReloadDesc()
+	}
 }
 
 func (s *Stream) updateLastTime(pts time.Duration) {
@@ -495,16 +585,22 @@ func (s *Stream) updateLastTime(pts time.Duration) {
 	s.lastSystemTime = time.Now()
 }
 
-func (s *Stream) writeRTSP(medi *description.Media, pkts []*rtp.Packet, ntp time.Time) {
+func (s *Stream) writeRTSP(outMedia *description.Media, pkts []*rtp.Packet, ntp time.Time) {
 	if s.rtspStream != nil {
 		for _, pkt := range pkts {
-			s.rtspStream.WritePacketRTPWithNTP(medi, pkt, ntp) //nolint:errcheck
+			err := s.rtspStream.WritePacketRTPWithNTP(outMedia, pkt, ntp)
+			if err != nil {
+				s.Parent.Log(logger.Error, "error writing packet to RTSP stream: %v", err)
+			}
 		}
 	}
 
 	if s.rtspsStream != nil {
 		for _, pkt := range pkts {
-			s.rtspsStream.WritePacketRTPWithNTP(medi, pkt, ntp) //nolint:errcheck
+			err := s.rtspsStream.WritePacketRTPWithNTP(outMedia, pkt, ntp)
+			if err != nil {
+				s.Parent.Log(logger.Error, "error writing packet to RTSPS stream: %v", err)
+			}
 		}
 	}
 }

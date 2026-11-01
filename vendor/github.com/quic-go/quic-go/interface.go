@@ -50,30 +50,26 @@ type TokenStore interface {
 	Put(key string, token *ClientToken)
 }
 
-// Err0RTTRejected is the returned from:
-//   - Open{Uni}Stream{Sync}
-//   - Accept{Uni}Stream
-//   - Stream.Read and Stream.Write
+// Err0RTTRejected can be returned by methods such as:
+//   - [Conn.OpenStream], [Conn.OpenStreamSync], [Conn.OpenUniStream], and [Conn.OpenUniStreamSync]
+//   - [Conn.AcceptStream] and [Conn.AcceptUniStream]
+//   - [Stream.Read] and [Stream.Write]
 //
 // when the server rejects a 0-RTT connection attempt.
 var Err0RTTRejected = errors.New("0-RTT rejected")
 
-// ConnectionTracingKey can be used to associate a [logging.ConnectionTracer] with a [Conn].
-// It is set on the Conn.Context() context,
-// as well as on the context passed to logging.Tracer.NewConnectionTracer.
-//
-// Deprecated: Applications can set their own tracing key using Transport.ConnContext.
-var ConnectionTracingKey = connTracingCtxKey{}
+// ErrWouldBlock is returned by [SendStream.TryWriteAll] if the entire slice can't be queued immediately.
+var ErrWouldBlock = errors.New("operation would block")
 
-// ConnectionTracingID is the type of the context value saved under the ConnectionTracingKey.
-//
-// Deprecated: Applications can set their own tracing key using Transport.ConnContext.
-type ConnectionTracingID uint64
+// ErrWriteLimitReached is returned by [SendStream.WriteWithLimit] when its limiter prevents accepting the entire slice.
+var ErrWriteLimitReached = errors.New("write limit reached")
 
-type connTracingCtxKey struct{}
+// ErrStreamClosed is returned when writing to a stream after [SendStream.Close] was called.
+// Closing a stream also cancels its context with this error as the cause.
+var ErrStreamClosed = errors.New("stream closed")
 
 // QUICVersionContextKey can be used to find out the QUIC version of a TLS handshake from the
-// context returned by tls.Config.ClientInfo.Context.
+// context returned by [tls.ClientHelloInfo.Context].
 var QUICVersionContextKey = handshake.QUICVersionContextKey
 
 // StatelessResetKey is a key used to derive stateless reset tokens.
@@ -175,6 +171,9 @@ type Config struct {
 	// Under most circumstances, it is not necessary to manually set this value,
 	// since path MTU discovery quickly finds the path's MTU.
 	// If set too high, the path might not support packets of that size, leading to a timeout of the QUIC handshake.
+	// If set to 0, it defaults to 1280 bytes and falls back to 1200 bytes if the first write at that size
+	// returns a "message too long" error. An explicitly set value is kept as the lower limit;
+	// a "message too long" error at that size fails the handshake instead.
 	// Values below 1200 are invalid.
 	InitialPacketSize uint16
 	// DisablePathMTUDiscovery disables Path MTU Discovery (RFC 8899).
@@ -187,25 +186,21 @@ type Config struct {
 	// Enable QUIC datagram support (RFC 9221).
 	EnableDatagrams bool
 	// Enable QUIC Stream Resets with Partial Delivery.
-	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-07.
+	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09.
 	EnableStreamResetPartialDelivery bool
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
 }
-
-// ClientHelloInfo contains information about an incoming connection attempt.
-//
-// Deprecated: Use ClientInfo instead.
-type ClientHelloInfo = ClientInfo
 
 // ClientInfo contains information about an incoming connection attempt.
 type ClientInfo struct {
 	// RemoteAddr is the remote address on the Initial packet.
 	// Unless AddrVerified is set, the address is not yet verified, and could be a spoofed IP address.
 	RemoteAddr net.Addr
-	// AddrVerified says if the remote address was verified using QUIC's Retry mechanism.
-	// Note that the Retry mechanism costs one network roundtrip,
-	// and is not performed unless Transport.MaxUnvalidatedHandshakes is surpassed.
+	// AddrVerified reports whether the remote address was verified by a valid address validation token,
+	// including a token received in a NEW_TOKEN frame.
+	// The Retry mechanism costs one network roundtrip and is only used when
+	// [Transport.VerifySourceAddress] requests it.
 	AddrVerified bool
 }
 
@@ -213,13 +208,18 @@ type ClientInfo struct {
 type ConnectionState struct {
 	// TLS contains information about the TLS connection state, incl. the tls.ConnectionState.
 	TLS tls.ConnectionState
-	// SupportsDatagrams indicates whether the peer advertised support for QUIC datagrams (RFC 9221).
-	// When true, datagrams can be sent using the Conn's SendDatagram method.
-	// This is a unilateral declaration by the peer - receiving datagrams is only possible if
-	// datagram support was enabled locally via Config.EnableDatagrams.
-	SupportsDatagrams bool
-	// SupportsStreamResetPartialDelivery indicates whether the peer advertised support for QUIC Stream Resets with Partial Delivery.
-	SupportsStreamResetPartialDelivery bool
+	// SupportsDatagrams indicates support for QUIC datagrams (RFC 9221).
+	SupportsDatagrams struct {
+		// Remote is true if the peer advertised datagram support.
+		// Local is true if datagram support was enabled via Config.EnableDatagrams.
+		Remote, Local bool
+	}
+	// SupportsStreamResetPartialDelivery indicates support for QUIC Stream Resets with Partial Delivery.
+	SupportsStreamResetPartialDelivery struct {
+		// Remote is true if the peer advertised support.
+		// Local is true if support was enabled via Config.EnableStreamResetPartialDelivery.
+		Remote, Local bool
+	}
 	// Used0RTT says if 0-RTT resumption was used.
 	Used0RTT bool
 	// Version is the QUIC version of the QUIC connection.

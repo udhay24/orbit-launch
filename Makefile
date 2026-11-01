@@ -1,6 +1,6 @@
-BASE_IMAGE = golang:1.26-alpine3.22
-GOLANGCI_LINT_IMAGE = golangci/golangci-lint:v2.10.1
-NODE_IMAGE = node:20-alpine3.22
+BASE_IMAGE = golang:1.27-alpine3.24
+GOLANGCI_LINT_IMAGE = golangci/golangci-lint:v2.15.0
+NODE_IMAGE = node:24-alpine3.24
 
 .PHONY: $(shell ls)
 
@@ -16,6 +16,7 @@ help:
 	@echo "  lint             run linters"
 	@echo "  binaries         build binaries for all supported platforms"
 	@echo "  dockerhub        build and push images to Docker Hub"
+	@echo "  apidocs          generate API documentation"
 	@echo ""
 
 blank :=

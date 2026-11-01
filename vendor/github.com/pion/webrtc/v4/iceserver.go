@@ -2,14 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package webrtc
 
 import (
 	"encoding/json"
 
-	"github.com/pion/stun/v3"
+	"github.com/pion/stun/v4"
 	"github.com/pion/webrtc/v4/pkg/rtcerr"
 )
 

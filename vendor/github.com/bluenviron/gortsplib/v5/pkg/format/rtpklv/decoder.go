@@ -42,7 +42,7 @@ func (d *Decoder) Init() error {
 
 // reset clears the decoder state.
 func (d *Decoder) reset() {
-	d.buffer = d.buffer[:0]
+	d.buffer = nil // do not reuse buffer to avoid race conditions
 	d.expectedSize = 0
 	d.currentTimestamp = 0
 	d.assembling = false
@@ -91,6 +91,7 @@ func isKLVStart(payload []byte) bool {
 // Decode decodes a KLV unit from RTP packets.
 // It returns the complete KLV unit when all packets have been received,
 // or ErrMorePacketsNeeded if more packets are needed.
+// On success, the KLV unit contains at least one byte.
 func (d *Decoder) Decode(pkt *rtp.Packet) ([]byte, error) {
 	payload := pkt.Payload
 	marker := pkt.Marker

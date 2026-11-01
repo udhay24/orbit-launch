@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bluenviron/mediacommon/v2/pkg/rewindablereader"
+	"github.com/gorilla/websocket"
+
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/gortsplib/v5/pkg/conn"
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
-	"github.com/bluenviron/mediacommon/v2/pkg/rewindablereader"
-	"github.com/gorilla/websocket"
 )
 
 func isHTTPTunnel(req *http.Request) bool {
@@ -100,8 +101,7 @@ func (cr *serverConnReader) runInner() error {
 	for {
 		err := readFunc()
 
-		var eerr switchReadFuncError
-		if errors.As(err, &eerr) {
+		if eerr, ok := errors.AsType[switchReadFuncError](err); ok {
 			if eerr.tcp {
 				readFunc = cr.readFuncTCP
 			} else {
@@ -158,7 +158,7 @@ func (cr *serverConnReader) handleTunneling(in io.ReadWriter) (io.ReadWriter, er
 
 			cr.sc.httpReadBuf = buf
 
-			err = cr.sc.s.handleHTTPChannel(sessionHandleHTTPChannelReq{
+			err = cr.sc.s.handleHTTPChannel(serverHandleHTTPChannelReq{
 				sc:       cr.sc,
 				write:    (req.Method == http.MethodPost),
 				tunnelID: req.Header.Get("X-Sessioncookie"),

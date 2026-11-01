@@ -4,9 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/pion/rtp"
-
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/ac3"
+	"github.com/pion/rtp"
 )
 
 // ErrMorePacketsNeeded is returned when more packets are needed.
@@ -28,7 +27,7 @@ func joinFragments(fragments [][]byte, size int) []byte {
 	return ret
 }
 
-// Decoder is a AC-3 decoder.
+// Decoder is a RTP/AC-3 decoder.
 // Specification: RFC4184
 type Decoder struct {
 	firstPacketReceived bool
@@ -49,6 +48,7 @@ func (d *Decoder) resetFragments() {
 }
 
 // Decode decodes frames from a RTP packet.
+// On success, it returns at least one frame, each with at least one byte.
 func (d *Decoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 	if len(pkt.Payload) < 2 {
 		d.resetFragments()

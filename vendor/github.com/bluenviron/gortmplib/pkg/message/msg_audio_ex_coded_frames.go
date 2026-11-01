@@ -17,7 +17,7 @@ type AudioExCodedFrames struct {
 }
 
 func (m *AudioExCodedFrames) unmarshal(raw *rawmessage.Message) error {
-	if len(raw.Body) < 5 {
+	if len(raw.Body) < 6 {
 		return fmt.Errorf("not enough bytes")
 	}
 
@@ -27,7 +27,7 @@ func (m *AudioExCodedFrames) unmarshal(raw *rawmessage.Message) error {
 
 	m.FourCC = FourCC(raw.Body[1])<<24 | FourCC(raw.Body[2])<<16 | FourCC(raw.Body[3])<<8 | FourCC(raw.Body[4])
 	switch m.FourCC {
-	case FourCCOpus, FourCCAC3, FourCCMP4A, FourCCMP3:
+	case FourCCOpus, FourCCAC3, FourCCMP4A, FourCCMP3, FourCCFLAC:
 	default:
 		return fmt.Errorf("unsupported fourCC: %v", m.FourCC)
 	}

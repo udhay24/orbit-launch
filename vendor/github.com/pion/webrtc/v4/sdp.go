@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package webrtc
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -90,9 +90,8 @@ func trackDetailsFromSDP(
 		trackID := ""
 
 		// If media section is recvonly or inactive skip
-		if _, ok := media.Attribute(sdp.AttrKeyRecvOnly); ok {
-			continue
-		} else if _, ok := media.Attribute(sdp.AttrKeyInactive); ok {
+		direction := getPeerDirection(media, s)
+		if direction == RTPTransceiverDirectionRecvonly || direction == RTPTransceiverDirectionInactive {
 			continue
 		}
 
@@ -282,7 +281,7 @@ func trackDetailsToRTPReceiveParameters(trackDetails *trackDetails) RTPReceivePa
 	return RTPReceiveParameters{Encodings: encodings}
 }
 
-func getRids(media *sdp.MediaDescription) []*simulcastRid {
+func getRids(media *sdp.MediaDescription) []*simulcastRid { // nolint:cyclop
 	rids := []*simulcastRid{}
 	var simulcastAttr string
 	for _, attr := range media.Attributes {
@@ -298,9 +297,9 @@ func getRids(media *sdp.MediaDescription) []*simulcastRid {
 		if space := strings.Index(simulcastAttr, " "); space > 0 {
 			simulcastAttr = simulcastAttr[space+1:]
 		}
-		ridStates := strings.Split(simulcastAttr, ";")
-		for _, ridState := range ridStates {
-			if ridState[:1] == "~" {
+		ridStates := strings.SplitSeq(simulcastAttr, ";")
+		for ridState := range ridStates {
+			if len(ridState) > 0 && ridState[:1] == "~" {
 				ridID := ridState[1:]
 				for _, rid := range rids {
 					if rid.id == ridID {
@@ -369,6 +368,7 @@ func addDataMediaSection(
 	dtlsRole sdp.ConnectionRole,
 	iceGatheringState ICEGatheringState,
 	sctpMaxMessageSize uint32,
+	sctpInit []byte,
 ) error {
 	media := (&sdp.MediaDescription{
 		MediaName: sdp.MediaName{
@@ -392,6 +392,9 @@ func addDataMediaSection(
 		WithValueAttribute("max-message-size", fmt.Sprintf("%d", sctpMaxMessageSize)).
 		WithICECredentials(iceParams.UsernameFragment, iceParams.Password)
 
+	if len(sctpInit) != 0 {
+		media = media.WithValueAttribute("sctp-init", base64.StdEncoding.EncodeToString(sctpInit))
+	}
 	for _, f := range dtlsFingerprints {
 		media = media.WithFingerprint(f.Algorithm, strings.ToUpper(f.Value))
 	}
@@ -640,6 +643,10 @@ func addTransceiverSDP(
 		media.WithValueAttribute(sdpAttributeSimulcast, "recv "+strings.Join(recvRids, ";"))
 	}
 
+	if mediaSection.cryptex {
+		media = media.WithPropertyAttribute(sdp.AttrKeyCryptex)
+	}
+
 	addSenderSDP(mediaSection, isPlanB, media)
 
 	media = media.WithPropertyAttribute(transceiver.Direction().String())
@@ -669,8 +676,10 @@ type mediaSection struct {
 	id              string
 	transceivers    []*RTPTransceiver
 	data            bool
+	sctpInit        []byte
 	matchExtensions map[string]int
 	rids            []*simulcastRid
+	cryptex         bool
 }
 
 func bundleMatchFromRemote(matchBundleGroup *string) func(mid string) bool {
@@ -688,7 +697,7 @@ func bundleMatchFromRemote(matchBundleGroup *string) func(mid string) bool {
 
 // populateSDP serializes a PeerConnections state into an SDP.
 //
-//nolint:cyclop
+//nolint:cyclop,gocognit
 func populateSDP(
 	descr *sdp.SessionDescription,
 	isPlanB bool,
@@ -705,6 +714,7 @@ func populateSDP(
 	matchBundleGroup *string,
 	sctpMaxMessageSize uint32,
 	ignoreRidPauseForRecv bool,
+	cryptexAtSessionLevel bool,
 ) (*sdp.SessionDescription, error) {
 	var err error
 	mediaDtlsFingerprints := []DTLSFingerprint{}
@@ -721,6 +731,8 @@ func populateSDP(
 		bundleValue += " " + midValue
 		bundleCount++
 	}
+
+	haveActiveRTPMedia := false
 
 	for i, section := range mediaSections {
 		if section.data && len(section.transceivers) != 0 {
@@ -742,6 +754,7 @@ func populateSDP(
 				connectionRole,
 				iceGatheringState,
 				sctpMaxMessageSize,
+				section.sctpInit,
 			); err != nil {
 				return nil, err
 			}
@@ -772,6 +785,15 @@ func populateSDP(
 				descr.MediaDescriptions[len(descr.MediaDescriptions)-1].MediaName.Port = sdp.RangedPort{Value: 0}
 			}
 		}
+
+		// Determine if we have any active RTP m-lines.
+		// We only add session-level Cryptex if there is at least one RTP m-line with a non-zero port.
+		if !section.data {
+			md := descr.MediaDescriptions[len(descr.MediaDescriptions)-1]
+			if md.MediaName.Port.Value != 0 && md.MediaName.Media != mediaSectionApplication {
+				haveActiveRTPMedia = true
+			}
+		}
 	}
 
 	if !mediaDescriptionFingerprint {
@@ -787,6 +809,10 @@ func populateSDP(
 
 	if isExtmapAllowMixed {
 		descr = descr.WithPropertyAttribute(sdp.AttrKeyExtMapAllowMixed)
+	}
+
+	if cryptexAtSessionLevel && haveActiveRTPMedia {
+		descr = descr.WithPropertyAttribute(sdp.AttrKeyCryptex)
 	}
 
 	if bundleCount > 0 {
@@ -843,14 +869,18 @@ func descriptionPossiblyPlanB(desc *SessionDescription) bool {
 	return false
 }
 
-func getPeerDirection(media *sdp.MediaDescription) RTPTransceiverDirection {
-	for _, a := range media.Attributes {
-		if direction := NewRTPTransceiverDirection(a.Key); direction != RTPTransceiverDirectionUnknown {
-			return direction
+// getPeerDirection resolves media direction according to
+// https://www.rfc-editor.org/rfc/rfc8866.html#section-6.7
+func getPeerDirection(media *sdp.MediaDescription, session *sdp.SessionDescription) RTPTransceiverDirection {
+	for _, attributes := range [][]sdp.Attribute{media.Attributes, session.Attributes} {
+		for _, attribute := range attributes {
+			if direction := NewRTPTransceiverDirection(attribute.Key); direction != RTPTransceiverDirectionUnknown {
+				return direction
+			}
 		}
 	}
 
-	return RTPTransceiverDirectionUnknown
+	return RTPTransceiverDirectionSendrecv
 }
 
 func extractBundleID(desc *sdp.SessionDescription) string {
@@ -994,7 +1024,7 @@ func extractICEDetailsFromMedia( //nolint:cyclop
 
 type sdpICEDetails struct {
 	Ufrag      string
-	Password   string
+	Password   string //nolint:gosec // not a secret.
 	Candidates []ICECandidate
 }
 
@@ -1096,6 +1126,7 @@ func codecsFromMediaDescription(mediaDescr *sdp.MediaDescription) (out []RTPCode
 	s := &sdp.SessionDescription{
 		MediaDescriptions: []*sdp.MediaDescription{mediaDescr},
 	}
+	codecMap := s.GetCodecMap()
 
 	for _, payloadStr := range mediaDescr.MediaName.Formats {
 		payloadType, err := strconv.ParseUint(payloadStr, 10, 8)
@@ -1103,13 +1134,13 @@ func codecsFromMediaDescription(mediaDescr *sdp.MediaDescription) (out []RTPCode
 			return nil, err
 		}
 
-		codec, err := s.GetCodecForPayloadType(uint8(payloadType))
-		if err != nil {
+		codec, ok := codecMap[uint8(payloadType)]
+		if !ok {
 			if payloadType == 0 {
 				continue
 			}
 
-			return nil, err
+			return nil, fmt.Errorf("%w: payload type %d", errSDPPayloadTypeNotFound, payloadType)
 		}
 
 		channels := uint16(0)
@@ -1199,6 +1230,16 @@ func isExtMapAllowMixedSet(desc *sdp.SessionDescription) bool {
 	return false
 }
 
+func isCryptexSet(desc *sdp.MediaDescription) bool {
+	for _, a := range desc.Attributes {
+		if a.Key == sdp.AttrKeyCryptex {
+			return true
+		}
+	}
+
+	return false
+}
+
 func getMaxMessageSize(desc *sdp.MediaDescription) uint32 {
 	for _, a := range desc.Attributes {
 		if strings.TrimSpace(a.Key) == "max-message-size" {
@@ -1209,4 +1250,19 @@ func getMaxMessageSize(desc *sdp.MediaDescription) uint32 {
 	}
 
 	return 0
+}
+
+func getSctpInit(desc *sdp.MediaDescription) ([]byte, error) {
+	for _, a := range desc.Attributes {
+		if strings.TrimSpace(a.Key) == "sctp-init" {
+			decoded, err := base64.StdEncoding.DecodeString(a.Value)
+			if err != nil {
+				return nil, err
+			}
+
+			return decoded, nil
+		}
+	}
+
+	return nil, nil
 }

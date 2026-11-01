@@ -2,38 +2,243 @@ package api //nolint:revive
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/stretchr/testify/require"
 )
 
 type testParent struct {
-	log func(_ logger.Level, _ string, _ ...any)
+	log  func(_ logger.Level, _ string, _ ...any)
+	conf *conf.Conf
+	ids  []uuid.UUID
 }
 
-func (p testParent) Log(l logger.Level, s string, a ...any) {
+func TestMediaIdentityJSON(t *testing.T) {
+	expiresAt := time.Date(2026, time.October, 20, 12, 0, 0, 0, time.UTC)
+	for _, ca := range []struct {
+		name string
+		make func(*time.Time) any
+	}{
+		{"rtsp", func(exp *time.Time) any { return defs.APIRTSPSession{User: "somebody", ExpiresAt: exp} }},
+		{"rtmp", func(exp *time.Time) any { return defs.APIRTMPConn{User: "somebody", ExpiresAt: exp} }},
+		{"srt", func(exp *time.Time) any { return defs.APISRTConn{User: "somebody", ExpiresAt: exp} }},
+		{"hls", func(exp *time.Time) any { return defs.APIHLSSession{User: "somebody", ExpiresAt: exp} }},
+		{"webrtc", func(exp *time.Time) any { return defs.APIWebRTCSession{User: "somebody", ExpiresAt: exp} }},
+		{"moq", func(exp *time.Time) any { return defs.APIMoQSession{User: "somebody", ExpiresAt: exp} }},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			for _, exp := range []*time.Time{nil, &expiresAt} {
+				byts, err := json.Marshal(ca.make(exp))
+				require.NoError(t, err)
+
+				var fields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(byts, &fields))
+				require.JSONEq(t, `"somebody"`, string(fields["user"]))
+				if exp == nil {
+					require.Equal(t, `null`, string(fields["expiresAt"]))
+				} else {
+					require.JSONEq(t, `"2026-10-20T12:00:00Z"`, string(fields["expiresAt"]))
+				}
+			}
+		})
+	}
+}
+
+func (p *testParent) Log(l logger.Level, s string, a ...any) {
 	if p.log != nil {
 		p.log(l, s, a...)
 	}
 }
 
-func (testParent) APIConfigSet(_ *conf.Conf) {}
+func (p *testParent) OnFatalError(context.Context, error) {
+}
+
+func (p *testParent) APIConfigSnapshot() *conf.Conf { return p.conf }
+
+func (p *testParent) APIConfigGlobalPatch(_ context.Context, in conf.OptionalGlobal) error {
+	newConf := p.conf.Clone()
+
+	err := newConf.PatchGlobal(&in)
+	if err != nil {
+		return err
+	}
+
+	p.conf = newConf
+	return nil
+}
+
+func (p *testParent) APIConfigPathDefaultsPatch(_ context.Context, in conf.OptionalPath) error {
+	newConf := p.conf.Clone()
+
+	err := newConf.PatchPathDefaults(&in)
+	if err != nil {
+		return err
+	}
+
+	p.conf = newConf
+	return nil
+}
+
+func (p *testParent) APIConfigPathsAdd(_ context.Context, name string, in conf.OptionalPath) error {
+	newConf := p.conf.Clone()
+
+	if err := newConf.AddPath(name, &in); err != nil {
+		return err
+	}
+
+	p.conf = newConf
+	return nil
+}
+
+func (p *testParent) APIConfigPathsPatch(_ context.Context, name string, in conf.OptionalPath) error {
+	newConf := p.conf.Clone()
+
+	err := newConf.PatchPath(name, &in)
+	if err != nil {
+		return err
+	}
+
+	p.conf = newConf
+	return nil
+}
+
+func (p *testParent) APIConfigPathsReplace(_ context.Context, name string, in conf.OptionalPath) error {
+	newConf := p.conf.Clone()
+
+	err := newConf.ReplacePath(name, &in)
+	if err != nil {
+		return err
+	}
+
+	p.conf = newConf
+	return nil
+}
+
+func (p *testParent) APIConfigPathsDelete(_ context.Context, name string) error {
+	newConf := p.conf.Clone()
+
+	err := newConf.RemovePath(name)
+	if err != nil {
+		return err
+	}
+
+	p.conf = newConf
+	return nil
+}
+
+func (p *testParent) APIConfigInternalUsersSnapshot() ([]defs.APIInternalUser, error) {
+	if len(p.ids) != len(p.conf.AuthInternalUsers) {
+		p.ids = make([]uuid.UUID, len(p.conf.AuthInternalUsers))
+		for i := range p.ids {
+			p.ids[i] = uuid.New()
+		}
+	}
+	c := conf.Redact(p.conf)
+	items := make([]defs.APIInternalUser, len(c.AuthInternalUsers))
+	for i, user := range c.AuthInternalUsers {
+		items[i] = defs.APIInternalUser{
+			ID:          p.ids[i],
+			Pos:         i + 1,
+			User:        user.User,
+			Pass:        user.Pass,
+			IPs:         user.IPs,
+			Permissions: user.Permissions,
+		}
+	}
+	return items, nil
+}
+
+func (p *testParent) APIConfigInternalUsersAdd(_ context.Context, user conf.AuthInternalUser) (uuid.UUID, error) {
+	c := p.conf.Clone()
+
+	err := c.AddInternalUser(&user)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	id := uuid.New()
+	p.ids = append(p.ids, id)
+	p.conf = c
+	return id, nil
+}
+
+func (p *testParent) APIConfigInternalUsersPatch(
+	_ context.Context,
+	id uuid.UUID,
+	optional conf.OptionalAuthInternalUser,
+) error {
+	for i, existing := range p.ids {
+		if existing == id {
+			c := p.conf.Clone()
+
+			err := c.PatchInternalUser(i, &optional)
+			if err != nil {
+				return err
+			}
+
+			p.conf = c
+			return nil
+		}
+	}
+	return conf.ErrAuthInternalUserNotFound
+}
+
+func (p *testParent) APIConfigInternalUsersReplace(_ context.Context, id uuid.UUID, user conf.AuthInternalUser) error {
+	for i, existing := range p.ids {
+		if existing == id {
+			c := p.conf.Clone()
+			if user.Pass == "<redacted>" {
+				user.Pass = c.AuthInternalUsers[i].Pass
+			}
+
+			err := c.ReplaceInternalUser(i, &user)
+			if err != nil {
+				return err
+			}
+
+			p.conf = c
+			return nil
+		}
+	}
+	return conf.ErrAuthInternalUserNotFound
+}
+
+func (p *testParent) APIConfigInternalUsersDelete(_ context.Context, id uuid.UUID) error {
+	for i, existing := range p.ids {
+		if existing == id {
+			c := p.conf.Clone()
+
+			err := c.DeleteInternalUser(i)
+			if err != nil {
+				return err
+			}
+
+			p.ids = append(p.ids[:i], p.ids[i+1:]...)
+			p.conf = c
+			return nil
+		}
+	}
+	return conf.ErrAuthInternalUserNotFound
+}
 
 func tempConf(t *testing.T, cnt string) *conf.Conf {
-	fi, err := test.CreateTempFile([]byte(cnt))
-	require.NoError(t, err)
-	defer os.Remove(fi)
+	t.Helper()
+
+	fi := test.CreateTempFile(t, []byte(cnt))
 
 	cnf, _, err := conf.Load(fi, nil, nil)
 	require.NoError(t, err)
@@ -42,6 +247,8 @@ func tempConf(t *testing.T, cnt string) *conf.Conf {
 }
 
 func httpRequest(t *testing.T, hc *http.Client, method string, ur string, in any, out any) {
+	t.Helper()
+
 	buf := func() io.Reader {
 		if in == nil {
 			return nil
@@ -74,6 +281,8 @@ func httpRequest(t *testing.T, hc *http.Client, method string, ur string, in any
 }
 
 func checkError(t *testing.T, body io.Reader, msg string) {
+	t.Helper()
+
 	var raw map[string]any
 	err := json.NewDecoder(body).Decode(&raw)
 	require.NoError(t, err)
@@ -81,6 +290,8 @@ func checkError(t *testing.T, body io.Reader, msg string) {
 }
 
 func checkOK(t *testing.T, body io.Reader) {
+	t.Helper()
+
 	var raw map[string]any
 	err := json.NewDecoder(body).Decode(&raw)
 	require.NoError(t, err)
@@ -107,6 +318,7 @@ func TestPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:9997", nil)
 	require.NoError(t, err)
 
+	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -118,23 +330,19 @@ func TestPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
-	require.Equal(t, "true", res.Header.Get("Access-Control-Allow-Credentials"))
+	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "OPTIONS, GET, POST, PATCH, DELETE", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization, Content-Type", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
 }
 
 func TestInfo(t *testing.T) {
-	cnf := tempConf(t, "api: yes\n")
-
 	api := API{
 		Version:      "v1.2.3",
 		Started:      time.Date(2008, 11, 7, 11, 22, 0, 0, time.Local),
 		Address:      "localhost:9997",
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
-		Conf:         cnf,
 		AuthManager:  test.NilAuthManager,
 		Parent:       &testParent{},
 	}
@@ -162,8 +370,8 @@ func TestAuthJWKSRefresh(t *testing.T) {
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(_ *auth.Request) *auth.Error {
-				return nil
+			AuthenticateImpl: func(_ *auth.Request) (*auth.Result, *auth.Error) {
+				return &auth.Result{}, nil
 			},
 			RefreshJWTJWKSImpl: func() {
 				ok = true
@@ -188,32 +396,19 @@ func TestAuthJWKSRefresh(t *testing.T) {
 }
 
 func TestAuthError(t *testing.T) {
-	cnf := tempConf(t, "api: yes\n")
-	n := 0
-
 	api := API{
 		Address:      "localhost:9997",
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
-		Conf:         cnf,
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) *auth.Error {
+			AuthenticateImpl: func(req *auth.Request) (*auth.Result, *auth.Error) {
 				if req.Credentials.User == "" {
-					return &auth.Error{AskCredentials: true}
+					return nil, &auth.Error{AskCredentials: true, Wrapped: fmt.Errorf("auth error")}
 				}
-				return &auth.Error{Wrapped: fmt.Errorf("auth error")}
+				return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
 			},
 		},
-		Parent: &testParent{
-			log: func(l logger.Level, s string, i ...any) {
-				if l == logger.Info {
-					if n == 1 {
-						require.Regexp(t, "failed to authenticate: auth error$", fmt.Sprintf(s, i...))
-					}
-					n++
-				}
-			},
-		},
+		Parent: &testParent{},
 	}
 	err := api.Initialize()
 	require.NoError(t, err)
@@ -238,6 +433,4 @@ func TestAuthError(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
 	require.Equal(t, ``, res.Header.Get("WWW-Authenticate"))
 	checkError(t, res.Body, "authentication error")
-
-	require.Equal(t, 2, n)
 }

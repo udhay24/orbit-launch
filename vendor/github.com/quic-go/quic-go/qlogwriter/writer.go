@@ -28,14 +28,16 @@ type Trace interface {
 // It is safe for concurrent use by multiple goroutines.
 type Recorder interface {
 	// RecordEvent records a single Event to the trace.
+	// It must not be called after the recorder has been closed.
 	RecordEvent(Event)
 	// Close signals that this producer is done recording events.
 	// When all producers are closed, the underlying trace is closed.
+	// It must not be called concurrently with [Recorder.RecordEvent].
 	io.Closer
 }
 
 // Event represents a qlog event that can be encoded to JSON.
-// Each event must provide its name and a method to encode itself using a jsontext.Encoder.
+// Each event must implement [Event.Name] and [Event.Encode].
 type Event interface {
 	// Name returns the name of the event, as it should appear in the qlog output
 	Name() string
@@ -57,7 +59,7 @@ const eventChanSize = 50
 
 // FileSeq represents a qlog trace using the JSON-SEQ format,
 // https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-12.html#section-5
-// qlog event producers can be created by calling AddProducer.
+// qlog event producers can be created by calling [FileSeq.AddProducer].
 // The underlying io.WriteCloser is closed when the last producer is removed.
 type FileSeq struct {
 	w             io.WriteCloser
@@ -67,6 +69,7 @@ type FileSeq struct {
 	runStopped chan struct{}
 	encodeErr  error
 	events     chan event
+	done       chan struct{}
 
 	mx        sync.Mutex
 	producers int
@@ -115,6 +118,7 @@ func newFileSeq(w io.WriteCloser, pers string, odcid *ConnectionID, eventSchemas
 		runStopped:    make(chan struct{}),
 		encodeErr:     encodeErr,
 		events:        make(chan event, eventChanSize),
+		done:          make(chan struct{}),
 		eventSchemas:  eventSchemas,
 	}
 }
@@ -150,55 +154,64 @@ func (t *FileSeq) record(eventTime time.Time, details Event) {
 func (t *FileSeq) Run() {
 	defer close(t.runStopped)
 
-	enc := jsontext.NewEncoder(t.w)
-	for e := range t.events {
-		if t.encodeErr != nil { // if encoding failed, just continue draining the event channel
-			continue
+	for {
+		select {
+		case <-t.done:
+			for {
+				select {
+				case e := <-t.events:
+					t.encodeEvent(e)
+				default:
+					if t.encodeErr != nil {
+						log.Printf("exporting qlog failed: %s\n", t.encodeErr)
+					}
+					return
+				}
+			}
+		case e := <-t.events:
+			t.encodeEvent(e)
 		}
-		if _, err := t.w.Write(recordSeparator); err != nil {
-			t.encodeErr = err
-			continue
-		}
+	}
+}
 
-		h := encoderHelper{enc: enc}
-		h.WriteToken(jsontext.BeginObject)
-		h.WriteToken(jsontext.String("time"))
-		h.WriteToken(jsontext.Float(float64(e.Time.Sub(t.referenceTime).Nanoseconds()) / 1e6))
-		h.WriteToken(jsontext.String("name"))
-		h.WriteToken(jsontext.String(e.Event.Name()))
-		h.WriteToken(jsontext.String("data"))
-		if err := e.Event.Encode(enc, e.Time); err != nil {
-			t.encodeErr = err
-			continue
-		}
-		h.WriteToken(jsontext.EndObject)
-		if h.err != nil {
-			t.encodeErr = h.err
-		}
+func (t *FileSeq) encodeEvent(e event) {
+	if t.encodeErr != nil {
+		return
+	}
+	if _, err := t.w.Write(recordSeparator); err != nil {
+		t.encodeErr = err
+		return
+	}
+	h := encoderHelper{enc: t.enc}
+	h.WriteToken(jsontext.BeginObject)
+	h.WriteToken(jsontext.String("time"))
+	h.WriteToken(jsontext.Float(float64(e.Time.Sub(t.referenceTime).Nanoseconds()) / 1e6))
+	h.WriteToken(jsontext.String("name"))
+	h.WriteToken(jsontext.String(e.Event.Name()))
+	h.WriteToken(jsontext.String("data"))
+	if err := e.Event.Encode(t.enc, e.Time); err != nil {
+		t.encodeErr = err
+		return
+	}
+	h.WriteToken(jsontext.EndObject)
+	if h.err != nil {
+		t.encodeErr = h.err
 	}
 }
 
 func (t *FileSeq) removeProducer() {
 	t.mx.Lock()
-	defer t.mx.Unlock()
-
-	if t.closed {
-		return
-	}
 	t.producers--
-	if t.producers == 0 {
+	last := t.producers == 0
+	if last {
 		t.closed = true
-		t.close()
-		t.w.Close()
 	}
-}
+	t.mx.Unlock()
 
-func (t *FileSeq) close() {
-	close(t.events)
-	<-t.runStopped
-	if t.encodeErr != nil {
-		log.Printf("exporting qlog failed: %s\n", t.encodeErr)
-		return
+	if last {
+		close(t.done)
+		<-t.runStopped // wait for Run to drain and exit
+		_ = t.w.Close()
 	}
 }
 

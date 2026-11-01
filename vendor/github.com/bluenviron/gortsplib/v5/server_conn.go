@@ -3,24 +3,21 @@ package gortsplib
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"net"
 	gourl "net/url"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5/internal/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/auth"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
-	"github.com/bluenviron/gortsplib/v5/pkg/bytecounter"
 	"github.com/bluenviron/gortsplib/v5/pkg/conn"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/headers"
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
-	"github.com/bluenviron/gortsplib/v5/pkg/mikey"
 )
 
 func getSessionID(header base.Header) string {
@@ -51,56 +48,6 @@ func checkBackChannelsEnabled(header base.Header) bool {
 		}
 	}
 	return false
-}
-
-func prepareForDescribe(
-	d *description.Session,
-	multicast bool,
-	backChannels bool,
-	secure bool,
-	medias map[*description.Media]*serverStreamMedia,
-) (*description.Session, error) {
-	out := &description.Session{
-		Title:     d.Title,
-		Multicast: multicast,
-		FECGroups: d.FECGroups,
-	}
-
-	for i, medi := range d.Medias {
-		if !medi.IsBackChannel || backChannels {
-			var keyMgmtMikey *mikey.Message
-			if secure {
-				sm := medias[medi]
-
-				var err error
-				keyMgmtMikey, err = mikeyGenerate(sm.srtpOutCtx)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			var profile headers.TransportProfile
-			if secure {
-				profile = headers.TransportProfileSAVP
-			} else {
-				profile = headers.TransportProfileAVP
-			}
-
-			out.Medias = append(out.Medias, &description.Media{
-				Type:          medi.Type,
-				ID:            medi.ID,
-				IsBackChannel: medi.IsBackChannel,
-				// we have to use trackID=number in order to support clients
-				// like the Grandstream GXV3500.
-				Control:      "trackID=" + strconv.FormatInt(int64(i), 10),
-				Profile:      profile,
-				KeyMgmtMikey: keyMgmtMikey,
-				Formats:      medi.Formats,
-			})
-		}
-	}
-
-	return out, nil
 }
 
 func credentialsProvided(req *base.Request) bool {
@@ -143,10 +90,6 @@ type ServerConn struct {
 
 func (sc *ServerConn) initialize() {
 	ctx, ctxCancel := context.WithCancel(sc.s.ctx)
-
-	if sc.s.TLSConfig != nil && sc.tunnel == TunnelNone {
-		sc.nconn = tls.Server(sc.nconn, sc.s.TLSConfig)
-	}
 
 	sc.bc = bytecounter.New(sc.nconn, nil, nil)
 	sc.ctx = ctx
@@ -202,6 +145,8 @@ func (sc *ServerConn) Transport() *ConnTransport {
 // Stats returns connection statistics.
 func (sc *ServerConn) Stats() *ConnStats {
 	return &ConnStats{
+		InboundBytes:  sc.bc.BytesReceived(),
+		OutboundBytes: sc.bc.BytesSent(),
 		BytesReceived: sc.bc.BytesReceived(),
 		BytesSent:     sc.bc.BytesSent(),
 	}
@@ -307,7 +252,9 @@ func (sc *ServerConn) runInner() error {
 
 		case ss := <-sc.chRemoveSession:
 			if sc.session == ss {
+				sc.propsMutex.Lock()
 				sc.session = nil
+				sc.propsMutex.Unlock()
 			}
 
 		case <-sc.ctx.Done():
@@ -403,12 +350,9 @@ func (sc *ServerConn) handleRequestInner(req *base.Request) (*base.Response, err
 				}
 
 				var desc *description.Session
-				desc, err = prepareForDescribe(
-					stream.Desc,
+				desc, err = stream.descForDescribe(
 					checkMulticastEnabled(sc.s.MulticastIPRange, query),
 					checkBackChannelsEnabled(req.Header),
-					sc.s.TLSConfig != nil,
-					stream.medias,
 				)
 				if err != nil {
 					return &base.Response{
@@ -512,14 +456,12 @@ func (sc *ServerConn) handleRequestOuter(req *base.Request) error {
 	}
 
 	// handle auth errors
-	var eerr1 liberrors.ErrServerAuth
-	if errors.As(err, &eerr1) {
+	if _, ok := errors.AsType[liberrors.ErrServerAuth](err); ok {
 		err = sc.handleAuthError(req, res)
 	}
 
 	// add cseq
-	var eerr2 liberrors.ErrServerCSeqMissing
-	if !errors.As(err, &eerr2) {
+	if _, ok := errors.AsType[liberrors.ErrServerCSeqMissing](err); !ok {
 		res.Header["CSeq"] = req.Header["CSeq"]
 	}
 
@@ -544,46 +486,44 @@ func (sc *ServerConn) handleRequestInSession(
 	req *base.Request,
 	create bool,
 ) (*base.Response, error) {
-	// handle directly in Session
-	if sc.session != nil {
+	var session *ServerSession
+
+	if sc.session == nil {
+		var err error
+		session, err = sc.s.findOrCreateSession(serverFindOrCreateSessionReq{
+			sc:     sc,
+			id:     sxID,
+			create: create,
+		})
+		if err != nil {
+			if _, ok := errors.AsType[liberrors.ErrServerSessionNotFound](err); ok {
+				return &base.Response{
+					StatusCode: base.StatusSessionNotFound,
+				}, err
+			}
+
+			return &base.Response{
+				StatusCode: base.StatusBadRequest,
+			}, err
+		}
+	} else {
 		// session ID is optional in SETUP and ANNOUNCE requests, since
 		// client may not have received the session ID yet due to multiple reasons:
 		// * requests can be retries after code 301
-		// * SETUP requests comes after ANNOUNCE response, that don't contain the session ID
-		if sxID != "" {
-			// the connection can't communicate with two sessions at once.
-			if sxID != sc.session.secretID {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerLinkedToOtherSession{}
-			}
+		// * SETUP requests come after the ANNOUNCE response, that doesn't contain the session ID
+		if sxID != "" && sxID != sc.session.secretID {
+			return &base.Response{
+				StatusCode: base.StatusBadRequest,
+			}, liberrors.ErrServerLinkedToOtherSession{}
 		}
 
-		cres := make(chan sessionRequestRes)
-		sreq := sessionRequestReq{
-			sc:     sc,
-			req:    req,
-			id:     sxID,
-			create: create,
-			res:    cres,
-		}
-
-		res, session, err := sc.session.handleRequest(sreq)
-		sc.session = session
-		return res, err
+		session = sc.session
 	}
 
-	// otherwise, pass through Server
-	cres := make(chan sessionRequestRes)
-	sreq := sessionRequestReq{
-		sc:     sc,
-		req:    req,
-		id:     sxID,
-		create: create,
-		res:    cres,
-	}
-
-	res, session, err := sc.s.handleRequest(sreq)
+	res, session, err := session.handleRequest(sessionRequestReq{
+		sc:  sc,
+		req: req,
+	})
 
 	sc.propsMutex.Lock()
 	sc.session = session

@@ -59,18 +59,13 @@ func NewCandidateRelay(config *CandidateRelayConfig) (*CandidateRelay, error) {
 		return nil, err
 	}
 
-	return &CandidateRelay{
+	candidate := &CandidateRelay{
 		candidateBase: candidateBase{
-			id:            candidateID,
-			networkType:   networkType,
-			candidateType: CandidateTypeRelay,
-			address:       config.Address,
-			port:          config.Port,
-			resolvedAddr: &net.UDPAddr{
-				IP:   ipAddr.AsSlice(),
-				Port: config.Port,
-				Zone: ipAddr.Zone(),
-			},
+			id:                 candidateID,
+			networkType:        networkType,
+			candidateType:      CandidateTypeRelay,
+			address:            config.Address,
+			port:               config.Port,
 			component:          config.Component,
 			foundationOverride: config.Foundation,
 			priorityOverride:   config.Priority,
@@ -78,12 +73,18 @@ func NewCandidateRelay(config *CandidateRelayConfig) (*CandidateRelay, error) {
 				Address: config.RelAddr,
 				Port:    config.RelPort,
 			},
-			relayLocalPreference:  relayProtocolPreference(config.RelayProtocol),
-			remoteCandidateCaches: map[AddrPort]Candidate{},
+			relayLocalPreference: relayProtocolPreference(config.RelayProtocol),
 		},
 		relayProtocol: config.RelayProtocol,
 		onClose:       config.OnClose,
-	}, nil
+	}
+	candidate.setResolvedAddr(&net.UDPAddr{
+		IP:   ipAddr.AsSlice(),
+		Port: config.Port,
+		Zone: ipAddr.Zone(),
+	})
+
+	return candidate, nil
 }
 
 // RelayProtocol returns the protocol used between the endpoint and the relay server.

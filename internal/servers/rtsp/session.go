@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
 	rtspauth "github.com/bluenviron/gortsplib/v5/pkg/auth"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
+	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/headers"
 	"github.com/google/uuid"
 
@@ -42,7 +44,7 @@ type sessionParent interface {
 }
 
 type session struct {
-	isTLS           bool
+	encryption      bool
 	transports      conf.RTSPTransports
 	rsession        *gortsplib.ServerSession
 	rconn           *gortsplib.ServerConn
@@ -51,23 +53,29 @@ type session struct {
 	pathManager     serverPathManager
 	parent          sessionParent
 
-	uuid            uuid.UUID
-	created         time.Time
-	pathConf        *conf.Path // record only
-	path            defs.Path
-	stream          *stream.Stream
-	subStream       *stream.SubStream
-	onUnreadHook    func()
-	packetsLost     *counterdumper.Dumper
-	decodeErrors    *errordumper.Dumper
-	discardedFrames *counterdumper.Dumper
+	uuid                        uuid.UUID
+	created                     time.Time
+	pathConf                    *conf.Path // record only
+	path                        defs.Path
+	stream                      *stream.Stream
+	rtspStream                  *gortsplib.ServerStream
+	onUnreadHook                func()
+	inboundRTPPacketsLost       *counterdumper.Dumper
+	inboundRTPPacketsInError    *errordumper.Dumper
+	outboundRTPPacketsDiscarded *counterdumper.Dumper
+	mutex                       sync.RWMutex
+	user                        string
+	expiresAt                   *time.Time
+	expiryTimer                 *time.Timer
+	userAgent                   string
+	mpegtsDemuxer               *rtsp.MPEGTSDemuxer
 }
 
 func (s *session) initialize() {
 	s.uuid = uuid.New()
 	s.created = time.Now()
 
-	s.packetsLost = &counterdumper.Dumper{
+	s.inboundRTPPacketsLost = &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			s.Log(logger.Warn, "%d RTP %s lost",
 				val,
@@ -79,9 +87,9 @@ func (s *session) initialize() {
 				}())
 		},
 	}
-	s.packetsLost.Start()
+	s.inboundRTPPacketsLost.Start()
 
-	s.decodeErrors = &errordumper.Dumper{
+	s.inboundRTPPacketsInError = &errordumper.Dumper{
 		OnReport: func(val uint64, last error) {
 			if val == 1 {
 				s.Log(logger.Warn, "decode error: %v", last)
@@ -90,9 +98,9 @@ func (s *session) initialize() {
 			}
 		},
 	}
-	s.decodeErrors.Start()
+	s.inboundRTPPacketsInError.Start()
 
-	s.discardedFrames = &counterdumper.Dumper{
+	s.outboundRTPPacketsDiscarded = &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			s.Log(logger.Warn, "reader is too slow, discarding %d %s",
 				val,
@@ -104,7 +112,7 @@ func (s *session) initialize() {
 				}())
 		},
 	}
-	s.discardedFrames.Start()
+	s.outboundRTPPacketsDiscarded.Start()
 
 	s.Log(logger.Info, "created by %v", s.rconn.NetConn().RemoteAddr())
 }
@@ -128,8 +136,18 @@ func (s *session) Log(level logger.Level, format string, args ...any) {
 
 // onClose is called by rtspServer.
 func (s *session) onClose(err error) {
+	s.mutex.Lock()
+	if s.expiryTimer != nil {
+		s.expiryTimer.Stop()
+	}
+	s.mutex.Unlock()
+
 	if s.rsession.State() == gortsplib.ServerSessionStatePlay {
 		s.onUnreadHook()
+	}
+
+	if s.mpegtsDemuxer != nil {
+		s.mpegtsDemuxer.Close()
 	}
 
 	switch s.rsession.State() {
@@ -137,16 +155,17 @@ func (s *session) onClose(err error) {
 		s.path.RemoveReader(defs.PathRemoveReaderReq{Author: s})
 
 	case gortsplib.ServerSessionStateRecord:
-		s.path.RemovePublisher(defs.PathRemovePublisherReq{Author: s})
+		if s.path != nil {
+			s.path.RemovePublisher(defs.PathRemovePublisherReq{Author: s})
+		}
 	}
 
 	s.path = nil
 	s.stream = nil
-	s.subStream = nil
 
-	s.discardedFrames.Stop()
-	s.decodeErrors.Stop()
-	s.packetsLost.Stop()
+	s.outboundRTPPacketsDiscarded.Stop()
+	s.inboundRTPPacketsInError.Stop()
+	s.inboundRTPPacketsLost.Stop()
 
 	s.Log(logger.Info, "destroyed: %v", err)
 }
@@ -169,21 +188,28 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 		}
 	}
 
-	pathConf, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+	var userAgent string
+	if ua, ok := ctx.Request.Header["User-Agent"]; ok && len(ua) > 0 {
+		userAgent = ua[0]
+	}
+
+	res, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author: s,
 		AccessRequest: defs.PathAccessRequest{
-			Name:             ctx.Path,
-			Query:            ctx.Query,
-			Publish:          true,
-			Proto:            auth.ProtocolRTSP,
-			ID:               &c.uuid,
-			Credentials:      rtsp.Credentials(ctx.Request),
-			IP:               c.ip(),
-			CustomVerifyFunc: customVerifyFunc,
+			Name:                 ctx.Path,
+			Query:                ctx.Query,
+			Publish:              true,
+			UserAgent:            userAgent,
+			Proto:                auth.ProtocolRTSP,
+			ID:                   &s.uuid,
+			Credentials:          rtsp.Credentials(ctx.Request),
+			IP:                   c.ip(),
+			CustomVerifyFunc:     customVerifyFunc,
+			EnableAskCredentials: true,
 		},
 	})
 	if err != nil {
-		var terr *auth.Error
-		if errors.As(err, &terr) {
+		if terr, ok := errors.AsType[*auth.Error](err); ok {
 			return c.handleAuthError(terr)
 		}
 
@@ -192,18 +218,20 @@ func (s *session) onAnnounce(c *conn, ctx *gortsplib.ServerHandlerOnAnnounceCtx)
 		}, err
 	}
 
-	s.pathConf = pathConf
+	s.pathConf = res.Conf
+
+	s.mutex.Lock()
+	s.user = res.AuthRes.User
+	s.expiresAt = res.AuthRes.ExpiresAt
+	if s.expiresAt != nil {
+		s.expiryTimer = time.AfterFunc(time.Until(*s.expiresAt), s.Close)
+	}
+	s.userAgent = userAgent
+	s.mutex.Unlock()
 
 	return &base.Response{
 		StatusCode: base.StatusOK,
 	}, nil
-}
-
-func (s *session) rtspStream() *gortsplib.ServerStream {
-	if !s.isTLS {
-		return s.stream.RTSPStream(s.rserver)
-	}
-	return s.stream.RTSPSStream(s.rserver)
 }
 
 // onSetup is called by rtspServer.
@@ -237,29 +265,34 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 		}
 	}
 
+	var userAgent string
+	if ua, ok := ctx.Request.Header["User-Agent"]; ok && len(ua) > 0 {
+		userAgent = ua[0]
+	}
+
 	switch s.rsession.State() {
 	case gortsplib.ServerSessionStateInitial: // play
-		path, stream, err := s.pathManager.AddReader(defs.PathAddReaderReq{
+		res, err := s.pathManager.AddReader(defs.PathAddReaderReq{
 			Author: s,
 			AccessRequest: defs.PathAccessRequest{
-				Name:             ctx.Path,
-				Query:            ctx.Query,
-				Proto:            auth.ProtocolRTSP,
-				ID:               &c.uuid,
-				Credentials:      rtsp.Credentials(ctx.Request),
-				IP:               c.ip(),
-				CustomVerifyFunc: customVerifyFunc,
+				Name:                 ctx.Path,
+				Query:                ctx.Query,
+				UserAgent:            userAgent,
+				Proto:                auth.ProtocolRTSP,
+				ID:                   &s.uuid,
+				Credentials:          rtsp.Credentials(ctx.Request),
+				IP:                   c.ip(),
+				CustomVerifyFunc:     customVerifyFunc,
+				EnableAskCredentials: true,
 			},
 		})
 		if err != nil {
-			var terr *auth.Error
-			if errors.As(err, &terr) {
+			if terr, ok := errors.AsType[*auth.Error](err); ok {
 				res, err2 := c.handleAuthError(terr)
 				return res, nil, err2
 			}
 
-			var terr2 defs.PathNoStreamAvailableError
-			if errors.As(err, &terr2) {
+			if _, ok := errors.AsType[*defs.PathNoStreamAvailableError](err); ok {
 				return &base.Response{
 					StatusCode: base.StatusNotFound,
 				}, nil, err
@@ -270,17 +303,41 @@ func (s *session) onSetup(c *conn, ctx *gortsplib.ServerHandlerOnSetupCtx,
 			}, nil, err
 		}
 
-		s.path = path
-		s.stream = stream
+		var rtspStream *gortsplib.ServerStream
+		if !s.encryption {
+			rtspStream, err = res.Stream.RTSPStream(s.rserver)
+		} else {
+			rtspStream, err = res.Stream.RTSPSStream(s.rserver)
+		}
+
+		if err != nil {
+			res.Path.RemoveReader(defs.PathRemoveReaderReq{Author: s})
+			return &base.Response{
+				StatusCode: base.StatusBadRequest,
+			}, nil, err
+		}
+
+		s.stream = res.Stream
+		s.rtspStream = rtspStream
+		s.path = res.Path
+
+		s.mutex.Lock()
+		s.user = res.AuthRes.User
+		s.expiresAt = res.AuthRes.ExpiresAt
+		if s.expiresAt != nil {
+			s.expiryTimer = time.AfterFunc(time.Until(*s.expiresAt), s.Close)
+		}
+		s.userAgent = userAgent
+		s.mutex.Unlock()
 
 		return &base.Response{
 			StatusCode: base.StatusOK,
-		}, s.rtspStream(), nil
+		}, s.rtspStream, nil
 
 	case gortsplib.ServerSessionStatePrePlay: // play, subsequent calls
 		return &base.Response{
 			StatusCode: base.StatusOK,
-		}, s.rtspStream(), nil
+		}, s.rtspStream, nil
 
 	default: // record
 		return &base.Response{
@@ -317,17 +374,71 @@ func (s *session) onPlay(_ *gortsplib.ServerHandlerOnPlayCtx) (*base.Response, e
 
 // onRecord is called by rtspServer.
 func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Response, error) {
-	path, subStream, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
+	if s.pathConf.RTSPDemuxMpegts {
+		mpegtsMedia, mpegtsFormat := rtsp.FindSingleMPEGTSFormat(s.rsession.AnnouncedDescription())
+		if mpegtsFormat != nil {
+			s.Log(logger.Info, "MPEG-TS demux mode enabled, starting demuxer...")
+
+			onTracks := func(desc *description.Session) (*stream.SubStream, error) {
+				res, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
+					Author:        s,
+					Desc:          desc,
+					UseRTPPackets: false,
+					ReplaceNTP:    true,
+					ConfToCompare: s.pathConf,
+					AccessRequest: defs.PathAccessRequest{
+						Name:     s.rsession.Path()[1:],
+						Query:    s.rsession.Query(),
+						Publish:  true,
+						SkipAuth: true,
+					},
+				})
+				if err != nil {
+					return nil, fmt.Errorf("failed to add publisher: %w", err)
+				}
+
+				s.path = res.Path
+
+				return res.SubStream, nil
+			}
+
+			s.mpegtsDemuxer = &rtsp.MPEGTSDemuxer{
+				Source:       s.rsession,
+				Log:          s,
+				Media:        mpegtsMedia,
+				Format:       mpegtsFormat,
+				DecodeErrors: s.inboundRTPPacketsInError,
+				OnTracks:     onTracks,
+				OnError: func(err error) {
+					s.Log(logger.Error, "demux error: %v", err)
+					s.Close()
+				},
+			}
+			err := s.mpegtsDemuxer.Initialize()
+			if err != nil {
+				return &base.Response{
+					StatusCode: base.StatusInternalServerError,
+				}, err
+			}
+
+			return &base.Response{
+				StatusCode: base.StatusOK,
+			}, nil
+		}
+	}
+
+	res, err := s.pathManager.AddPublisher(defs.PathAddPublisherReq{
 		Author:        s,
 		Desc:          s.rsession.AnnouncedDescription(),
 		UseRTPPackets: true,
 		ReplaceNTP:    !s.pathConf.UseAbsoluteTimestamp,
 		ConfToCompare: s.pathConf,
 		AccessRequest: defs.PathAccessRequest{
-			Name:     s.rsession.Path()[1:],
-			Query:    s.rsession.Query(),
-			Publish:  true,
-			SkipAuth: true,
+			Name:      s.rsession.Path()[1:],
+			Query:     s.rsession.Query(),
+			UserAgent: s.userAgent,
+			Publish:   true,
+			SkipAuth:  true,
 		},
 	})
 	if err != nil {
@@ -339,12 +450,11 @@ func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Respons
 	rtsp.ToStream(
 		s.rsession,
 		s.rsession.AnnouncedDescription().Medias,
-		path.SafeConf(),
-		&s.subStream,
+		res.Path.SafeConf(),
+		&res.SubStream,
 		s)
 
-	s.path = path
-	s.subStream = subStream
+	s.path = res.Path
 
 	return &base.Response{
 		StatusCode: base.StatusOK,
@@ -353,6 +463,14 @@ func (s *session) onRecord(_ *gortsplib.ServerHandlerOnRecordCtx) (*base.Respons
 
 // onPause is called by rtspServer.
 func (s *session) onPause(_ *gortsplib.ServerHandlerOnPauseCtx) (*base.Response, error) {
+	// we can't close mpegtsDemuxer during pause because OnPacketRTP() is paused after onPause(),
+	// therefore a call to pipeWriter.CloseWithError() would cause a race condition.
+	if s.mpegtsDemuxer != nil {
+		return &base.Response{
+			StatusCode: base.StatusBadRequest,
+		}, fmt.Errorf("cannot pause in MPEG-TS demux mode")
+	}
+
 	switch s.rsession.State() {
 	case gortsplib.ServerSessionStatePlay:
 		s.onUnreadHook()
@@ -369,11 +487,11 @@ func (s *session) onPause(_ *gortsplib.ServerHandlerOnPauseCtx) (*base.Response,
 // APIReaderDescribe implements reader.
 func (s *session) APIReaderDescribe() *defs.APIPathReader {
 	return &defs.APIPathReader{
-		Type: func() string {
-			if s.isTLS {
-				return "rtspsSession"
+		Type: func() defs.APIPathReaderType {
+			if s.encryption {
+				return defs.APIPathReaderTypeRTSPSSession
 			}
-			return "rtspSession"
+			return defs.APIPathReaderTypeRTSPSession
 		}(),
 		ID: s.uuid.String(),
 	}
@@ -382,11 +500,11 @@ func (s *session) APIReaderDescribe() *defs.APIPathReader {
 // APISourceDescribe implements source.
 func (s *session) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: func() string {
-			if s.isTLS {
-				return "rtspsSession"
+		Type: func() defs.APIPathSourceType {
+			if s.encryption {
+				return defs.APIPathSourceTypeRTSPSSession
 			}
-			return "rtspSession"
+			return defs.APIPathSourceTypeRTSPSession
 		}(),
 		ID: s.uuid.String(),
 	}
@@ -394,22 +512,25 @@ func (s *session) APISourceDescribe() *defs.APIPathSource {
 
 // onPacketLost is called by rtspServer.
 func (s *session) onPacketsLost(ctx *gortsplib.ServerHandlerOnPacketsLostCtx) {
-	s.packetsLost.Add(ctx.Lost)
+	s.inboundRTPPacketsLost.Add(ctx.Lost)
 }
 
 // onDecodeError is called by rtspServer.
 func (s *session) onDecodeError(ctx *gortsplib.ServerHandlerOnDecodeErrorCtx) {
-	s.decodeErrors.Add(ctx.Error)
+	s.inboundRTPPacketsInError.Add(ctx.Error)
 }
 
 // onStreamWriteError is called by rtspServer.
 func (s *session) onStreamWriteError(_ *gortsplib.ServerHandlerOnStreamWriteErrorCtx) {
 	// currently the only error returned by OnStreamWriteError is ErrServerWriteQueueFull
-	s.discardedFrames.Increase()
+	s.outboundRTPPacketsDiscarded.Increase()
 }
 
 func (s *session) apiItem() *defs.APIRTSPSession {
 	stats := s.rsession.Stats()
+
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
 
 	return &defs.APIRTSPSession{
 		ID:         s.uuid,
@@ -435,7 +556,10 @@ func (s *session) apiItem() *defs.APIRTSPSession {
 			}
 			return ""
 		}(),
-		Query: s.rsession.Query(),
+		Query:     s.rsession.Query(),
+		User:      s.user,
+		ExpiresAt: s.expiresAt,
+		UserAgent: s.userAgent,
 		Transport: func() *string {
 			transport := s.rsession.Transport()
 			if transport == nil {
@@ -464,15 +588,27 @@ func (s *session) apiItem() *defs.APIRTSPSession {
 
 			return ret
 		}(),
-		BytesReceived:       stats.BytesReceived,
-		BytesSent:           stats.BytesSent,
-		RTPPacketsReceived:  stats.RTPPacketsReceived,
-		RTPPacketsSent:      stats.RTPPacketsSent,
-		RTPPacketsLost:      stats.RTPPacketsLost,
-		RTPPacketsInError:   stats.RTPPacketsInError,
-		RTPPacketsJitter:    stats.RTPPacketsJitter,
-		RTCPPacketsReceived: stats.RTCPPacketsReceived,
-		RTCPPacketsSent:     stats.RTCPPacketsSent,
-		RTCPPacketsInError:  stats.RTCPPacketsInError,
+		InboundBytes:                   stats.InboundBytes,
+		InboundRTPPackets:              stats.InboundRTPPackets,
+		InboundRTPPacketsLost:          stats.InboundRTPPacketsLost,
+		InboundRTPPacketsInError:       stats.InboundRTPPacketsInError,
+		InboundRTPPacketsJitter:        stats.InboundRTPPacketsJitter,
+		InboundRTCPPackets:             stats.InboundRTCPPackets,
+		InboundRTCPPacketsInError:      stats.InboundRTCPPacketsInError,
+		OutboundBytes:                  stats.OutboundBytes,
+		OutboundRTPPackets:             stats.OutboundRTPPackets,
+		OutboundRTPPacketsReportedLost: stats.OutboundRTPPacketsReportedLost,
+		OutboundRTPPacketsDiscarded:    s.outboundRTPPacketsDiscarded.Get(),
+		OutboundRTCPPackets:            stats.OutboundRTCPPackets,
+		BytesReceived:                  stats.InboundBytes,
+		BytesSent:                      stats.OutboundBytes,
+		RTPPacketsReceived:             stats.InboundRTPPackets,
+		RTPPacketsSent:                 stats.OutboundRTPPackets,
+		RTPPacketsLost:                 stats.InboundRTPPacketsLost,
+		RTPPacketsInError:              stats.InboundRTPPacketsInError,
+		RTPPacketsJitter:               stats.InboundRTPPacketsJitter,
+		RTCPPacketsReceived:            stats.InboundRTCPPackets,
+		RTCPPacketsSent:                stats.OutboundRTCPPackets,
+		RTCPPacketsInError:             stats.InboundRTCPPacketsInError,
 	}
 }

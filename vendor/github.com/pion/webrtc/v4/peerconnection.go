@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package webrtc
 
@@ -57,6 +56,7 @@ type PeerConnection struct {
 	idpLoginURL *string
 
 	isClosed                                *atomic.Bool
+	undeclaredStarted                       atomic.Bool // the undeclared media processors run
 	isGracefullyClosingOrClosed             bool
 	isCloseDone                             chan struct{}
 	isGracefulCloseDone                     chan struct{}
@@ -121,12 +121,13 @@ func (api *API) NewPeerConnection(configuration Configuration) (*PeerConnection,
 	pc := &PeerConnection{
 		id: fmt.Sprintf("PeerConnection-%d", time.Now().UnixNano()),
 		configuration: Configuration{
-			ICEServers:           []ICEServer{},
-			ICETransportPolicy:   ICETransportPolicyAll,
-			BundlePolicy:         BundlePolicyBalanced,
-			RTCPMuxPolicy:        RTCPMuxPolicyRequire,
-			Certificates:         []Certificate{},
-			ICECandidatePoolSize: 0,
+			ICEServers:                []ICEServer{},
+			ICETransportPolicy:        ICETransportPolicyAll,
+			BundlePolicy:              BundlePolicyBalanced,
+			RTCPMuxPolicy:             RTCPMuxPolicyRequire,
+			Certificates:              []Certificate{},
+			ICECandidatePoolSize:      0,
+			RTPHeaderEncryptionPolicy: RTPHeaderEncryptionPolicyNegotiate,
 		},
 		isClosed:                                &atomic.Bool{},
 		isCloseDone:                             make(chan struct{}),
@@ -141,6 +142,7 @@ func (api *API) NewPeerConnection(configuration Configuration) (*PeerConnection,
 		api: api,
 		log: api.settingEngine.LoggerFactory.NewLogger("pc"),
 	}
+	pc.onDataChannelHandler = pc.defaultOnDataChannelHandler
 	pc.ops = newOperations(pc.updateNegotiationNeededFlagOnEmptyChain, pc.onNegotiationNeeded)
 
 	pc.iceConnectionState.Store(ICEConnectionStateNew)
@@ -273,6 +275,10 @@ func (pc *PeerConnection) initConfiguration(configuration Configuration) error {
 		pc.configuration.ICEServers = sanitizedICEServers
 	}
 
+	if configuration.RTPHeaderEncryptionPolicy != RTPHeaderEncryptionPolicyUnknown {
+		pc.configuration.RTPHeaderEncryptionPolicy = configuration.RTPHeaderEncryptionPolicy
+	}
+
 	return nil
 }
 
@@ -297,10 +303,27 @@ func (pc *PeerConnection) onSignalingStateChange(newState SignalingState) {
 
 // OnDataChannel sets an event handler which is invoked when a data
 // channel message arrives from a remote peer.
+// When handler is nil, the default handler will be used which closes
+// the incoming data channel immediately.
 func (pc *PeerConnection) OnDataChannel(f func(*DataChannel)) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
+	if f == nil {
+		pc.onDataChannelHandler = pc.defaultOnDataChannelHandler
+
+		return
+	}
 	pc.onDataChannelHandler = f
+}
+
+func (pc *PeerConnection) defaultOnDataChannelHandler(d *DataChannel) {
+	if d == nil {
+		return
+	}
+
+	if err := d.Close(); err != nil {
+		pc.log.Warnf("Failed to close undeclared DataChannel: %v", err)
+	}
 }
 
 // OnNegotiationNeeded sets an event handler which is invoked when
@@ -431,12 +454,13 @@ func (pc *PeerConnection) checkNegotiationNeeded() bool { //nolint:gocognit,cycl
 				return true
 			}
 
-			if getPeerDirection(mid) != transceiver.Direction() && getPeerDirection(rm) != transceiver.Direction().Revers() {
+			if getPeerDirection(mid, localDesc.parsed) != transceiver.Direction() &&
+				getPeerDirection(rm, remoteDesc.parsed) != transceiver.Direction().Revers() {
 				return true
 			}
 		case SDPTypeAnswer:
 			// Step 5.3.3
-			if _, ok := mid.Attribute(transceiver.Direction().String()); !ok {
+			if getPeerDirection(mid, localDesc.parsed) != transceiver.Direction() {
 				return true
 			}
 		default:
@@ -576,6 +600,15 @@ func (pc *PeerConnection) SetConfiguration(configuration Configuration) error { 
 		pc.configuration.RTCPMuxPolicy = configuration.RTCPMuxPolicy
 	}
 
+	// RTPHeaderEncryptionPolicy is immutable after construction, like BundlePolicy/RTCPMuxPolicy
+	// above; validate it before any of the mutations below are applied.
+	if configuration.RTPHeaderEncryptionPolicy != RTPHeaderEncryptionPolicyUnknown {
+		if configuration.RTPHeaderEncryptionPolicy != pc.configuration.RTPHeaderEncryptionPolicy {
+			return &rtcerr.InvalidModificationError{Err: errModifyingRTPHeaderEncryptionPolicy}
+		}
+		pc.configuration.RTPHeaderEncryptionPolicy = configuration.RTPHeaderEncryptionPolicy
+	}
+
 	// https://www.w3.org/TR/webrtc/#set-the-configuration (step #3.6)
 	if configuration.ICECandidatePoolSize != 0 {
 		if pc.configuration.ICECandidatePoolSize != configuration.ICECandidatePoolSize &&
@@ -654,7 +687,7 @@ func (pc *PeerConnection) hasLocalDescriptionChanged(desc *SessionDescription) b
 			return true
 		}
 
-		if getPeerDirection(m) != t.Direction() {
+		if getPeerDirection(m, desc.parsed) != t.Direction() {
 			return true
 		}
 	}
@@ -930,6 +963,24 @@ func (pc *PeerConnection) CreateAnswer(options *AnswerOptions) (SessionDescripti
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
 
+	// Renegotiation reuses the DTLS association, including across ICE restarts.
+	// "the answerer MUST insert an SDP "setup" attribute with an attribute value
+	// that does not change the previously negotiated DTLS roles"
+	// https://www.rfc-editor.org/info/rfc8842/#section-5.3
+	if pc.currentLocalDescription != nil && pc.currentRemoteDescription != nil {
+		if pc.currentLocalDescription.Type == SDPTypeAnswer {
+			connectionRole = connectionRoleFromDtlsRole(dtlsRoleFromSDP(pc.currentLocalDescription.parsed))
+		} else {
+			switch dtlsRoleFromSDP(pc.currentRemoteDescription.parsed) {
+			case DTLSRoleClient:
+				connectionRole = connectionRoleFromDtlsRole(DTLSRoleServer)
+			case DTLSRoleServer:
+				connectionRole = connectionRoleFromDtlsRole(DTLSRoleClient)
+			default:
+			}
+		}
+	}
+
 	descr, err := pc.generateMatchedSDP(
 		pc.rtpTransceivers,
 		useIdentity,
@@ -1116,6 +1167,20 @@ func (pc *PeerConnection) SetLocalDescription(desc SessionDescription) error {
 		return err
 	}
 
+	// Our own local description declares what we're willing to receive (RFC 9335 Section 4). If a
+	// renegotiation changes that declaration (for example, an answer that now includes Cryptex where
+	// the previous one didn't), reflect it on the already-started SRTP session so incoming Cryptex
+	// packets from the peer aren't dropped. This is only computed here; it's applied below, once
+	// the rest of this call is guaranteed to succeed.
+	pc.mu.Lock()
+	newRemoteCryptexMode, cryptexErr := pc.cryptexModeFromSDP(desc.parsed)
+	pc.mu.Unlock()
+	if cryptexErr != nil {
+		// Our own generated/accepted SDP should never fail this check; leave the receive mode
+		// unchanged rather than surfacing a spurious error caused by our own description.
+		pc.log.Warnf("Unexpected error computing local Cryptex mode from local description: %v", cryptexErr)
+	}
+
 	currentTransceivers := append([]*RTPTransceiver{}, pc.GetTransceivers()...)
 
 	weAnswer := desc.Type == SDPTypeAnswer
@@ -1127,7 +1192,20 @@ func (pc *PeerConnection) SetLocalDescription(desc SessionDescription) error {
 		}
 		pc.configureRTPReceivers(haveLocalDescription, remoteDesc, currentTransceivers)
 		pc.ops.Enqueue(func() {
-			pc.startRTP(haveLocalDescription, remoteDesc, currentTransceivers)
+			pc.startRTP(remoteDesc, currentTransceivers)
+		})
+	}
+
+	// Only apply the Cryptex receive mode now that the call above is guaranteed to succeed, and
+	// only via the ops queue so this is ordered against the initial negotiation's startTransports
+	// call (which sets these same fields) instead of racing it.
+	if cryptexErr == nil {
+		pc.ops.Enqueue(func() {
+			if err := pc.dtlsTransport.updateCryptexModes(
+				pc.dtlsTransport.getLocalCryptexMode(), newRemoteCryptexMode,
+			); err != nil {
+				pc.log.Warnf("Failed to update Cryptex receive mode: %v", err)
+			}
 		})
 	}
 
@@ -1169,6 +1247,15 @@ func (pc *PeerConnection) SetRemoteDescription(desc SessionDescription) error {
 
 	if _, err := desc.Unmarshal(); err != nil {
 		return err
+	}
+
+	// Validate the Cryptex mode before committing any signaling state, so that a rejected
+	// description leaves the PeerConnection in its pre-call state (RFC 9429 Section 5.10).
+	pc.mu.Lock()
+	localCryptexMode, remoteCryptexMode, cryptexErr := pc.getCryptexModes(desc.parsed)
+	pc.mu.Unlock()
+	if cryptexErr != nil {
+		return cryptexErr
 	}
 
 	if err := pc.setDescription(&desc, stateChangeOpSetRemote); err != nil {
@@ -1219,8 +1306,8 @@ func (pc *PeerConnection) SetRemoteDescription(desc SessionDescription) error {
 			}
 
 			kind := NewRTPCodecType(media.MediaName.Media)
-			direction := getPeerDirection(media)
-			if kind == 0 || direction == RTPTransceiverDirectionUnknown {
+			direction := getPeerDirection(media, pc.RemoteDescription().parsed)
+			if kind == 0 {
 				continue
 			}
 
@@ -1317,9 +1404,18 @@ func (pc *PeerConnection) SetRemoteDescription(desc SessionDescription) error {
 			}
 			pc.configureRTPReceivers(true, &desc, currentTransceivers)
 			pc.ops.Enqueue(func() {
-				pc.startRTP(true, &desc, currentTransceivers)
+				pc.startRTP(&desc, currentTransceivers)
 			})
 		}
+
+		// Only apply the negotiated Cryptex modes now that the renegotiation is guaranteed to
+		// succeed, and only via the ops queue so this is ordered against the initial
+		// negotiation's startTransports call (which sets these same fields) instead of racing it.
+		pc.ops.Enqueue(func() {
+			if updateErr := pc.dtlsTransport.updateCryptexModes(localCryptexMode, remoteCryptexMode); updateErr != nil {
+				pc.log.Warnf("Failed to update Cryptex mode during renegotiation: %v", updateErr)
+			}
+		})
 
 		return nil
 	}
@@ -1355,17 +1451,204 @@ func (pc *PeerConnection) SetRemoteDescription(desc SessionDescription) error {
 		pc.startTransports(
 			iceRole,
 			dtlsRoleFromSDP(desc.parsed),
+			remoteIsLite,
 			iceDetails.Ufrag,
 			iceDetails.Password,
 			fingerprint,
 			fingerprintHash,
+			localCryptexMode,
+			remoteCryptexMode,
 		)
 		if weOffer {
-			pc.startRTP(false, &desc, currentTransceivers)
+			pc.startRTP(&desc, currentTransceivers)
 		}
 	})
 
 	return nil
+}
+
+// bundleGroupMids returns the full list of mids in a=group:BUNDLE, in order. The first entry is the
+// BUNDLE tag mid, whose media section carries TRANSPORT-category attributes (RFC 9143 Section 7.1.3)
+// shared by every section in the group, whether or not that section repeats the attribute itself.
+func bundleGroupMids(desc *sdp.SessionDescription) []string {
+	groupAttribute, ok := desc.Attribute(sdp.AttrKeyGroup)
+	if !ok || !strings.Contains(groupAttribute, "BUNDLE") {
+		return nil
+	}
+
+	fields := strings.Split(groupAttribute, " ")
+	if len(fields) < 2 {
+		return nil
+	}
+
+	return fields[1:]
+}
+
+// bundleTagMediaDescription returns the media section identified as the BUNDLE group's tag mid
+// (the first mid in a=group:BUNDLE), which carries attributes shared by every bundled section.
+func bundleTagMediaDescription(desc *sdp.SessionDescription) *sdp.MediaDescription {
+	tagMid := extractBundleID(desc)
+	if tagMid == "" {
+		return nil
+	}
+
+	for _, media := range desc.MediaDescriptions {
+		if getMidValue(media) == tagMid {
+			return media
+		}
+	}
+
+	return nil
+}
+
+// mediaSectionCryptexState reports whether media counts as active for negotiation purposes, whether
+// it carries RTP (as opposed to data channel) traffic, and whether Cryptex applies to it.
+//
+// RFC 9335 assigns a=cryptex to the TRANSPORT attribute category when BUNDLE is used, and RFC 9143
+// Section 7.1.3 defines TRANSPORT attributes as being carried only on the BUNDLE tag section in
+// answers and subsequent offers (and omitted from bundle-only sections even in an initial offer),
+// applying to every section in the group regardless of which section physically carries it -- this
+// holds even if the tag section itself isn't an RTP section (RFC 9143 gives the analogous example of
+// a=rtcp-mux appearing on a non-RTP tag). So a section without its own copy still inherits Cryptex
+// from the BUNDLE tag rather than being treated as lacking support.
+func mediaSectionCryptexState(
+	media, bundleTagMedia *sdp.MediaDescription, bundleMids []string,
+) (active, isRTP, hasCryptex bool) {
+	// RFC 9143 Section 6/7.2: a zero-port m-line with a=bundle-only is requesting
+	// inclusion in the BUNDLE group, not rejecting the media section.
+	_, bundleOnly := media.Attribute("bundle-only")
+	if media.MediaName.Port.Value == 0 && !bundleOnly {
+		return false, false, false
+	}
+
+	if media.MediaName.Media == mediaSectionApplication {
+		return true, false, false
+	}
+
+	hasCryptex = isCryptexSet(media)
+	if !hasCryptex && bundleTagMedia != nil && slices.Contains(bundleMids, getMidValue(media)) {
+		hasCryptex = isCryptexSet(bundleTagMedia)
+	}
+
+	return true, true, hasCryptex
+}
+
+func cryptexNegotiatedInSDP(desc *sdp.SessionDescription) (negotiatedForAnyMedia, negotiatedForAllMedia bool) {
+	negotiatedForAnyMedia = false
+	negotiatedForAllMedia = true
+	haveAnyMedia := false
+	haveRTPMedia := false
+
+	if _, hasCryptex := desc.Attribute(sdp.AttrKeyCryptex); hasCryptex {
+		return true, true
+	}
+
+	bundleTagMedia := bundleTagMediaDescription(desc)
+	bundleMids := bundleGroupMids(desc)
+
+	for _, media := range desc.MediaDescriptions {
+		active, isRTP, hasCryptex := mediaSectionCryptexState(media, bundleTagMedia, bundleMids)
+		if !active {
+			continue
+		}
+		haveAnyMedia = true
+		if !isRTP {
+			continue
+		}
+		haveRTPMedia = true
+
+		negotiatedForAnyMedia = negotiatedForAnyMedia || hasCryptex
+		negotiatedForAllMedia = negotiatedForAllMedia && hasCryptex
+	}
+
+	if !haveAnyMedia {
+		return false, false
+	}
+	if !haveRTPMedia {
+		// If the SDP contains only non-RTP media sections (for example, m=application
+		// for data channels), Cryptex is not applicable. Treat "negotiated for all RTP
+		// media" as true (vacuously) so RTPHeaderEncryptionPolicyRequire doesn't reject
+		// data-only SDP.
+		return false, true
+	}
+
+	return negotiatedForAnyMedia, negotiatedForAllMedia
+}
+
+// getCryptexModes computes the outbound (send) and inbound (receive) Cryptex modes to configure
+// for the SRTP session. Per RFC 9335 Section 4, a=cryptex declares the advertising endpoint's own
+// receive support: remoteParsed (the peer's SDP) determines what we should encrypt with when
+// sending, while our own most recently generated local SDP determines what we should still accept
+// when receiving, independent of what the remote decided to declare for itself.
+//
+// requires the caller holds pc.mu.
+func (pc *PeerConnection) getCryptexModes(
+	remoteParsed *sdp.SessionDescription,
+) (localCryptexMode, remoteCryptexMode srtp.CryptexMode, err error) {
+	localCryptexMode, err = pc.cryptexModeFromSDP(remoteParsed)
+	if err != nil {
+		return srtp.CryptexModeDisabled, srtp.CryptexModeDisabled, err
+	}
+
+	localDesc := pc.currentLocalDescription
+	if pc.pendingLocalDescription != nil {
+		localDesc = pc.pendingLocalDescription
+	}
+	if localDesc == nil || localDesc.parsed == nil {
+		// We haven't generated our own SDP yet (for example, when answering the very first
+		// offer of a negotiation). Our upcoming answer mirrors the remote's declared Cryptex
+		// support, so localCryptexMode already reflects what we will declare for receiving.
+		return localCryptexMode, localCryptexMode, nil
+	}
+
+	remoteCryptexMode, err = pc.cryptexModeFromSDP(localDesc.parsed)
+	if err != nil {
+		// Our own previously-accepted SDP should never fail this check; fall back to
+		// localCryptexMode rather than surfacing a spurious error caused by our own prior description.
+		pc.log.Warnf("Unexpected error computing local Cryptex mode from previously accepted SDP: %v", err)
+
+		return localCryptexMode, localCryptexMode, nil //nolint:nilerr
+	}
+
+	return localCryptexMode, remoteCryptexMode, nil
+}
+
+// cryptexModeFromSDP requires the caller holds pc.mu.
+//
+// nolint:cyclop
+func (pc *PeerConnection) cryptexModeFromSDP(parsed *sdp.SessionDescription) (srtp.CryptexMode, error) {
+	negotiatedForAnyMedia, negotiatedForAllMedia := cryptexNegotiatedInSDP(parsed)
+	var mode srtp.CryptexMode
+
+	// We can't support mixed Cryptex negotiation across RTP m-lines.
+	// Accept only: (a) session-level Cryptex, or (b) media-level Cryptex on all RTP m-lines.
+	if pc.configuration.RTPHeaderEncryptionPolicy != RTPHeaderEncryptionPolicyDisable &&
+		negotiatedForAnyMedia && !negotiatedForAllMedia {
+		return srtp.CryptexModeDisabled, &rtcerr.InvalidAccessError{Err: ErrRTPHeaderEncryptionMixedModeNotSupported}
+	}
+
+	switch pc.configuration.RTPHeaderEncryptionPolicy {
+	case RTPHeaderEncryptionPolicyDisable:
+		mode = srtp.CryptexModeDisabled
+	case RTPHeaderEncryptionPolicyUnknown, RTPHeaderEncryptionPolicyNegotiate:
+		if negotiatedForAnyMedia {
+			mode = srtp.CryptexModeEnabled
+		} else {
+			mode = srtp.CryptexModeDisabled
+		}
+	case RTPHeaderEncryptionPolicyRequire:
+		switch {
+		case !negotiatedForAllMedia:
+			return srtp.CryptexModeDisabled, &rtcerr.InvalidAccessError{Err: ErrRTPHeaderEncryptionRequired}
+		case negotiatedForAnyMedia:
+			mode = srtp.CryptexModeRequired
+		default:
+			// This is case for data-only SDP with no session-level Cryptex attribute.
+			mode = srtp.CryptexModeDisabled
+		}
+	}
+
+	return mode, nil
 }
 
 func (pc *PeerConnection) configureReceiver(incoming trackDetails, receiver *RTPReceiver) {
@@ -1400,7 +1683,7 @@ func (pc *PeerConnection) startReceiver(incoming trackDetails, receiver *RTPRece
 		}
 		go func(track *TrackRemote) {
 			b := make([]byte, pc.api.settingEngine.getReceiveMTU())
-			n, _, err := track.peek(b)
+			n, err := track.peek(b)
 			if err != nil {
 				pc.log.Warnf("Could not determine PayloadType for SSRC %d (%s)", track.SSRC(), err)
 
@@ -1425,6 +1708,9 @@ func setRTPTransceiverCurrentDirection(
 	weOffer bool,
 ) error {
 	currentTransceivers = append([]*RTPTransceiver{}, currentTransceivers...)
+	_, sessionLevelCryptex := answer.parsed.Attribute(sdp.AttrKeyCryptex)
+	bundleTagMedia := bundleTagMediaDescription(answer.parsed)
+	bundleMids := bundleGroupMids(answer.parsed)
 	for _, media := range answer.parsed.MediaDescriptions {
 		midValue := getMidValue(media)
 		if midValue == "" {
@@ -1442,10 +1728,10 @@ func setRTPTransceiverCurrentDirection(
 			return fmt.Errorf("%w: %q", errPeerConnTranscieverMidNil, midValue)
 		}
 
-		direction := getPeerDirection(media)
-		if direction == RTPTransceiverDirectionUnknown {
-			continue
-		}
+		_, _, hasCryptex := mediaSectionCryptexState(media, bundleTagMedia, bundleMids)
+		transceiver.setRTPHeaderEncryptionNegotiated(sessionLevelCryptex || hasCryptex)
+
+		direction := getPeerDirection(media, answer.parsed)
 
 		// reverse direction if it was a remote answer
 		if weOffer {
@@ -1648,10 +1934,11 @@ func (pc *PeerConnection) startRTPSenders(currentTransceivers []*RTPTransceiver)
 }
 
 // Start SCTP subsystem.
-func (pc *PeerConnection) startSCTP(maxMessageSize uint32) {
+func (pc *PeerConnection) startSCTP(maxMessageSize uint32, remoteSctpInit []byte) {
 	// Start sctp
 	if err := pc.sctpTransport.Start(SCTPCapabilities{
 		MaxMessageSize: maxMessageSize,
+		sctpInit:       string(remoteSctpInit),
 	}); err != nil {
 		pc.log.Warnf("Failed to start SCTP: %s", err)
 		if err = pc.sctpTransport.Stop(); err != nil {
@@ -1927,7 +2214,16 @@ func (pc *PeerConnection) handleIncomingSSRC(rtpStream *srtp.ReadStreamSRTP, ssr
 			}
 
 			if rsid != "" {
-				return receiver.receiveForRtx(SSRC(0), rsid, streamInfo, readStream, interceptor, rtcpReadStream, rtcpInterceptor)
+				return receiver.receiveForRtx(
+					SSRC(0),
+					rsid,
+					streamInfo,
+					readStream,
+					interceptor,
+					result.startRTPReaderImmediately,
+					rtcpReadStream,
+					rtcpInterceptor,
+				)
 			}
 
 			track, err := receiver.receiveForRid(
@@ -1936,6 +2232,7 @@ func (pc *PeerConnection) handleIncomingSSRC(rtpStream *srtp.ReadStreamSRTP, ssr
 				streamInfo,
 				readStream,
 				interceptor,
+				result.startRTPReaderImmediately,
 				rtcpReadStream,
 				rtcpInterceptor,
 				peekedPackets,
@@ -2713,8 +3010,8 @@ func (pc *PeerConnection) GetStats() StatsReport {
 	if pc.iceGatherer != nil {
 		pc.iceGatherer.collectStats(statsCollector)
 	}
-	if pc.iceTransport != nil {
-		pc.iceTransport.collectStats(statsCollector)
+	if pc.dtlsTransport != nil {
+		pc.dtlsTransport.collectStats(statsCollector)
 	}
 
 	pc.sctpTransport.lock.Lock()
@@ -2768,7 +3065,10 @@ func (pc *PeerConnection) GetStats() StatsReport {
 func (pc *PeerConnection) startTransports(
 	iceRole ICERole,
 	dtlsRole DTLSRole,
+	remoteIsLite bool,
 	remoteUfrag, remotePwd, fingerprint, fingerprintHash string,
+	localCryptexMode srtp.CryptexMode,
+	remoteCryptexMode srtp.CryptexMode,
 ) {
 	// Start the ice transport
 	err := pc.iceTransport.Start(
@@ -2776,7 +3076,7 @@ func (pc *PeerConnection) startTransports(
 		ICEParameters{
 			UsernameFragment: remoteUfrag,
 			Password:         remotePwd,
-			ICELite:          false,
+			ICELite:          remoteIsLite,
 		},
 		&iceRole,
 	)
@@ -2799,6 +3099,9 @@ func (pc *PeerConnection) startTransports(
 		}()
 	}
 
+	pc.dtlsTransport.setLocalCryptexMode(localCryptexMode)
+	pc.dtlsTransport.setRemoteCryptexMode(remoteCryptexMode)
+
 	// Start the dtls transport
 	err = pc.dtlsTransport.Start(DTLSParameters{
 		Role:         dtlsRole,
@@ -2814,21 +3117,31 @@ func (pc *PeerConnection) startTransports(
 
 // nolint: gocognit
 func (pc *PeerConnection) startRTP(
-	isRenegotiation bool,
 	remoteDesc *SessionDescription,
 	currentTransceivers []*RTPTransceiver,
 ) {
-	if !isRenegotiation {
-		pc.undeclaredMediaProcessor()
+	// SRTP and the undeclared media processors serve audio and video only, so
+	// a connection with only data channels does without their goroutines.
+	if hasMedia(remoteDesc, currentTransceivers) {
+		if err := pc.dtlsTransport.wantSRTP(); err != nil {
+			pc.log.Warnf("Failed to start SRTP: %s", err)
+		}
+		if pc.undeclaredStarted.CompareAndSwap(false, true) {
+			pc.undeclaredMediaProcessor()
+		}
 	}
 
 	pc.startRTPReceivers(remoteDesc, currentTransceivers)
-	if d := haveDataChannel(remoteDesc); d != nil && d.MediaName.Port.Value != 0 {
-		pc.startSCTP(getMaxMessageSize(d))
+	if d := haveDataChannel(remoteDesc); d != nil {
+		// RFC 8843 Section 6 permits bundle-only media sections to use port zero.
+		if _, bundleOnly := d.Attribute("bundle-only"); d.MediaName.Port.Value != 0 || bundleOnly {
+			remoteSctpInit, _ := getSctpInit(d)
+			pc.startSCTP(getMaxMessageSize(d), remoteSctpInit)
+		}
 	}
 }
 
-// generateUnmatchedSDP generates an SDP that doesn't take remote state into account
+// generateUnmatchedSDP generates an SDP that doesn't take remote state into account.
 // This is used for the initial call for CreateOffer.
 //
 //nolint:cyclop
@@ -2853,10 +3166,16 @@ func (pc *PeerConnection) generateUnmatchedSDP(
 	}
 
 	isPlanB := pc.configuration.SDPSemantics == SDPSemanticsPlanB
-	mediaSections := []mediaSection{}
+	cryptexEnabledByPolicy := pc.configuration.RTPHeaderEncryptionPolicy != RTPHeaderEncryptionPolicyDisable
 
+	mediaSections := []mediaSection{}
 	// Needed for pc.sctpTransport.dataChannelsRequested
 	pc.sctpTransport.lock.Lock()
+
+	var localSctpInit []byte
+	if pc.sctpTransport.dataChannelsRequested != 0 && pc.api.settingEngine.sctp.enableSnap {
+		localSctpInit = pc.sctpTransport.GetSctpInit()
+	}
 	defer pc.sctpTransport.lock.Unlock()
 
 	if isPlanB { //nolint:nestif
@@ -2864,10 +3183,13 @@ func (pc *PeerConnection) generateUnmatchedSDP(
 		audio := make([]*RTPTransceiver, 0)
 
 		for _, t := range transceivers {
-			if t.kind == RTPCodecTypeVideo {
+			switch t.kind {
+			case RTPCodecTypeVideo:
 				video = append(video, t)
-			} else if t.kind == RTPCodecTypeAudio {
+			case RTPCodecTypeAudio:
 				audio = append(audio, t)
+			case RTPCodecTypeUnknown:
+				// nothing to do
 			}
 			if sender := t.Sender(); sender != nil {
 				sender.setNegotiated()
@@ -2875,25 +3197,44 @@ func (pc *PeerConnection) generateUnmatchedSDP(
 		}
 
 		if len(video) > 0 {
-			mediaSections = append(mediaSections, mediaSection{id: "video", transceivers: video})
+			mediaSections = append(mediaSections, mediaSection{
+				id:           "video",
+				transceivers: video,
+				cryptex:      false,
+			})
 		}
 		if len(audio) > 0 {
-			mediaSections = append(mediaSections, mediaSection{id: "audio", transceivers: audio})
+			mediaSections = append(mediaSections, mediaSection{
+				id:           "audio",
+				transceivers: audio,
+				cryptex:      false,
+			})
 		}
 
 		if pc.configuration.AlwaysNegotiateDataChannels || pc.sctpTransport.dataChannelsRequested != 0 {
-			mediaSections = append(mediaSections, mediaSection{id: "data", data: true})
+			mediaSections = append(mediaSections, mediaSection{
+				id:   "data",
+				data: true,
+			})
 		}
 	} else {
 		for _, t := range transceivers {
 			if sender := t.Sender(); sender != nil {
 				sender.setNegotiated()
 			}
-			mediaSections = append(mediaSections, mediaSection{id: t.Mid(), transceivers: []*RTPTransceiver{t}})
+			mediaSections = append(mediaSections, mediaSection{
+				id:           t.Mid(),
+				transceivers: []*RTPTransceiver{t},
+				cryptex:      false,
+			})
 		}
 
 		if pc.configuration.AlwaysNegotiateDataChannels || pc.sctpTransport.dataChannelsRequested != 0 {
-			mediaSections = append(mediaSections, mediaSection{id: strconv.Itoa(len(mediaSections)), data: true})
+			mediaSections = append(mediaSections, mediaSection{
+				id:       strconv.Itoa(len(mediaSections)),
+				data:     true,
+				sctpInit: localSctpInit,
+			})
 		}
 	}
 
@@ -2918,13 +3259,14 @@ func (pc *PeerConnection) generateUnmatchedSDP(
 		nil,
 		pc.api.settingEngine.getSCTPMaxMessageSize(),
 		false,
+		cryptexEnabledByPolicy,
 	)
 }
 
-// generateMatchedSDP generates a SDP and takes the remote state into account
-// this is used everytime we have a RemoteDescription
+// generateMatchedSDP generates a SDP and takes the remote state into account.
+// This is used everytime we have a RemoteDescription
 //
-//nolint:gocognit,gocyclo,cyclop
+//nolint:gocognit,gocyclo,cyclop,maintidx
 func (pc *PeerConnection) generateMatchedSDP(
 	transceivers []*RTPTransceiver,
 	useIdentity, includeUnmatched bool,
@@ -2955,6 +3297,22 @@ func (pc *PeerConnection) generateMatchedSDP(
 	isExtmapAllowMixed := isExtMapAllowMixedSet(remoteDescription.parsed)
 	localTransceivers := append([]*RTPTransceiver{}, transceivers...)
 
+	cryptexEnabledByPolicy := pc.configuration.RTPHeaderEncryptionPolicy != RTPHeaderEncryptionPolicyDisable
+	cryptexAtSessionLevel := false
+	cryptexAtMediaLevel := false
+	if cryptexEnabledByPolicy {
+		if includeUnmatched {
+			// Offers are generated with session-level Cryptex to avoid mixed per-media negotiation.
+			cryptexAtSessionLevel = true
+		} else {
+			// Answers must mirror the attribute level (session vs media) used by the remote offer.
+			negotiatedForAnyMedia, _ := cryptexNegotiatedInSDP(remoteDescription.parsed)
+			_, offerHasSessionCryptex := remoteDescription.parsed.Attribute(sdp.AttrKeyCryptex)
+			cryptexAtSessionLevel = negotiatedForAnyMedia && offerHasSessionCryptex
+			cryptexAtMediaLevel = negotiatedForAnyMedia && !offerHasSessionCryptex
+		}
+	}
+
 	detectedPlanB := descriptionIsPlanB(remoteDescription, pc.log)
 	if pc.configuration.SDPSemantics != SDPSemanticsUnifiedPlan {
 		detectedPlanB = descriptionPossiblyPlanB(remoteDescription)
@@ -2962,6 +3320,7 @@ func (pc *PeerConnection) generateMatchedSDP(
 
 	mediaSections := []mediaSection{}
 	alreadyHaveApplicationMediaSection := false
+	var localSctpInit []byte
 	for _, media := range remoteDescription.parsed.MediaDescriptions {
 		midValue := getMidValue(media)
 		if midValue == "" {
@@ -2969,15 +3328,26 @@ func (pc *PeerConnection) generateMatchedSDP(
 		}
 
 		if media.MediaName.Media == mediaSectionApplication {
-			mediaSections = append(mediaSections, mediaSection{id: midValue, data: true})
+			init, _ := getSctpInit(media)
+			if init != nil && pc.api.settingEngine.sctp.enableSnap {
+				pc.sctpTransport.lock.Lock()
+				localSctpInit = pc.sctpTransport.GetSctpInit()
+				pc.sctpTransport.lock.Unlock()
+			}
+
+			mediaSections = append(mediaSections, mediaSection{
+				id:       midValue,
+				data:     true,
+				sctpInit: localSctpInit,
+			})
 			alreadyHaveApplicationMediaSection = true
 
 			continue
 		}
 
 		kind := NewRTPCodecType(media.MediaName.Media)
-		direction := getPeerDirection(media)
-		if kind == 0 || direction == RTPTransceiverDirectionUnknown {
+		direction := getPeerDirection(media, remoteDescription.parsed)
+		if kind == 0 {
 			continue
 		}
 
@@ -3010,7 +3380,11 @@ func (pc *PeerConnection) generateMatchedSDP(
 				}
 				mediaTransceivers = append(mediaTransceivers, transceiver)
 			}
-			mediaSections = append(mediaSections, mediaSection{id: midValue, transceivers: mediaTransceivers})
+			mediaSections = append(mediaSections, mediaSection{
+				id:           midValue,
+				transceivers: mediaTransceivers,
+				cryptex:      cryptexAtMediaLevel,
+			})
 		case sdpSemantics == SDPSemanticsUnifiedPlan || sdpSemantics == SDPSemanticsUnifiedPlanWithFallback:
 			if detectedPlanB {
 				return nil, &rtcerr.TypeError{
@@ -3032,7 +3406,13 @@ func (pc *PeerConnection) generateMatchedSDP(
 			extensions, _ := rtpExtensionsFromMediaDescription(media)
 			mediaSections = append(
 				mediaSections,
-				mediaSection{id: midValue, transceivers: mediaTransceivers, matchExtensions: extensions, rids: getRids(media)},
+				mediaSection{
+					id:              midValue,
+					transceivers:    mediaTransceivers,
+					matchExtensions: extensions,
+					rids:            getRids(media),
+					cryptex:         cryptexAtMediaLevel,
+				},
 			)
 		}
 	}
@@ -3048,16 +3428,30 @@ func (pc *PeerConnection) generateMatchedSDP(
 				if sender := t.Sender(); sender != nil {
 					sender.setNegotiated()
 				}
-				mediaSections = append(mediaSections, mediaSection{id: t.Mid(), transceivers: []*RTPTransceiver{t}})
+				mediaSections = append(mediaSections, mediaSection{
+					id:           t.Mid(),
+					transceivers: []*RTPTransceiver{t},
+					cryptex:      false,
+				})
 			}
 		}
 
 		if (pc.configuration.AlwaysNegotiateDataChannels || pc.sctpTransport.dataChannelsRequested != 0) &&
 			!alreadyHaveApplicationMediaSection {
 			if detectedPlanB {
-				mediaSections = append(mediaSections, mediaSection{id: "data", data: true})
+				mediaSections = append(mediaSections, mediaSection{
+					id:   "data",
+					data: true,
+				})
 			} else {
-				mediaSections = append(mediaSections, mediaSection{id: strconv.Itoa(len(mediaSections)), data: true})
+				if localSctpInit == nil && pc.api.settingEngine.sctp.enableSnap {
+					localSctpInit = pc.sctpTransport.GetSctpInit()
+				}
+				mediaSections = append(mediaSections, mediaSection{
+					id:       strconv.Itoa(len(mediaSections)),
+					data:     true,
+					sctpInit: localSctpInit,
+				})
 			}
 		}
 	} else if remoteDescription != nil {
@@ -3091,11 +3485,12 @@ func (pc *PeerConnection) generateMatchedSDP(
 		bundleGroup,
 		pc.api.settingEngine.getSCTPMaxMessageSize(),
 		ignoreRidPauseForRecv,
+		cryptexAtSessionLevel,
 	)
 }
 
 func (pc *PeerConnection) setGatherCompleteHandler(handler func()) {
-	pc.iceGatherer.onGatheringCompleteHandler.Store(handler)
+	pc.iceGatherer.onGatheringCompleteHandler.Store(&handler)
 }
 
 // SCTP returns the SCTPTransport for this PeerConnection
@@ -3104,4 +3499,22 @@ func (pc *PeerConnection) setGatherCompleteHandler(handler func()) {
 // https://www.w3.org/TR/webrtc/#attributes-15
 func (pc *PeerConnection) SCTP() *SCTPTransport {
 	return pc.sctpTransport
+}
+
+// hasMedia reports whether a negotiation carries audio or video: a transceiver,
+// or a media section other than the data channel's.
+func hasMedia(remoteDesc *SessionDescription, transceivers []*RTPTransceiver) bool {
+	if len(transceivers) > 0 {
+		return true
+	}
+	if remoteDesc == nil || remoteDesc.parsed == nil {
+		return false
+	}
+	for _, m := range remoteDesc.parsed.MediaDescriptions {
+		if m.MediaName.Media != mediaSectionApplication {
+			return true
+		}
+	}
+
+	return false
 }

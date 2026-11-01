@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package srtp
@@ -22,6 +22,7 @@ type srtpCipher interface {
 
 	decryptRTP([]byte, []byte, *rtp.Header, int, uint32, bool) ([]byte, error)
 	decryptRTCP([]byte, []byte, uint32, uint32) ([]byte, error)
+	setCryptex(bool)
 }
 
 /*

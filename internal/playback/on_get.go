@@ -10,25 +10,12 @@ import (
 	"time"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+	"github.com/gin-gonic/gin"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
-	"github.com/gin-gonic/gin"
 )
-
-type writerWrapper struct {
-	ctx     *gin.Context
-	written bool
-}
-
-func (w *writerWrapper) Write(p []byte) (int, error) {
-	if !w.written {
-		w.written = true
-		w.ctx.Header("Accept-Ranges", "none")
-		w.ctx.Header("Content-Type", "video/mp4")
-	}
-	return w.ctx.Writer.Write(p)
-}
 
 func parseDuration(raw string) (time.Duration, error) {
 	// seconds
@@ -54,7 +41,7 @@ func seekAndMux(
 		}
 		defer f.Close()
 
-		firstInit, _, err := segmentFMP4ReadHeader(f)
+		firstInit, _, err := recordstore.SegmentFMP4ReadHeader(f)
 		if err != nil {
 			return err
 		}
@@ -83,7 +70,7 @@ func seekAndMux(
 			defer f.Close()
 
 			var init *fmp4.Init
-			init, _, err = segmentFMP4ReadHeader(f)
+			init, _, err = recordstore.SegmentFMP4ReadHeader(f)
 			if err != nil {
 				return err
 			}
@@ -119,8 +106,29 @@ func seekAndMux(
 	return fmt.Errorf("MPEG-TS format is not supported yet")
 }
 
+type writerWrapper struct {
+	ctx     *gin.Context
+	written bool
+}
+
+func (w *writerWrapper) Write(p []byte) (int, error) {
+	if !w.written {
+		w.written = true
+		w.ctx.Header("Accept-Ranges", "none")
+		w.ctx.Header("Content-Type", "video/mp4")
+	}
+	return w.ctx.Writer.Write(p)
+}
+
 func (s *Server) onGet(ctx *gin.Context) {
 	pathName := ctx.Query("path")
+
+	// validate path name before passing it to the authentication manager
+	err := conf.IsValidPathName(pathName)
+	if err != nil {
+		s.writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid path name: %w (%s)", err, pathName))
+		return
+	}
 
 	if !s.doAuth(ctx, pathName) {
 		return
@@ -174,8 +182,7 @@ func (s *Server) onGet(ctx *gin.Context) {
 	err = seekAndMux(pathConf.RecordFormat, segments, start, duration, m)
 	if err != nil {
 		// user aborted the download
-		var neterr *net.OpError
-		if errors.As(err, &neterr) {
+		if _, ok := errors.AsType[*net.OpError](err); ok {
 			return
 		}
 

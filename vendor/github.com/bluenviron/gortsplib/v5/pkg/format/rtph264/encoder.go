@@ -4,19 +4,14 @@ import (
 	"crypto/rand"
 	"fmt"
 
-	"github.com/pion/rtp"
-
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/pion/rtp"
 )
 
 const (
 	rtpVersion            = 2
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func randUint32() (uint32, error) {
 	var b [4]byte
@@ -76,8 +71,8 @@ type Encoder struct {
 
 // Init initializes the encoder.
 func (e *Encoder) Init() error {
-	if e.PacketizationMode >= 2 {
-		return fmt.Errorf("PacketizationMode >= 2 is not supported")
+	if e.PacketizationMode != 1 {
+		return fmt.Errorf("unsupported packetization mode: %d", e.PacketizationMode)
 	}
 
 	if e.SSRC == nil {
@@ -92,7 +87,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -103,6 +98,8 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes an access unit into RTP/H264 packets.
+// AU must contain at least 1 element, each element must contain at least 1 byte.
+// The method might panic otherwise.
 func (e *Encoder) Encode(au [][]byte) ([]*rtp.Packet, error) {
 	var rets []*rtp.Packet
 	var batch [][]byte

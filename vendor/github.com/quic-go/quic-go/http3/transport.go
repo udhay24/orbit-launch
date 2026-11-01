@@ -30,16 +30,17 @@ type Settings struct {
 	Other map[uint64]uint64
 }
 
-// RoundTripOpt are options for the Transport.RoundTripOpt method.
+// RoundTripOpt contains options for [Transport.RoundTripOpt].
 type RoundTripOpt struct {
 	// OnlyCachedConn controls whether the Transport may create a new QUIC connection.
-	// If set true and no cached connection is available, RoundTripOpt will return ErrNoCachedConn.
+	// If true and no cached connection is available, [Transport.RoundTripOpt] returns [ErrNoCachedConn].
 	OnlyCachedConn bool
 }
 
 type clientConn interface {
 	OpenRequestStream(context.Context) (*RequestStream, error)
 	RoundTrip(*http.Request) (*http.Response, error)
+	handleUnidirectionalStream(*quic.ReceiveStream)
 }
 
 type roundTripperWithCount struct {
@@ -61,24 +62,24 @@ func (r *roundTripperWithCount) Close() error {
 	return nil
 }
 
-// Transport implements the http.RoundTripper interface
+// Transport implements the [http.RoundTripper] interface.
 type Transport struct {
 	// TLSClientConfig specifies the TLS configuration to use with
-	// tls.Client. If nil, the default configuration is used.
+	// [tls.Client]. If nil, the default configuration is used.
 	TLSClientConfig *tls.Config
 
-	// QUICConfig is the quic.Config used for dialing new connections.
+	// QUICConfig is the [quic.Config] used for dialing new connections.
 	// If nil, reasonable default values will be used.
 	QUICConfig *quic.Config
 
 	// Dial specifies an optional dial function for creating QUIC
 	// connections for requests.
-	// If Dial is nil, a UDPConn will be created at the first request
+	// If [Transport.Dial] is nil, a [net.UDPConn] will be created at the first request
 	// and will be reused for subsequent connections to other servers.
 	Dial func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error)
 
 	// Enable support for HTTP/3 datagrams (RFC 9297).
-	// If a QUICConfig is set, datagram support also needs to be enabled on the QUIC layer by setting EnableDatagrams.
+	// If [Transport.QUICConfig] is set, [quic.Config.EnableDatagrams] must also be enabled.
 	EnableDatagrams bool
 
 	// Additional HTTP/3 settings.
@@ -96,9 +97,6 @@ type Transport struct {
 	// decoded in the Response.Body.
 	// However, if the user explicitly requested gzip it is not automatically uncompressed.
 	DisableCompression bool
-
-	StreamHijacker    func(FrameType, quic.ConnectionTracingID, *quic.Stream, error) (hijacked bool, err error)
-	UniStreamHijacker func(StreamType, quic.ConnectionTracingID, *quic.ReceiveStream, error) (hijacked bool)
 
 	Logger *slog.Logger
 
@@ -120,9 +118,11 @@ var (
 )
 
 var (
-	// ErrNoCachedConn is returned when Transport.OnlyCachedConn is set
+	// ErrNoCachedConn is returned by [Transport.RoundTripOpt] when [RoundTripOpt.OnlyCachedConn]
+	// is true and no cached connection is available.
 	ErrNoCachedConn = errors.New("http3: no cached connection was available")
-	// ErrTransportClosed is returned when attempting to use a closed Transport
+	// ErrTransportClosed is returned by [Transport.RoundTrip] and [Transport.RoundTripOpt]
+	// after the transport is closed.
 	ErrTransportClosed = errors.New("http3: transport is closed")
 )
 
@@ -133,8 +133,6 @@ func (t *Transport) init() error {
 				conn,
 				t.EnableDatagrams,
 				t.AdditionalSettings,
-				t.StreamHijacker,
-				t.UniStreamHijacker,
 				t.MaxResponseHeaderBytes,
 				t.DisableCompression,
 				t.Logger,
@@ -168,7 +166,7 @@ func (t *Transport) init() error {
 	return nil
 }
 
-// RoundTripOpt is like RoundTrip, but takes options.
+// RoundTripOpt is like [Transport.RoundTrip], but takes options.
 func (t *Transport) RoundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Response, error) {
 	rsp, err := t.roundTripOpt(req, opt)
 	if err != nil {
@@ -207,7 +205,7 @@ func (t *Transport) roundTripOpt(req *http.Request, opt RoundTripOpt) (*http.Res
 		}
 		for _, v := range vv {
 			if !httpguts.ValidHeaderFieldValue(v) {
-				return nil, fmt.Errorf("http3: invalid http header field value %q for key %v", v, k)
+				return nil, fmt.Errorf("http3: invalid http header field value for key %q", k)
 			}
 		}
 	}
@@ -260,15 +258,14 @@ func (t *Transport) doRoundTripOpt(req *http.Request, opt RoundTripOpt, isRetrie
 
 func canRetryRequest(err error, req *http.Request) (*http.Request, error) {
 	// error occurred while opening the stream, we can be sure that the request wasn't sent out
-	var connErr *errConnUnusable
-	if errors.As(err, &connErr) {
+	if _, ok := errors.AsType[*errConnUnusable](err); ok {
 		return req, nil
 	}
 
 	// If the request stream is reset, we can only be sure that the request wasn't processed
 	// if the error code is H3_REQUEST_REJECTED.
-	var e *Error
-	if !errors.As(err, &e) || e.ErrorCode != ErrCodeRequestRejected {
+	e, ok := errors.AsType[*Error](err)
+	if !ok || e.ErrorCode != ErrCodeRequestRejected {
 		return nil, err
 	}
 	// if the body is nil (or http.NoBody), it's safe to reuse this request and its body
@@ -388,7 +385,17 @@ func (t *Transport) dial(ctx context.Context, hostname string) (*quic.Conn, clie
 	if err != nil {
 		return nil, nil, err
 	}
-	return conn, t.newClientConn(conn), nil
+	clientConn := t.newClientConn(conn)
+	go func() {
+		for {
+			str, err := conn.AcceptUniStream(context.Background())
+			if err != nil {
+				return
+			}
+			go clientConn.handleUnidirectionalStream(str)
+		}
+	}()
+	return conn, clientConn, nil
 }
 
 func (t *Transport) resolveUDPAddr(ctx context.Context, network, addr string) (*net.UDPAddr, error) {
@@ -420,22 +427,47 @@ func (t *Transport) removeClient(hostname string) {
 }
 
 // NewClientConn creates a new HTTP/3 client connection on top of a QUIC connection.
-// Most users should use RoundTrip instead of creating a connection directly.
+// Most users should use [Transport.RoundTrip] instead of creating a connection directly.
 // Specifically, it is not needed to perform GET, POST, HEAD and CONNECT requests.
 //
-// Obtaining a ClientConn is only needed for more advanced use cases, such as
+// Obtaining a [ClientConn] is only needed for more advanced use cases, such as
 // using Extended CONNECT for WebTransport or the various MASQUE protocols.
 func (t *Transport) NewClientConn(conn *quic.Conn) *ClientConn {
-	return newClientConn(
+	c := newClientConn(
 		conn,
 		t.EnableDatagrams,
 		t.AdditionalSettings,
-		t.StreamHijacker,
-		t.UniStreamHijacker,
 		t.MaxResponseHeaderBytes,
 		t.DisableCompression,
 		t.Logger,
 	)
+	go func() {
+		for {
+			str, err := conn.AcceptUniStream(context.Background())
+			if err != nil {
+				return
+			}
+			go c.handleUnidirectionalStream(str)
+		}
+	}()
+	return c
+}
+
+// NewRawClientConn creates a new low-level HTTP/3 client connection on top of a QUIC connection.
+// Unlike [Transport.NewClientConn], the returned [RawClientConn] allows the application to take control
+// of the stream accept loops by calling [RawClientConn.HandleUnidirectionalStream] for incoming
+// unidirectional streams and [ClientConn.HandleBidirectionalStream] for incoming bidirectional streams.
+func (t *Transport) NewRawClientConn(conn *quic.Conn) *RawClientConn {
+	return &RawClientConn{
+		ClientConn: newClientConn(
+			conn,
+			t.EnableDatagrams,
+			t.AdditionalSettings,
+			t.MaxResponseHeaderBytes,
+			t.DisableCompression,
+			t.Logger,
+		),
+	}
 }
 
 // Close closes the QUIC connections that this Transport has used.
@@ -494,7 +526,7 @@ func isNotToken(r rune) bool {
 // CloseIdleConnections closes any QUIC connections in the transport's pool that are currently idle.
 // An idle connection is one that was previously used for requests but is now sitting unused.
 // This method does not interrupt any connections currently in use.
-// It also does not affect connections obtained via NewClientConn.
+// It also does not affect connections obtained via [Transport.NewClientConn].
 func (t *Transport) CloseIdleConnections() {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()

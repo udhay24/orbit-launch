@@ -11,7 +11,9 @@ import (
 	"github.com/pion/rtp"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/liberrors"
+	"github.com/bluenviron/gortsplib/v5/pkg/rtcpunmarshaler"
 )
 
 // this is rtp.Packet.Unmarshal without header unmarshaling, since it has already been performed.
@@ -79,13 +81,31 @@ func createUDPListenerPair(
 
 	// pick two consecutive ports.
 	// RTP port must be even and RTCP port odd.
-	for {
-		v, err := randInRange(int((c.UDPSourcePortRange[1] - c.UDPSourcePortRange[0]) / 2))
-		if err != nil {
-			return nil, nil, err
-		}
 
-		rtpPort := v*2 + int(c.UDPSourcePortRange[0])
+	firstRTPPort := int(c.UDPSourcePortRange[0])
+	if (firstRTPPort % 2) != 0 {
+		firstRTPPort++
+	}
+
+	lastRTPPort := int(c.UDPSourcePortRange[1]) - 1
+	if (lastRTPPort % 2) != 0 {
+		lastRTPPort--
+	}
+
+	if firstRTPPort > lastRTPPort {
+		return nil, nil, fmt.Errorf("could not find two consecutive UDP ports in range %d-%d",
+			c.UDPSourcePortRange[0], c.UDPSourcePortRange[1])
+	}
+
+	pairCount := ((lastRTPPort - firstRTPPort) / 2) + 1
+
+	offset, err := randInRange(pairCount - 1)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for i := range pairCount {
+		rtpPort := firstRTPPort + (((offset + i) % pairCount) * 2)
 		rtcpPort := rtpPort + 1
 
 		l1 := &clientUDPListener{
@@ -109,6 +129,9 @@ func createUDPListenerPair(
 
 		return l1, l2, nil
 	}
+
+	return nil, nil, fmt.Errorf("could not find two consecutive UDP ports in range %d-%d",
+		c.UDPSourcePortRange[0], c.UDPSourcePortRange[1])
 }
 
 type clientMedia struct {
@@ -125,22 +148,16 @@ type clientMedia struct {
 	onPacketRTCP           OnPacketRTCPFunc
 	formats                map[uint8]*clientFormat
 	writePacketRTCPInQueue func([]byte) error
-	bytesReceived          *uint64
-	bytesSent              *uint64
-	rtpPacketsInError      *uint64
-	rtcpPacketsReceived    *uint64
-	rtcpPacketsSent        *uint64
-	rtcpPacketsInError     *uint64
+	bytesReceived          atomic.Uint64
+	bytesSent              atomic.Uint64
+	rtpPacketsInError      atomic.Uint64
+	rtcpPacketsReceived    atomic.Uint64
+	rtcpPacketsSent        atomic.Uint64
+	rtcpPacketsInError     atomic.Uint64
 }
 
 func (cm *clientMedia) initialize() {
 	cm.onPacketRTCP = func(rtcp.Packet) {}
-	cm.bytesReceived = new(uint64)
-	cm.bytesSent = new(uint64)
-	cm.rtpPacketsInError = new(uint64)
-	cm.rtcpPacketsReceived = new(uint64)
-	cm.rtcpPacketsSent = new(uint64)
-	cm.rtcpPacketsInError = new(uint64)
 
 	cm.formats = make(map[uint8]*clientFormat)
 
@@ -188,6 +205,11 @@ func (cm *clientMedia) close() {
 	for _, ct := range cm.formats {
 		ct.close()
 	}
+
+	if cm.udpRTPListener != nil {
+		cm.udpRTPListener.close()
+		cm.udpRTCPListener.close()
+	}
 }
 
 func (cm *clientMedia) start() {
@@ -204,10 +226,44 @@ func (cm *clientMedia) stop() {
 	}
 }
 
+func (cm *clientMedia) stats() SessionStatsMedia { //nolint:dupl
+	return SessionStatsMedia{
+		InboundBytes:              cm.bytesReceived.Load(),
+		InboundRTPPacketsInError:  cm.rtpPacketsInError.Load(),
+		InboundRTCPPackets:        cm.rtcpPacketsReceived.Load(),
+		InboundRTCPPacketsInError: cm.rtcpPacketsInError.Load(),
+		OutboundBytes:             cm.bytesSent.Load(),
+		OutboundRTCPPackets:       cm.rtcpPacketsSent.Load(),
+		Formats: func() map[format.Format]SessionStatsFormat {
+			ret := make(map[format.Format]SessionStatsFormat, len(cm.formats))
+			for _, fo := range cm.formats {
+				ret[fo.format] = fo.stats()
+			}
+			return ret
+		}(),
+		// deprecated
+		BytesReceived:       cm.bytesReceived.Load(),
+		BytesSent:           cm.bytesSent.Load(),
+		RTPPacketsInError:   cm.rtpPacketsInError.Load(),
+		RTCPPacketsReceived: cm.rtcpPacketsReceived.Load(),
+		RTCPPacketsSent:     cm.rtcpPacketsSent.Load(),
+		RTCPPacketsInError:  cm.rtcpPacketsInError.Load(),
+	}
+}
+
 func (cm *clientMedia) findFormatByRemoteSSRC(ssrc uint32) *clientFormat {
 	for _, cf := range cm.formats {
 		if v, ok := cf.remoteSSRC(); ok && v == ssrc {
 			return cf
+		}
+	}
+	return nil
+}
+
+func (cm *clientMedia) findFormatByLocalSSRC(ssrc uint32) *clientFormat {
+	for _, sf := range cm.formats {
+		if sf.localSSRC == ssrc {
+			return sf
 		}
 	}
 	return nil
@@ -234,7 +290,7 @@ func (cm *clientMedia) decodeRTCP(payload []byte) ([]rtcp.Packet, error) {
 		}
 	}
 
-	pkts, err := rtcp.Unmarshal(payload)
+	pkts, err := rtcpunmarshaler.Unmarshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -268,7 +324,7 @@ func (cm *clientMedia) readPacketRTCPPlay(payload []byte) bool {
 
 	now := cm.c.timeNow()
 
-	atomic.AddUint64(cm.rtcpPacketsReceived, uint64(len(packets)))
+	cm.rtcpPacketsReceived.Add(uint64(len(packets)))
 
 	for _, pkt := range packets {
 		if sr, ok := pkt.(*rtcp.SenderReport); ok {
@@ -291,9 +347,18 @@ func (cm *clientMedia) readPacketRTCPRecord(payload []byte) bool {
 		return false
 	}
 
-	atomic.AddUint64(cm.rtcpPacketsReceived, uint64(len(packets)))
+	cm.rtcpPacketsReceived.Add(uint64(len(packets)))
 
 	for _, pkt := range packets {
+		if rr, ok := pkt.(*rtcp.ReceiverReport); ok {
+			for _, report := range rr.Reports {
+				format := cm.findFormatByLocalSSRC(report.SSRC)
+				if format != nil {
+					format.rtpSender.ProcessReceptionReport(&report)
+				}
+			}
+		}
+
 		cm.onPacketRTCP(pkt)
 	}
 
@@ -301,19 +366,15 @@ func (cm *clientMedia) readPacketRTCPRecord(payload []byte) bool {
 }
 
 func (cm *clientMedia) readPacketRTPTCPPlay(payload []byte) bool {
-	atomic.AddUint64(cm.bytesReceived, uint64(len(payload)))
+	cm.bytesReceived.Add(uint64(len(payload)))
 
 	now := cm.c.timeNow()
-	atomic.StoreInt64(cm.c.tcpLastFrameTime, now.Unix())
 
 	return cm.readPacketRTP(payload, now)
 }
 
 func (cm *clientMedia) readPacketRTCPTCPPlay(payload []byte) bool {
-	atomic.AddUint64(cm.bytesReceived, uint64(len(payload)))
-
-	now := cm.c.timeNow()
-	atomic.StoreInt64(cm.c.tcpLastFrameTime, now.Unix())
+	cm.bytesReceived.Add(uint64(len(payload)))
 
 	if len(payload) > udpMaxPayloadSize {
 		cm.onPacketRTCPDecodeError(liberrors.ErrClientRTCPPacketTooBig{L: len(payload), Max: udpMaxPayloadSize})
@@ -328,7 +389,7 @@ func (cm *clientMedia) readPacketRTPTCPRecord(_ []byte) bool {
 }
 
 func (cm *clientMedia) readPacketRTCPTCPRecord(payload []byte) bool {
-	atomic.AddUint64(cm.bytesReceived, uint64(len(payload)))
+	cm.bytesReceived.Add(uint64(len(payload)))
 
 	if len(payload) > udpMaxPayloadSize {
 		cm.onPacketRTCPDecodeError(liberrors.ErrClientRTCPPacketTooBig{L: len(payload), Max: udpMaxPayloadSize})
@@ -339,7 +400,7 @@ func (cm *clientMedia) readPacketRTCPTCPRecord(payload []byte) bool {
 }
 
 func (cm *clientMedia) readPacketRTPUDPPlay(payload []byte) bool {
-	atomic.AddUint64(cm.bytesReceived, uint64(len(payload)))
+	cm.bytesReceived.Add(uint64(len(payload)))
 
 	if len(payload) == (udpMaxPayloadSize + 1) {
 		cm.onPacketRTPDecodeError(liberrors.ErrClientRTPPacketTooBigUDP{})
@@ -350,7 +411,7 @@ func (cm *clientMedia) readPacketRTPUDPPlay(payload []byte) bool {
 }
 
 func (cm *clientMedia) readPacketRTCPUDPPlay(payload []byte) bool {
-	atomic.AddUint64(cm.bytesReceived, uint64(len(payload)))
+	cm.bytesReceived.Add(uint64(len(payload)))
 
 	if len(payload) == (udpMaxPayloadSize + 1) {
 		cm.onPacketRTCPDecodeError(liberrors.ErrClientRTCPPacketTooBigUDP{})
@@ -365,7 +426,7 @@ func (cm *clientMedia) readPacketRTPUDPRecord(_ []byte) bool {
 }
 
 func (cm *clientMedia) readPacketRTCPUDPRecord(payload []byte) bool {
-	atomic.AddUint64(cm.bytesReceived, uint64(len(payload)))
+	cm.bytesReceived.Add(uint64(len(payload)))
 
 	if len(payload) == (udpMaxPayloadSize + 1) {
 		cm.onPacketRTCPDecodeError(liberrors.ErrClientRTCPPacketTooBigUDP{})
@@ -376,12 +437,12 @@ func (cm *clientMedia) readPacketRTCPUDPRecord(payload []byte) bool {
 }
 
 func (cm *clientMedia) onPacketRTPDecodeError(err error) {
-	atomic.AddUint64(cm.rtpPacketsInError, 1)
+	cm.rtpPacketsInError.Add(1)
 	cm.c.OnDecodeError(err)
 }
 
 func (cm *clientMedia) onPacketRTCPDecodeError(err error) {
-	atomic.AddUint64(cm.rtcpPacketsInError, 1)
+	cm.rtcpPacketsInError.Add(1)
 	cm.c.OnDecodeError(err)
 }
 
@@ -432,8 +493,8 @@ func (cm *clientMedia) writePacketRTCPInQueueUDP(payload []byte) error {
 		return err
 	}
 
-	atomic.AddUint64(cm.bytesSent, uint64(len(payload)))
-	atomic.AddUint64(cm.rtcpPacketsSent, 1)
+	cm.bytesSent.Add(uint64(len(payload)))
+	cm.rtcpPacketsSent.Add(1)
 	return nil
 }
 
@@ -446,7 +507,7 @@ func (cm *clientMedia) writePacketRTCPInQueueTCP(payload []byte) error {
 		return err
 	}
 
-	atomic.AddUint64(cm.bytesSent, uint64(len(payload)))
-	atomic.AddUint64(cm.rtcpPacketsSent, 1)
+	cm.bytesSent.Add(uint64(len(payload)))
+	cm.rtcpPacketsSent.Add(1)
 	return nil
 }

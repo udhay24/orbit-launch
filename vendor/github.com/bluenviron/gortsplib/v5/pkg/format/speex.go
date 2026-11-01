@@ -30,7 +30,7 @@ func (f *Speex) unmarshal(ctx *unmarshalContext) error {
 				return fmt.Errorf("invalid vbr value: %v", val)
 			}
 
-			f.VBR = ptrOf((val == "on"))
+			f.VBR = new((val == "on"))
 		}
 	}
 
@@ -38,6 +38,8 @@ func (f *Speex) unmarshal(ctx *unmarshalContext) error {
 }
 
 // Codec implements Format.
+//
+// Deprecated: will be removed in the next version.
 func (f *Speex) Codec() string {
 	return "Speex"
 }

@@ -1,4 +1,4 @@
-package recordstore
+package recordstore_test
 
 import (
 	"os"
@@ -7,22 +7,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/conf"
+	"github.com/bluenviron/mediamtx/internal/recordstore"
 )
 
-func ptrOf[T any](v T) *T {
-	p := new(T)
-	*p = v
-	return p
-}
-
 func TestFindAllPathsWithSegments(t *testing.T) {
-	dir, err := os.MkdirTemp("", "mediamtx-recordstore")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
-	err = os.Mkdir(filepath.Join(dir, "path1"), 0o755)
+	err := os.Mkdir(filepath.Join(dir, "path1"), 0o755)
 	require.NoError(t, err)
 
 	err = os.Mkdir(filepath.Join(dir, "path2"), 0o755)
@@ -34,7 +28,7 @@ func TestFindAllPathsWithSegments(t *testing.T) {
 	err = os.WriteFile(filepath.Join(dir, "path2", "2015-07-19_22-15-25-000427.mp4"), []byte{1}, 0o644)
 	require.NoError(t, err)
 
-	paths := FindAllPathsWithSegments(map[string]*conf.Path{
+	paths := recordstore.FindAllPathsWithSegments(map[string]*conf.Path{
 		"~^.*$": {
 			Name:         "~^.*$",
 			Regexp:       regexp.MustCompile("^.*$"),
@@ -51,14 +45,12 @@ func TestFindAllPathsWithSegments(t *testing.T) {
 }
 
 func TestFindAllPathsWithSegmentsInvalidPath(t *testing.T) {
-	dir, err := os.MkdirTemp("", "mediamtx-recordstore")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
-	err = os.WriteFile(filepath.Join(dir, "_2015-05-19_22-15-25-000427.mp4"), []byte{1}, 0o644)
+	err := os.WriteFile(filepath.Join(dir, "_2015-05-19_22-15-25-000427.mp4"), []byte{1}, 0o644)
 	require.NoError(t, err)
 
-	paths := FindAllPathsWithSegments(map[string]*conf.Path{
+	paths := recordstore.FindAllPathsWithSegments(map[string]*conf.Path{
 		"~^.*$": {
 			Name:         "~^.*$",
 			Regexp:       regexp.MustCompile("^.*$"),
@@ -76,11 +68,9 @@ func TestFindSegments(t *testing.T) {
 		"start before first",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			dir, err := os.MkdirTemp("", "mediamtx-recordstore")
-			require.NoError(t, err)
-			defer os.RemoveAll(dir)
+			dir := t.TempDir()
 
-			err = os.Mkdir(filepath.Join(dir, "path1"), 0o755)
+			err := os.Mkdir(filepath.Join(dir, "path1"), 0o755)
 			require.NoError(t, err)
 
 			err = os.Mkdir(filepath.Join(dir, "path2"), 0o755)
@@ -99,14 +89,14 @@ func TestFindSegments(t *testing.T) {
 			case "no filtering":
 
 			case "filtering":
-				start = ptrOf(time.Date(2015, 5, 19, 22, 18, 25, 427000, time.Local))
-				end = ptrOf(start.Add(60 * time.Minute))
+				start = new(time.Date(2015, 5, 19, 22, 18, 25, 427000, time.Local))
+				end = new(start.Add(60 * time.Minute))
 
 			case "start before first":
-				start = ptrOf(time.Date(2014, 5, 19, 22, 18, 25, 427000, time.Local))
+				start = new(time.Date(2014, 5, 19, 22, 18, 25, 427000, time.Local))
 			}
 
-			segments, err := FindSegments(
+			segments, err := recordstore.FindSegments(
 				&conf.Path{
 					Name:         "~^.*$",
 					Regexp:       regexp.MustCompile("^.*$"),
@@ -121,7 +111,7 @@ func TestFindSegments(t *testing.T) {
 
 			switch ca {
 			case "no filtering", "start before first":
-				require.Equal(t, []*Segment{
+				require.Equal(t, []*recordstore.Segment{
 					{
 						Fpath: filepath.Join(dir, "path1", "2015-05-19_22-15-25-000427.mp4"),
 						Start: time.Date(2015, 5, 19, 22, 15, 25, 427000, time.Local),
@@ -133,7 +123,7 @@ func TestFindSegments(t *testing.T) {
 				}, segments)
 
 			case "filtering":
-				require.Equal(t, []*Segment{
+				require.Equal(t, []*recordstore.Segment{
 					{
 						Fpath: filepath.Join(dir, "path1", "2015-05-19_22-15-25-000427.mp4"),
 						Start: time.Date(2015, 5, 19, 22, 15, 25, 427000, time.Local),

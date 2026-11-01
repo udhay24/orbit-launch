@@ -41,7 +41,10 @@ func (m *MessageClientKeyExchange) Marshal() (out []byte, err error) {
 	}
 
 	if m.PublicKey != nil {
-		out = append(out, byte(len(m.PublicKey)))
+		if len(m.PublicKey) > 255 {
+			return nil, errPublicKeyTooLong
+		}
+		out = append(out, byte(len(m.PublicKey))) //nolint:gosec // G115: public key length is validated to be <= 255 above.
 		out = append(out, m.PublicKey...)
 	}
 
@@ -69,12 +72,15 @@ func (m *MessageClientKeyExchange) Unmarshal(data []byte) error {
 	}
 
 	if m.KeyExchangeAlgorithm.Has(types.KeyExchangeAlgorithmEcdhe) {
+		if offset >= len(data) {
+			return errBufferTooSmall
+		}
 		publicKeyLength := int(data[offset])
 		if publicKeyLength > len(data)-1-offset {
 			return errBufferTooSmall
 		}
 
-		m.PublicKey = append([]byte{}, data[offset+1:]...)
+		m.PublicKey = append([]byte{}, data[offset+1:offset+1+publicKeyLength]...)
 	}
 
 	return nil

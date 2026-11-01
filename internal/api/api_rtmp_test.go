@@ -6,12 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/servers/rtmp"
 	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 )
 
 type testRTMPServer struct {
@@ -55,7 +56,7 @@ func TestRTMPConnsList(t *testing.T) {
 		},
 		{
 			name:     "rtmps",
-			endpoint: "rtmpsconns",
+			endpoint: "rtmps/conns",
 			isSecure: true,
 		},
 	} {
@@ -67,24 +68,30 @@ func TestRTMPConnsList(t *testing.T) {
 			rtmpServer := &testRTMPServer{
 				conns: map[uuid.UUID]*defs.APIRTMPConn{
 					id1: {
-						ID:            id1,
-						Created:       now,
-						RemoteAddr:    "192.168.1.1:5000",
-						State:         defs.APIRTMPConnStatePublish,
-						Path:          "stream1",
-						Query:         "token=abc",
-						BytesReceived: 1000,
-						BytesSent:     2000,
+						ID:                      id1,
+						Created:                 now,
+						RemoteAddr:              "192.168.1.1:5000",
+						State:                   defs.APIRTMPConnStatePublish,
+						Path:                    "stream1",
+						Query:                   "token=abc",
+						InboundBytes:            1000,
+						OutboundBytes:           2000,
+						OutboundFramesDiscarded: 11,
+						BytesReceived:           1000,
+						BytesSent:               2000,
 					},
 					id2: {
-						ID:            id2,
-						Created:       now.Add(time.Minute),
-						RemoteAddr:    "192.168.1.2:5001",
-						State:         defs.APIRTMPConnStateRead,
-						Path:          "stream2",
-						Query:         "",
-						BytesReceived: 500,
-						BytesSent:     1500,
+						ID:                      id2,
+						Created:                 now.Add(time.Minute),
+						RemoteAddr:              "192.168.1.2:5001",
+						State:                   defs.APIRTMPConnStateRead,
+						Path:                    "stream2",
+						Query:                   "",
+						InboundBytes:            500,
+						OutboundBytes:           1500,
+						OutboundFramesDiscarded: 22,
+						BytesReceived:           500,
+						BytesSent:               1500,
 					},
 				},
 			}
@@ -136,7 +143,7 @@ func TestRTMPConnsGet(t *testing.T) {
 		},
 		{
 			name:     "rtmps",
-			endpoint: "rtmpsconns",
+			endpoint: "rtmps/conns",
 			path:     "secure-stream",
 			isSecure: true,
 		},
@@ -148,14 +155,17 @@ func TestRTMPConnsGet(t *testing.T) {
 			rtmpServer := &testRTMPServer{
 				conns: map[uuid.UUID]*defs.APIRTMPConn{
 					id: {
-						ID:            id,
-						Created:       now,
-						RemoteAddr:    "192.168.1.100:5000",
-						State:         defs.APIRTMPConnStatePublish,
-						Path:          ca.path,
-						Query:         "key=value",
-						BytesReceived: 999999,
-						BytesSent:     888888,
+						ID:                      id,
+						Created:                 now,
+						RemoteAddr:              "192.168.1.100:5000",
+						State:                   defs.APIRTMPConnStatePublish,
+						Path:                    ca.path,
+						Query:                   "key=value",
+						InboundBytes:            999999,
+						OutboundBytes:           888888,
+						OutboundFramesDiscarded: 33,
+						BytesReceived:           999999,
+						BytesSent:               888888,
 					},
 				},
 			}
@@ -189,6 +199,9 @@ func TestRTMPConnsGet(t *testing.T) {
 			require.Equal(t, "192.168.1.100:5000", out.RemoteAddr)
 			require.Equal(t, defs.APIRTMPConnStatePublish, out.State)
 			require.Equal(t, ca.path, out.Path)
+			require.Equal(t, uint64(999999), out.InboundBytes)
+			require.Equal(t, uint64(888888), out.OutboundBytes)
+			require.Equal(t, uint64(33), out.OutboundFramesDiscarded)
 			require.Equal(t, uint64(999999), out.BytesReceived)
 		})
 	}
@@ -209,7 +222,7 @@ func TestRTMPConnsKick(t *testing.T) {
 		},
 		{
 			name:     "rtmps",
-			endpoint: "rtmpsconns",
+			endpoint: "rtmps/conns",
 			path:     "secure-stream",
 			isSecure: true,
 		},

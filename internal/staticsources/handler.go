@@ -3,15 +3,18 @@ package staticsources
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	sshls "github.com/bluenviron/mediamtx/internal/staticsources/hls"
+	ssmoq "github.com/bluenviron/mediamtx/internal/staticsources/moq"
 	ssmpegts "github.com/bluenviron/mediamtx/internal/staticsources/mpegts"
 	ssrpicamera "github.com/bluenviron/mediamtx/internal/staticsources/rpicamera"
 	ssrtmp "github.com/bluenviron/mediamtx/internal/staticsources/rtmp"
@@ -19,12 +22,14 @@ import (
 	ssrtsp "github.com/bluenviron/mediamtx/internal/staticsources/rtsp"
 	sssrt "github.com/bluenviron/mediamtx/internal/staticsources/srt"
 	sswebrtc "github.com/bluenviron/mediamtx/internal/staticsources/webrtc"
-	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
 const (
 	retryPause = 5 * time.Second
 )
+
+// ErrNoStaticSource is returned when a path has no static source.
+var ErrNoStaticSource = errors.New("path has no static source")
 
 func emptyTimer() *time.Timer {
 	t := time.NewTimer(0)
@@ -33,10 +38,8 @@ func emptyTimer() *time.Timer {
 }
 
 func resolveSource(s string, matches []string, query string) string {
-	if len(matches) > 1 {
-		for i, ma := range matches[1:] {
-			s = strings.ReplaceAll(s, "$G"+strconv.FormatInt(int64(i+1), 10), ma)
-		}
+	for i := len(matches) - 1; i >= 1; i-- {
+		s = strings.ReplaceAll(s, "$G"+strconv.FormatInt(int64(i), 10), matches[i])
 	}
 
 	s = strings.ReplaceAll(s, "$MTX_QUERY", query)
@@ -48,10 +51,11 @@ type staticSource interface {
 	logger.Writer
 	Run(defs.StaticSourceRunParams) error
 	APISourceDescribe() *defs.APIPathSource
+	Info() defs.StaticSourceInfo
 }
 
 type handlerPathManager interface {
-	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 }
 
 type handlerParent interface {
@@ -70,6 +74,7 @@ type Handler struct {
 	WriteQueueSize    int
 	UDPReadBufferSize uint
 	RTPMaxPayloadSize int
+	SupportsIPv6      bool
 	Matches           []string
 	PathManager       handlerPathManager
 	Parent            handlerParent
@@ -79,6 +84,10 @@ type Handler struct {
 	instance  staticSource
 	running   bool
 	query     string
+	created   time.Time
+	mutex     sync.RWMutex
+	state     defs.APIStaticSourceState
+	lastError string
 
 	// in
 	chReloadConf          chan *conf.Path
@@ -94,6 +103,8 @@ func (s *Handler) Initialize() {
 	s.chReloadConf = make(chan *conf.Path)
 	s.chInstanceSetReady = make(chan defs.PathSourceStaticSetReadyReq)
 	s.chInstanceSetNotReady = make(chan defs.PathSourceStaticSetNotReadyReq)
+	s.created = time.Now()
+	s.state = defs.APIStaticSourceStateIdle
 
 	switch {
 	case strings.HasPrefix(s.Conf.Source, "rtsp://") ||
@@ -144,12 +155,19 @@ func (s *Handler) Initialize() {
 			Parent:      s,
 		}
 
+	case strings.HasPrefix(s.Conf.Source, "moqt://"):
+		s.instance = &ssmoq.Source{
+			ReadTimeout: s.ReadTimeout,
+			Parent:      s,
+		}
+
 	case strings.HasPrefix(s.Conf.Source, "whep://") ||
 		strings.HasPrefix(s.Conf.Source, "wheps://"):
 		s.instance = &sswebrtc.Source{
 			DumpPackets:       s.DumpPackets,
 			ReadTimeout:       s.ReadTimeout,
 			UDPReadBufferSize: s.UDPReadBufferSize,
+			SupportsIPv6:      s.SupportsIPv6,
 			Parent:            s,
 		}
 
@@ -215,6 +233,11 @@ func (s *Handler) Stop(reason string) {
 
 	// we must wait since s.ctx is not thread safe
 	<-s.done
+
+	s.mutex.Lock()
+	s.state = defs.APIStaticSourceStateIdle
+	s.lastError = ""
+	s.mutex.Unlock()
 }
 
 // Log implements logger.Writer.
@@ -232,6 +255,11 @@ func (s *Handler) run() {
 
 	recreate := func() {
 		resolvedSource := resolveSource(s.Conf.Source, s.Matches, s.query)
+
+		s.mutex.Lock()
+		s.state = defs.APIStaticSourceStateRunning
+		s.lastError = ""
+		s.mutex.Unlock()
 
 		runCtx, runCtxCancel = context.WithCancel(context.Background())
 		go func() {
@@ -254,6 +282,12 @@ func (s *Handler) run() {
 		case err := <-runErr:
 			runCtxCancel()
 			s.instance.Log(logger.Error, err.Error())
+
+			s.mutex.Lock()
+			s.state = defs.APIStaticSourceStateError
+			s.lastError = err.Error()
+			s.mutex.Unlock()
+
 			recreating = true
 			recreateTimer = time.NewTimer(retryPause)
 
@@ -283,7 +317,7 @@ func (s *Handler) run() {
 		case <-s.ctx.Done():
 			if !recreating {
 				runCtxCancel()
-				<-runErr
+				<-runErr //nolint:errcheck
 			}
 			return
 		}
@@ -311,6 +345,22 @@ func (s *Handler) APISourceDescribe() *defs.APIPathSource {
 	return s.instance.APISourceDescribe()
 }
 
+// APIItem returns an API item.
+func (s *Handler) APIItem() *defs.APIStaticSource {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	info := s.instance.Info()
+
+	return &defs.APIStaticSource{
+		Type:         s.instance.APISourceDescribe().Type,
+		State:        s.state,
+		LastError:    s.lastError,
+		Created:      s.created,
+		TypeSpecific: info.TypeSpecific,
+	}
+}
+
 // SetReady is called by a staticSource.
 func (s *Handler) SetReady(req defs.PathSourceStaticSetReadyReq) defs.PathSourceStaticSetReadyRes {
 	req.Res = make(chan defs.PathSourceStaticSetReadyRes)
@@ -334,6 +384,6 @@ func (s *Handler) SetNotReady(req defs.PathSourceStaticSetNotReadyReq) {
 }
 
 // AddReader is called by a staticSource.
-func (s *Handler) AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error) {
+func (s *Handler) AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
 	return s.PathManager.AddReader(req)
 }

@@ -1,14 +1,22 @@
-package packetdumper
+package packetdumper_test
 
 import (
 	"net"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/packetdumper"
 )
+
+func checkPcapngPresence(t *testing.T, prefix string) {
+	t.Helper()
+	matches, err := filepath.Glob(prefix + "_*.pcapng")
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "expected at least one pcapng file to have been created")
+}
 
 // startUDPPair creates a pair of UDP connections and returns both ends.
 func startUDPPair(t *testing.T) (client, server *net.UDPConn) {
@@ -34,40 +42,25 @@ func startUDPPair(t *testing.T) (client, server *net.UDPConn) {
 	return client, server
 }
 
-func cleanupPcapngPacket(t *testing.T, prefix string) {
-	t.Helper()
-
-	matches, err := filepath.Glob(prefix + "_*.pcapng")
-	require.NoError(t, err, "glob for pcapng files")
-	require.NotEmpty(t, matches, "expected at least one pcapng file to have been created")
-
-	for _, f := range matches {
-		require.NoError(t, os.Remove(f), "removing pcapng file %s", f)
-	}
-}
-
 func TestPacketConnInitialize_CreatesFile(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
 
-	defer cleanupPcapngPacket(t, prefix)
-	defer c.Close() //nolint:errcheck
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
+
+	checkPcapngPresence(t, prefix)
 }
 
 func TestPacketConnWriteTo(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
-
-	defer cleanupPcapngPacket(t, prefix)
-	defer c.Close() //nolint:errcheck
 
 	n, err := c.WriteTo([]byte("hello world"), server.LocalAddr())
 	require.NoError(t, err)
@@ -78,18 +71,19 @@ func TestPacketConnWriteTo(t *testing.T) {
 	rn, _, err := server.ReadFromUDP(buf)
 	require.NoError(t, err)
 	require.Equal(t, []byte("hello world"), buf[:rn])
+
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
+
+	checkPcapngPresence(t, prefix)
 }
 
 func TestPacketConnReadFrom(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
-
-	defer cleanupPcapngPacket(t, prefix)
-	defer c.Close() //nolint:errcheck
 
 	_, err := server.WriteTo([]byte("incoming data"), client.LocalAddr())
 	require.NoError(t, err)
@@ -100,18 +94,19 @@ func TestPacketConnReadFrom(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("incoming data"), buf[:n])
 	require.NotNil(t, addr)
+
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
+
+	checkPcapngPresence(t, prefix)
 }
 
 func TestPacketConnMultipleWriteRead(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
-
-	defer cleanupPcapngPacket(t, prefix)
-	defer c.Close() //nolint:errcheck
 
 	serverAddr := server.LocalAddr()
 	for _, msg := range []string{"foo", "bar", "baz"} {
@@ -143,50 +138,52 @@ func TestPacketConnMultipleWriteRead(t *testing.T) {
 		readReceived = append(readReceived, buf[:n]...)
 	}
 	require.Equal(t, []byte("abcdefghij"), readReceived)
+
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
+
+	checkPcapngPresence(t, prefix)
 }
 
 func TestPacketConnCloseIdempotent(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
 
-	defer cleanupPcapngPacket(t, prefix)
+	c.Close()      //nolint:errcheck
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
 
-	defer c.Close() //nolint:errcheck
-	defer c.Close() //nolint:errcheck
+	checkPcapngPresence(t, prefix)
 }
 
 func TestPacketConnDelegatesAddrMethods(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
-
-	defer cleanupPcapngPacket(t, prefix)
-	defer c.Close() //nolint:errcheck
 
 	require.Equal(t, client.LocalAddr(), c.LocalAddr())
 
 	require.NoError(t, c.SetDeadline(time.Now().Add(time.Second)))
 	require.NoError(t, c.SetReadDeadline(time.Now().Add(time.Second)))
 	require.NoError(t, c.SetWriteDeadline(time.Now().Add(time.Second)))
+
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
+
+	checkPcapngPresence(t, prefix)
 }
 
 func TestPacketConnReadFromRecordsSource(t *testing.T) {
 	client, server := startUDPPair(t)
-	defer server.Close() //nolint:errcheck
 
 	prefix := filepath.Join(t.TempDir(), "capture")
-	c := &PacketConn{Prefix: prefix, PacketConn: client}
+	c := &packetdumper.PacketConn{Prefix: prefix, Wrapped: client}
 	require.NoError(t, c.Initialize())
-
-	defer cleanupPcapngPacket(t, prefix)
-	defer c.Close() //nolint:errcheck
 
 	_, err := server.WriteTo([]byte("ping"), client.LocalAddr())
 	require.NoError(t, err)
@@ -199,4 +196,9 @@ func TestPacketConnReadFromRecordsSource(t *testing.T) {
 
 	// The reported source address should match the server's address.
 	require.Equal(t, server.LocalAddr().String(), addr.String())
+
+	c.Close()      //nolint:errcheck
+	server.Close() //nolint:errcheck
+
+	checkPcapngPresence(t, prefix)
 }

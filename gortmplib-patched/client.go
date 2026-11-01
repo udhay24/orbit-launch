@@ -14,11 +14,24 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/bluenviron/gortmplib/pkg/amf0"
 	"github.com/bluenviron/gortmplib/pkg/bytecounter"
 	"github.com/bluenviron/gortmplib/pkg/handshake"
 	"github.com/bluenviron/gortmplib/pkg/message"
-	"github.com/google/uuid"
+)
+
+const (
+	schemeRTMP  = "rtmp"
+	schemeRTMPS = "rtmps"
+
+	defaultRTMPPort  = "1935"
+	defaultRTMPSPort = "443"
+)
+
+const (
+	encodingAMF0 = 0
 )
 
 // RTMP 1.0 spec, section 7.2.1.1
@@ -28,10 +41,7 @@ const (
 	supportSndG711A = 0x0080
 	supportSndG711U = 0x0100
 	supportSndAAV   = 0x0400
-
-	supportVidH264 = 0x0080
-
-	encodingAMF0 = 0
+	supportVidH264  = 0x0080
 )
 
 var errAuth = errors.New("auth")
@@ -71,36 +81,17 @@ func resultIsOK2(res *message.CommandAMF0) bool {
 	return v == 1
 }
 
-func splitPath(u *url.URL) (string, string) {
+func splitURL(u *url.URL) (string, string, string) {
 	nu := *u
-	nu.ForceQuery = false
-	pathsegs := strings.Split(nu.RequestURI(), "/")
 
-	var app string
+	// move fragment inside streamKey
 	var streamKey string
+	streamKey, nu.Fragment = nu.Fragment, ""
 
-	switch {
-	case len(pathsegs) == 2:
-		app = pathsegs[1]
+	tcURL := nu.String()
+	app := strings.TrimPrefix(nu.RequestURI(), "/")
 
-	case len(pathsegs) == 3:
-		app = pathsegs[1]
-		streamKey = pathsegs[2]
-
-	case len(pathsegs) > 3:
-		app = strings.Join(pathsegs[1:3], "/")
-		streamKey = strings.Join(pathsegs[3:], "/")
-	}
-
-	return app, streamKey
-}
-
-func getTcURL(u *url.URL) string {
-	app, _ := splitPath(u)
-	nu, _ := url.Parse(u.String()) // perform a deep copy
-	nu.RawQuery = ""
-	nu.Path = "/"
-	return nu.String() + app
+	return tcURL, app, streamKey
 }
 
 func readCommand(mrw *message.ReadWriter) (*message.CommandAMF0, error) {
@@ -160,6 +151,7 @@ type Client struct {
 	// Target
 	//
 	// URL of the RTMP server to connect to.
+	// Format is rtmp://user:pass@host:port/path#streamKey
 	URL *url.URL
 	// Whether to publish or play.
 	Publish bool
@@ -177,6 +169,10 @@ type Client struct {
 	// function used to initialize the TCP client.
 	// It defaults to (&net.Dialer{}).DialContext.
 	DialContext func(ctx context.Context, network, address string) (net.Conn, error)
+	// function used to initialize a TLS connection.
+	// When nil, DialContext and tls.Client are used in its place.
+	// It defaults to nil.
+	DialTLSContext func(ctx context.Context, network string, addr string) (net.Conn, error)
 
 	nconn         net.Conn
 	bc            *bytecounter.ReadWriter
@@ -193,14 +189,7 @@ func (c *Client) Initialize(ctx context.Context) error {
 	}
 
 	switch c.URL.Scheme {
-	case "rtmp":
-	case "rtmps":
-		if c.TLSConfig == nil {
-			c.TLSConfig = &tls.Config{
-				ServerName: c.URL.Hostname(),
-			}
-		}
-
+	case schemeRTMP, schemeRTMPS:
 	default:
 		return fmt.Errorf("unsupported scheme: %s", c.URL.Scheme)
 	}
@@ -216,14 +205,53 @@ func (c *Client) Initialize(ctx context.Context) error {
 }
 
 func (c *Client) initialize2(ctx context.Context) error {
-	var err error
-	c.nconn, err = c.DialContext(ctx, "tcp", c.URL.Host)
+	address := c.URL.Host
+	host, _, err := net.SplitHostPort(address)
 	if err != nil {
-		return err
+		if strings.Contains(err.Error(), "missing port in address") {
+			switch c.URL.Scheme {
+			case schemeRTMP:
+				address = net.JoinHostPort(c.URL.Host, defaultRTMPPort)
+				host = c.URL.Host
+			default: // RTMPS
+				address = net.JoinHostPort(c.URL.Host, defaultRTMPSPort)
+				host = c.URL.Host
+			}
+		} else {
+			return err
+		}
 	}
 
-	if c.URL.Scheme == "rtmps" {
-		c.nconn = tls.Client(c.nconn, c.TLSConfig)
+	if c.DialTLSContext != nil {
+		c.nconn, err = c.DialTLSContext(ctx, "tcp", address)
+		if err != nil {
+			return err
+		}
+	} else {
+		c.nconn, err = c.DialContext(ctx, "tcp", address)
+		if err != nil {
+			return err
+		}
+
+		if c.URL.Scheme == schemeRTMPS {
+			// clone TLS config and fill ServerName if empty.
+			// this is the same behavior of http.Client.
+			// https://cs.opensource.google/go/go/+/master:src/net/http/transport.go;l=1754;drc=a4b534f5e42fe58d58c0ff0562d76680cedb0466
+
+			tlsConfig := c.TLSConfig
+
+			if tlsConfig == nil {
+				tlsConfig = &tls.Config{}
+			} else {
+				tlsConfig = tlsConfig.Clone()
+			}
+
+			if tlsConfig.ServerName == "" {
+				tlsConfig.ServerName = host
+			}
+
+			c.nconn = tls.Client(c.nconn, tlsConfig)
+		}
 	}
 
 	closerDone := make(chan struct{})
@@ -296,8 +324,8 @@ func (c *Client) initialize3() error {
 		Fragment:    c.URL.Fragment,
 		RawFragment: c.URL.RawFragment,
 	}
-	app, streamKey := splitPath(cleanURL)
-	tcURL := getTcURL(cleanURL)
+
+	tcURL, app, streamKey := splitURL(cleanURL)
 
 	switch c.authState {
 	case 1:
@@ -355,6 +383,7 @@ func (c *Client) initialize3() error {
 					fourCCToString(message.FourCCHEVC),
 					fourCCToString(message.FourCCAVC),
 					fourCCToString(message.FourCCOpus),
+					fourCCToString(message.FourCCFLAC),
 					fourCCToString(message.FourCCAC3),
 					fourCCToString(message.FourCCMP4A),
 					fourCCToString(message.FourCCMP3),
@@ -540,7 +569,7 @@ func (c *Client) initialize3() error {
 			Arguments: []any{
 				nil,
 				streamKey,
-				app,
+				"live",
 			},
 		})
 		if err != nil {

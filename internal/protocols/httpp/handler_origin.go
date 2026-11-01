@@ -8,24 +8,14 @@ import (
 	"strings"
 )
 
-func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
+func isOriginAllowed(origin string, allowOrigins []string) bool {
 	if len(allowOrigins) == 0 {
-		return "", false
-	}
-
-	for _, o := range allowOrigins {
-		if o == "*" {
-			return o, true
-		}
-	}
-
-	if origin == "" {
-		return "", false
+		return false
 	}
 
 	originURL, err := url.Parse(origin)
 	if err != nil || originURL.Scheme == "" {
-		return "", false
+		return false
 	}
 
 	if originURL.Port() == "" && originURL.Scheme != "" {
@@ -38,6 +28,10 @@ func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
 	}
 
 	for _, o := range allowOrigins {
+		if o == "*" {
+			return true
+		}
+
 		allowedURL, errAllowed := url.Parse(o)
 		if errAllowed != nil {
 			continue
@@ -53,35 +47,49 @@ func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
 		}
 
 		if allowedURL.Scheme == originURL.Scheme &&
-			allowedURL.Host == originURL.Host &&
-			allowedURL.Port() == originURL.Port() {
-			return origin, true
+			allowedURL.Host == originURL.Host {
+			return true
 		}
 
-		if strings.Contains(allowedURL.Host, "*") {
-			pattern := strings.ReplaceAll(allowedURL.Host, "*.", "(.*\\.)?")
-			pattern = strings.ReplaceAll(pattern, "*", ".*")
+		if allowedURL.Scheme == originURL.Scheme &&
+			strings.Contains(allowedURL.Host, "*") {
+			pattern := regexp.QuoteMeta(allowedURL.Host)
+			pattern = strings.ReplaceAll(pattern, `\*\.`, `(.*\.)?`)
+			pattern = strings.ReplaceAll(pattern, `\*`, `.*`)
 			matched, errMatched := regexp.MatchString("^"+pattern+"$", originURL.Host)
 			if errMatched == nil && matched {
-				return origin, true
+				return true
 			}
 		}
 	}
 
-	return "", false
+	return false
 }
 
-// add Access-Control-Allow-Origin and Access-Control-Allow-Credentials headers.
+// Protect from unauthorized cross-origin requests:
+// - add Access-Control-Allow-Origin header to both preflight requests and actual requests.
+// - in case of browser requests that do not use preflight (like POST from a form), check the Origin.
 type handlerOrigin struct {
 	h            http.Handler
 	allowOrigins []string
 }
 
 func (h *handlerOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	origin, ok := isOriginAllowed(r.Header.Get("Origin"), h.allowOrigins)
-	if ok {
+	origin := r.Header.Get("Origin")
+
+	if origin != "" && isOriginAllowed(origin, h.allowOrigins) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Vary", "Origin")
+	}
+
+	if r.Method == http.MethodPost {
+		secFetchSite := r.Header.Get("Sec-Fetch-Site")
+		if secFetchSite == "same-site" || secFetchSite == "cross-site" {
+			if !isOriginAllowed(origin, h.allowOrigins) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		}
 	}
 
 	h.h.ServeHTTP(w, r)

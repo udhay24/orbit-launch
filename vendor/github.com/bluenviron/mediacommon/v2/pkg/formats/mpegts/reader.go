@@ -1,13 +1,12 @@
 package mpegts
 
 import (
+	"context"
 	"fmt"
 	"io"
 
 	"github.com/asticode/go-astits"
 
-	"github.com/bluenviron/mediacommon/v2/pkg/codecs/ac3"
-	"github.com/bluenviron/mediacommon/v2/pkg/codecs/eac3"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg1audio"
@@ -15,6 +14,13 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/substructs"
 	"github.com/bluenviron/mediacommon/v2/pkg/rewindablereader"
+)
+
+const (
+	// the reader needs to rewind until all track parameters have been found.
+	// Some audio track parameters come from audio packets.
+	// Big video frames might delay audio packets, therefore we need a sufficiently large buffer.
+	maxRewindedBytes = 10 * 1024 * 1024
 )
 
 // ReaderOnDecodeErrorFunc is the prototype of the callback passed to OnDecodeError.
@@ -27,7 +33,15 @@ type ReaderOnDataH264Func func(pts int64, dts int64, au [][]byte) error
 type ReaderOnDataH265Func func(pts int64, dts int64, au [][]byte) error
 
 // ReaderOnDataMPEGxVideoFunc is the prototype of the callback passed to OnDataMPEGxVideo.
+//
+// Deprecated: use ReaderOnDataMPEG4VideoFunc or ReaderOnDataMPEG1VideoFunc instead.
 type ReaderOnDataMPEGxVideoFunc func(pts int64, frame []byte) error
+
+// ReaderOnDataMPEG4VideoFunc is the prototype of the callback passed to OnDataMPEG4Video.
+type ReaderOnDataMPEG4VideoFunc func(pts int64, frame []byte) error
+
+// ReaderOnDataMPEG1VideoFunc is the prototype of the callback passed to OnDataMPEG1Video.
+type ReaderOnDataMPEG1VideoFunc func(pts int64, frame []byte) error
 
 // ReaderOnDataOpusFunc is the prototype of the callback passed to OnDataOpus.
 type ReaderOnDataOpusFunc func(pts int64, packets [][]byte) error
@@ -178,26 +192,21 @@ func writeMetadataAUWrapper(in []byte) ([]byte, error) {
 type Reader struct {
 	R io.Reader
 
-	tracks          []*Track
-	tracksByPID     map[uint16]*Track
-	preDem          *preDemuxer
-	dem             *robustDemuxer
-	onDecodeError   ReaderOnDecodeErrorFunc
-	onData          map[uint16]func(int64, int64, []byte) error
-	lastPTSReceived bool
-	lastPTS         int64
+	tracks        []*Track
+	tracksByPID   map[uint16]*Track
+	preDem        *preDemuxer
+	dem           *robustDemuxer
+	onDecodeError ReaderOnDecodeErrorFunc
+	onData        map[uint16]func(int64, int64, []byte) error
 }
 
 // Initialize initializes a Reader.
 func (r *Reader) Initialize() error {
-	rr := &rewindablereader.Reader{R: r.R}
+	rr := &rewindablereader.Reader{R: r.R, MaxSize: maxRewindedBytes}
 
-	preDem := &preDemuxer{R: rr}
-	preDem.initialize()
-	dem := &robustDemuxer{R: preDem}
-	dem.initialize()
+	r.initializeDemuxer(rr)
 
-	pmt, err := findPMT(dem)
+	pmt, err := findPMT(r.dem)
 	if err != nil {
 		return err
 	}
@@ -206,7 +215,7 @@ func (r *Reader) Initialize() error {
 
 	for i, es := range pmt.ElementaryStreams {
 		var track Track
-		err = track.unmarshal(dem, es)
+		err = track.unmarshal(r.dem, es)
 		if err != nil {
 			return err
 		}
@@ -223,15 +232,30 @@ func (r *Reader) Initialize() error {
 
 	// rewind demuxer
 	rr.Rewind()
-	r.preDem = &preDemuxer{R: rr}
-	r.preDem.initialize()
-	r.dem = &robustDemuxer{R: r.preDem}
-	r.dem.initialize()
+	r.initializeDemuxer(rr)
 
 	r.onDecodeError = func(_ error) {}
 	r.onData = make(map[uint16]func(int64, int64, []byte) error)
 
 	return nil
+}
+
+func (r *Reader) initializeDemuxer(rr io.Reader) {
+	r.preDem = &preDemuxer{R: rr}
+	r.preDem.initialize()
+
+	errorWrapper := &errorWrapper{R: r.preDem}
+
+	ptsInterceptor := &ptsInterceptor{R: errorWrapper}
+
+	astitsDem := astits.NewDemuxer(
+		context.Background(),
+		ptsInterceptor,
+		astits.DemuxerOptPacketSize(packetSize),
+	)
+
+	r.dem = &robustDemuxer{ptsInterceptor: ptsInterceptor, astitsDem: astitsDem}
+	r.dem.initialize()
 }
 
 // NewReader allocates a Reader.
@@ -269,6 +293,11 @@ func (r *Reader) OnDataH265(track *Track, cb ReaderOnDataH265Func) {
 
 		if au[0][0] == byte(h265.NALUType_AUD_NUT<<1) {
 			au = au[1:]
+
+			if len(au) == 0 {
+				r.onDecodeError(fmt.Errorf("empty access unit"))
+				return nil
+			}
 		}
 
 		return cb(pts, dts, au)
@@ -287,6 +316,11 @@ func (r *Reader) OnDataH264(track *Track, cb ReaderOnDataH264Func) {
 
 		if au[0][0] == byte(h264.NALUTypeAccessUnitDelimiter) {
 			au = au[1:]
+
+			if len(au) == 0 {
+				r.onDecodeError(fmt.Errorf("empty access unit"))
+				return nil
+			}
 		}
 
 		return cb(pts, dts, au)
@@ -294,8 +328,39 @@ func (r *Reader) OnDataH264(track *Track, cb ReaderOnDataH264Func) {
 }
 
 // OnDataMPEGxVideo sets a callback that is called when data from an MPEG-1/2/4 Video track is received.
+//
+// Deprecated: use OnDataMPEG4Video or OnDataMPEG1Video instead.
 func (r *Reader) OnDataMPEGxVideo(track *Track, cb ReaderOnDataMPEGxVideoFunc) {
 	r.onData[track.PID] = func(pts int64, _ int64, data []byte) error {
+		if len(data) == 0 {
+			r.onDecodeError(fmt.Errorf("empty frame"))
+			return nil
+		}
+
+		return cb(pts, data)
+	}
+}
+
+// OnDataMPEG4Video sets a callback that is called when data from an MPEG-4 Video track is received.
+func (r *Reader) OnDataMPEG4Video(track *Track, cb ReaderOnDataMPEG4VideoFunc) {
+	r.onData[track.PID] = func(pts int64, _ int64, data []byte) error {
+		if len(data) == 0 {
+			r.onDecodeError(fmt.Errorf("empty frame"))
+			return nil
+		}
+
+		return cb(pts, data)
+	}
+}
+
+// OnDataMPEG1Video sets a callback that is called when data from an MPEG-1/2 Video track is received.
+func (r *Reader) OnDataMPEG1Video(track *Track, cb ReaderOnDataMPEG1VideoFunc) {
+	r.onData[track.PID] = func(pts int64, _ int64, data []byte) error {
+		if len(data) == 0 {
+			r.onDecodeError(fmt.Errorf("empty frame"))
+			return nil
+		}
+
 		return cb(pts, data)
 	}
 }
@@ -384,7 +449,7 @@ func (r *Reader) OnDataMPEG1Audio(track *Track, cb ReaderOnDataMPEG1AudioFunc) {
 
 		var frames [][]byte
 
-		for len(data) > 0 {
+		for {
 			var h mpeg1audio.FrameHeader
 			err := h.Unmarshal(data)
 			if err != nil {
@@ -402,6 +467,10 @@ func (r *Reader) OnDataMPEG1Audio(track *Track, cb ReaderOnDataMPEG1AudioFunc) {
 			frame, data = data[:fl], data[fl:]
 
 			frames = append(frames, frame)
+
+			if len(data) == 0 {
+				break
+			}
 		}
 
 		return cb(pts, frames)
@@ -413,19 +482,6 @@ func (r *Reader) OnDataAC3(track *Track, cb ReaderOnDataAC3Func) {
 	r.onData[track.PID] = func(pts int64, dts int64, data []byte) error {
 		if pts != dts {
 			r.onDecodeError(fmt.Errorf("PTS is not equal to DTS"))
-			return nil
-		}
-
-		var syncInfo ac3.SyncInfo
-		err := syncInfo.Unmarshal(data)
-		if err != nil {
-			r.onDecodeError(err)
-			return nil
-		}
-		size := syncInfo.FrameSize()
-
-		if size != len(data) {
-			r.onDecodeError(fmt.Errorf("unexpected frame size: got %d, expected %d", len(data), size))
 			return nil
 		}
 
@@ -442,20 +498,6 @@ func (r *Reader) OnDataEAC3(track *Track, cb ReaderOnDataEAC3Func) {
 			r.onDecodeError(fmt.Errorf("PTS is not equal to DTS"))
 			return nil
 		}
-
-		// Validate E-AC3 sync header
-		var syncInfo eac3.SyncInfo
-		err := syncInfo.Unmarshal(data)
-		if err != nil {
-			r.onDecodeError(err)
-			return nil
-		}
-
-		// E-AC3 allows multiple substreams concatenated together (independent + dependent).
-		// The frmsiz in the header only covers the first substream.
-		// Rather than parsing all substreams, we just validate the sync header and
-		// pass the full data. The downstream decoder will handle substream parsing.
-		// This matches how other decoders (FFmpeg) handle E-AC3 PES packets.
 
 		return cb(pts, data)
 	}
@@ -477,6 +519,11 @@ func (r *Reader) OnDataKLV(track *Track, cb ReaderOnDataKLVFunc) {
 		}
 	} else {
 		r.onData[track.PID] = func(pts int64, _ int64, data []byte) error {
+			if len(data) == 0 {
+				r.onDecodeError(fmt.Errorf("empty KLV payload"))
+				return nil
+			}
+
 			return cb(pts, data)
 		}
 	}
@@ -485,6 +532,11 @@ func (r *Reader) OnDataKLV(track *Track, cb ReaderOnDataKLVFunc) {
 // OnDataDVBSubtitle sets a callback that is called when data from a DVB subtitle track is received.
 func (r *Reader) OnDataDVBSubtitle(track *Track, cb ReaderOnDataDVBSubtitleFunc) {
 	r.onData[track.PID] = func(pts int64, _ int64, data []byte) error {
+		if len(data) == 0 {
+			r.onDecodeError(fmt.Errorf("empty payload"))
+			return nil
+		}
+
 		return cb(pts, data)
 	}
 }
@@ -510,11 +562,11 @@ func (r *Reader) Read() error {
 	var dts int64
 
 	if klvCodec, ok2 := track.Codec.(*codecs.KLV); ok2 && !klvCodec.Synchronous {
-		if !r.lastPTSReceived {
+		if data.lastPTS == nil {
 			return nil
 		}
 
-		pts = r.lastPTS
+		pts = *data.lastPTS
 	} else {
 		if data.PES.Header.OptionalHeader == nil ||
 			data.PES.Header.OptionalHeader.PTSDTSIndicator == astits.PTSDTSIndicatorNoPTSOrDTS ||
@@ -530,9 +582,6 @@ func (r *Reader) Read() error {
 		} else {
 			dts = pts
 		}
-
-		r.lastPTS = pts
-		r.lastPTSReceived = true
 	}
 
 	onData, ok := r.onData[data.PID]

@@ -87,8 +87,7 @@ func NewCryptoSetupClient(
 		version,
 	)
 
-	tlsConf = tlsConf.Clone()
-	tlsConf.MinVersion = tls.VersionTLS13
+	tlsConf = setupConfigForClient(tlsConf)
 	cs.tlsConf = tlsConf
 	cs.allow0RTT = enable0RTT
 
@@ -127,10 +126,7 @@ func NewCryptoSetupServer(
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
 	cs.tlsConf = tlsConf
-	cs.conn = tls.QUICServer(&tls.QUICConfig{
-		TLSConfig:           tlsConf,
-		EnableSessionEvents: true,
-	})
+	cs.conn = tls.QUICServer(getQUICConfig(tlsConf, localAddr, remoteAddr))
 	return cs
 }
 
@@ -296,6 +292,8 @@ func (h *cryptoSetup) handleEvent(ev tls.QUICEvent) (err error) {
 			ev.SessionState.EarlyData = allowEarlyData
 		}
 		return nil
+	case tls.QUICErrorEvent:
+		return ev.Err
 	default:
 		// Unknown events should be ignored.
 		// crypto/tls will ensure that this is safe to do.
@@ -387,19 +385,29 @@ func (h *cryptoSetup) GetSessionTicket() ([]byte, error) {
 		// We can't check h.tlsConfig here, since the actual config might have been obtained from
 		// the GetConfigForClient callback.
 		// See https://github.com/golang/go/issues/62032.
-		// Once that issue is resolved, this error assertion can be removed.
+		// This error assertion can be removed once we drop support for Go 1.25.
 		if strings.Contains(err.Error(), "session ticket keys unavailable") {
 			return nil, nil
 		}
 		return nil, err
 	}
-	ev := h.conn.NextEvent()
-	if ev.Kind != tls.QUICWriteData || ev.Level != tls.QUICEncryptionLevelApplication {
-		panic("crypto/tls bug: where's my session ticket?")
-	}
-	ticket := ev.Data
-	if ev := h.conn.NextEvent(); ev.Kind != tls.QUICNoEvent {
-		panic("crypto/tls bug: why more than one ticket?")
+	// If session tickets are disabled, NextEvent will immediately return QUICNoEvent,
+	// and we will return a nil ticket.
+	var ticket []byte
+	for {
+		ev := h.conn.NextEvent()
+		if ev.Kind == tls.QUICNoEvent {
+			break
+		}
+		if ev.Kind == tls.QUICWriteData && ev.Level == tls.QUICEncryptionLevelApplication {
+			if ticket != nil {
+				h.logger.Errorf("unexpected multiple session tickets")
+				continue
+			}
+			ticket = ev.Data
+		} else {
+			h.logger.Errorf("unexpected event: %v", ev.Kind)
+		}
 	}
 	return ticket, nil
 }
@@ -443,9 +451,11 @@ func (h *cryptoSetup) rejected0RTT() {
 
 func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, trafficSecret []byte) {
 	suite := getCipherSuite(suiteID)
+	var ev EventKind
 	//nolint:exhaustive // The TLS stack doesn't export Initial keys.
 	switch el {
 	case tls.QUICEncryptionLevelEarly:
+		ev = EventReceived0RTTReadKeys
 		if h.perspective == protocol.PerspectiveClient {
 			panic("Received 0-RTT read key for the client")
 		}
@@ -458,6 +468,7 @@ func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tra
 			h.logger.Debugf("Installed 0-RTT Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
 	case tls.QUICEncryptionLevelHandshake:
+		ev = EventReceivedHandshakeReadKeys
 		h.handshakeOpener = newLongHeaderOpener(
 			createAEAD(suite, trafficSecret, h.version),
 			newHeaderProtector(suite, trafficSecret, true, h.version),
@@ -466,6 +477,7 @@ func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tra
 			h.logger.Debugf("Installed Handshake Read keys (using %s)", tls.CipherSuiteName(suite.ID))
 		}
 	case tls.QUICEncryptionLevelApplication:
+		ev = EventReceived1RTTReadKeys
 		h.aead.SetReadKey(suite, trafficSecret)
 		h.has1RTTOpener = true
 		if h.logger.Debug() {
@@ -474,7 +486,7 @@ func (h *cryptoSetup) setReadKey(el tls.QUICEncryptionLevel, suiteID uint16, tra
 	default:
 		panic("unexpected read encryption level")
 	}
-	h.events = append(h.events, Event{Kind: EventReceivedReadKeys})
+	h.events = append(h.events, Event{Kind: ev})
 	if h.qlogger != nil {
 		h.qlogger.RecordEvent(qlog.KeyUpdated{
 			Trigger: qlog.KeyUpdateTLS,
@@ -674,7 +686,7 @@ func (h *cryptoSetup) ConnectionState() ConnectionState {
 }
 
 func wrapError(err error) error {
-	if alertErr := tls.AlertError(0); errors.As(err, &alertErr) {
+	if alertErr, ok := errors.AsType[tls.AlertError](err); ok {
 		return qerr.NewLocalCryptoError(uint8(alertErr), err)
 	}
 	return &qerr.TransportError{ErrorCode: qerr.InternalError, ErrorMessage: err.Error()}

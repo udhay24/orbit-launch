@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/bluenviron/gohlslib/v2/pkg/playlist"
 )
 
@@ -41,34 +43,39 @@ func cloneURL(ur *url.URL) *url.URL {
 }
 
 func downloadPlaylist(
-	ctx context.Context,
+	errGroupCtx context.Context,
 	httpClient *http.Client,
 	onRequest ClientOnRequestFunc,
 	ur *url.URL,
-) (playlist.Playlist, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ur.String(), nil)
+) (*url.URL, playlist.Playlist, error) {
+	req, err := http.NewRequestWithContext(errGroupCtx, http.MethodGet, ur.String(), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	onRequest(req)
 
 	res, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status code: %d", res.StatusCode)
+		return nil, nil, fmt.Errorf("bad status code: %d", res.StatusCode)
 	}
 
-	byts, err := io.ReadAll(res.Body)
+	byts, err := io.ReadAll(&customLimitReader{res.Body, clientMaxInboundPlaylistSize})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return playlist.Unmarshal(byts)
+	pl, err := playlist.Unmarshal(byts)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return res.Request.URL, pl, nil
 }
 
 func pickLeadingPlaylist(variants []*playlist.MultivariantVariant) *playlist.MultivariantVariant {
@@ -111,9 +118,8 @@ func getRenditionsByGroup(
 
 type clientPrimaryDownloaderClient interface {
 	setTracks([]*Track) (map[*Track]*clientTrack, error)
-	setLeadingTimeConv(ts clientTimeConv)
-	waitLeadingTimeConv(ctx context.Context) bool
-	getLeadingTimeConv() clientTimeConv
+	setTimeConv(ts clientTimeConv)
+	waitTimeConv(errGroupCtx context.Context) (clientTimeConv, bool)
 }
 
 type clientPrimaryDownloader struct {
@@ -121,7 +127,7 @@ type clientPrimaryDownloader struct {
 	startDistance             int
 	maxDistance               int
 	httpClient                *http.Client
-	rp                        *clientRoutinePool
+	errGroup                  *errgroup.Group
 	onRequest                 ClientOnRequestFunc
 	onDownloadPrimaryPlaylist ClientOnDownloadPrimaryPlaylistFunc
 	onDownloadStreamPlaylist  ClientOnDownloadStreamPlaylistFunc
@@ -136,13 +142,15 @@ type clientPrimaryDownloader struct {
 func (d *clientPrimaryDownloader) initialize() {
 }
 
-func (d *clientPrimaryDownloader) run(ctx context.Context) error {
+func (d *clientPrimaryDownloader) run(errGroupCtx context.Context) error {
 	d.onDownloadPrimaryPlaylist(d.primaryPlaylistURL.String())
 
-	pl, err := downloadPlaylist(ctx, d.httpClient, d.onRequest, d.primaryPlaylistURL)
+	finalURL, pl, err := downloadPlaylist(errGroupCtx, d.httpClient, d.onRequest, d.primaryPlaylistURL)
 	if err != nil {
 		return err
 	}
+
+	d.primaryPlaylistURL = finalURL
 
 	var streams []*clientStreamDownloader
 
@@ -158,13 +166,17 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 			onDownloadSegment:        d.onDownloadSegment,
 			onDownloadPart:           d.onDownloadPart,
 			onDecodeError:            d.onDecodeError,
-			playlistURL:              d.primaryPlaylistURL,
+			playlistURL:              finalURL,
 			firstPlaylist:            plt,
-			rp:                       d.rp,
+			errGroup:                 d.errGroup,
 			client:                   d.client,
 		}
 		stream.initialize()
-		d.rp.add(stream)
+
+		d.errGroup.Go(func() error {
+			return stream.run(errGroupCtx)
+		})
+
 		streams = append(streams, stream)
 
 	case *playlist.Multivariant:
@@ -174,7 +186,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 		}
 
 		var u *url.URL
-		u, err = clientAbsoluteURL(d.primaryPlaylistURL, leadingPlaylist.URI)
+		u, err = clientAbsoluteURL(finalURL, leadingPlaylist.URI)
 		if err != nil {
 			return err
 		}
@@ -191,11 +203,15 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 			onDecodeError:            d.onDecodeError,
 			playlistURL:              u,
 			firstPlaylist:            nil,
-			rp:                       d.rp,
+			errGroup:                 d.errGroup,
 			client:                   d.client,
 		}
 		stream.initialize()
-		d.rp.add(stream)
+
+		d.errGroup.Go(func() error {
+			return stream.run(errGroupCtx)
+		})
+
 		streams = append(streams, stream)
 
 		if leadingPlaylist.Audio != "" {
@@ -216,7 +232,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 						return err
 					}
 
-					stream = &clientStreamDownloader{
+					renditionStream := &clientStreamDownloader{
 						isLeading:                false,
 						onRequest:                d.onRequest,
 						startDistance:            d.startDistance,
@@ -228,12 +244,16 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 						onDecodeError:            d.onDecodeError,
 						playlistURL:              u,
 						rendition:                pl,
-						rp:                       d.rp,
+						errGroup:                 d.errGroup,
 						client:                   d.client,
 					}
-					stream.initialize()
-					d.rp.add(stream)
-					streams = append(streams, stream)
+					renditionStream.initialize()
+
+					d.errGroup.Go(func() error {
+						return renditionStream.run(errGroupCtx)
+					})
+
+					streams = append(streams, renditionStream)
 				}
 			}
 		}
@@ -249,7 +269,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 		case streamTracks := <-stream.chTracks:
 			tracks = append(tracks, streamTracks...)
 
-		case <-ctx.Done():
+		case <-errGroupCtx.Done():
 			return fmt.Errorf("terminated")
 		}
 	}
@@ -266,7 +286,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 	for _, stream := range streams {
 		select {
 		case stream.chStartStreaming <- d.clientTracks:
-		case <-ctx.Done():
+		case <-errGroupCtx.Done():
 			return fmt.Errorf("terminated")
 		}
 	}
@@ -274,7 +294,7 @@ func (d *clientPrimaryDownloader) run(ctx context.Context) error {
 	for _, stream := range streams {
 		select {
 		case err = <-stream.chProcessorError:
-		case <-ctx.Done():
+		case <-errGroupCtx.Done():
 			return fmt.Errorf("terminated")
 		}
 	}

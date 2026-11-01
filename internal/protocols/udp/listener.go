@@ -9,6 +9,7 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5/pkg/multicast"
 	"github.com/bluenviron/gortsplib/v5/pkg/readbuffer"
+
 	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
 )
 
@@ -87,23 +88,28 @@ func (l *Listener) Initialize() error {
 	}
 
 	if ip4 := addr.IP.To4(); ip4 != nil && addr.IP.IsMulticast() {
-		var intf *net.Interface
-
-		if l.IntfName != "" {
-			intf, err = net.InterfaceByName(l.IntfName)
+		if l.IntfName == "all" {
+			l.pc, err = multicast.NewMultiConn(addr.String(), true, l.ListenPacket)
 			if err != nil {
 				return err
 			}
 		} else {
-			intf, err = defaultInterfaceForMulticast(addr)
+			var intf *net.Interface
+			if l.IntfName != "" {
+				intf, err = net.InterfaceByName(l.IntfName)
+				if err != nil {
+					return err
+				}
+			} else {
+				intf, err = defaultInterfaceForMulticast(addr)
+				if err != nil {
+					return err
+				}
+			}
+			l.pc, err = multicast.NewSingleConn(intf, addr.String(), l.ListenPacket)
 			if err != nil {
 				return err
 			}
-		}
-
-		l.pc, err = multicast.NewSingleConn(intf, addr.String(), l.ListenPacket)
-		if err != nil {
-			return err
 		}
 	} else {
 		var tmp net.PacketConn
@@ -136,6 +142,10 @@ func (l *Listener) Read(p []byte) (int, error) {
 		n, addr, err := l.pc.ReadFrom(p)
 
 		if l.sourceIP != nil && addr != nil && !addr.(*net.UDPAddr).IP.Equal(l.sourceIP) {
+			continue
+		}
+
+		if n == 0 && err == nil {
 			continue
 		}
 

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package webrtc
 
@@ -15,7 +14,7 @@ import (
 
 	"github.com/pion/ice/v4"
 	"github.com/pion/logging"
-	"github.com/pion/stun/v3"
+	"github.com/pion/stun/v4"
 )
 
 // ICEGatherer gathers local host, server reflexive and relay
@@ -36,7 +35,7 @@ type ICEGatherer struct {
 	onStateChangeHandler    atomic.Value // func(state ICEGathererState)
 
 	// Used for GatheringCompletePromise
-	onGatheringCompleteHandler atomic.Value // func()
+	onGatheringCompleteHandler atomic.Pointer[func()]
 
 	api *API
 
@@ -73,6 +72,8 @@ type ICEAddressRewriteRule struct {
 	AsCandidateType ICECandidateType
 	Mode            ICEAddressRewriteMode
 	Networks        []NetworkType
+	OriginalPort    int
+	NewPort         int
 }
 
 func (r ICEAddressRewriteRule) toICE() ice.AddressRewriteRule {
@@ -88,6 +89,8 @@ func (r ICEAddressRewriteRule) toICE() ice.AddressRewriteRule {
 		AsCandidateType: candidateType,
 		Mode:            mode,
 		Networks:        networks,
+		OriginalPort:    r.OriginalPort,
+		NewPort:         r.NewPort,
 	}
 
 	return rule
@@ -252,6 +255,7 @@ func (g *ICEGatherer) baseAgentOptions(mDNSMode ice.MulticastDNSMode) []ice.Agen
 		ice.WithLoggerFactory(g.api.settingEngine.LoggerFactory),
 		ice.WithInterfaceFilter(g.api.settingEngine.candidates.InterfaceFilter),
 		ice.WithIPFilter(g.api.settingEngine.candidates.IPFilter),
+		ice.WithRemoteIPFilter(g.api.settingEngine.candidates.RemoteIPFilter),
 		ice.WithNet(g.api.settingEngine.net),
 		ice.WithMulticastDNSMode(mDNSMode),
 		ice.WithTCPMux(g.api.settingEngine.iceTCPMux),
@@ -330,7 +334,7 @@ func (g *ICEGatherer) timeoutOptions() []ice.AgentOption {
 }
 
 func (g *ICEGatherer) miscOptions() []ice.AgentOption {
-	opts := make([]ice.AgentOption, 0, 4)
+	opts := make([]ice.AgentOption, 0, 5)
 
 	if g.api.settingEngine.candidates.MulticastDNSHostName != "" {
 		opts = append(opts, ice.WithMulticastDNSHostName(g.api.settingEngine.candidates.MulticastDNSHostName))
@@ -348,6 +352,10 @@ func (g *ICEGatherer) miscOptions() []ice.AgentOption {
 		opts = append(opts, ice.WithMaxBindingRequests(*g.api.settingEngine.iceMaxBindingRequests))
 	}
 
+	if g.api.settingEngine.iceUseCandidateCheckPriority {
+		opts = append(opts, ice.WithEnableUseCandidateCheckPriority())
+	}
+
 	return opts
 }
 
@@ -362,6 +370,9 @@ func (g *ICEGatherer) renominationOptions() []ice.AgentOption {
 		ice.WithRenomination(func() uint32 {
 			return generator()
 		}),
+	}
+	if renom.attributeType != nil {
+		opts = append(opts, ice.WithNominationAttribute(*renom.attributeType))
 	}
 
 	if renom.automatic {
@@ -424,11 +435,6 @@ func (g *ICEGatherer) Gather() error { //nolint:cyclop
 			onLocalCandidateHandler = handler
 		}
 
-		onGatheringCompleteHandler := func() {}
-		if handler, ok := g.onGatheringCompleteHandler.Load().(func()); ok && handler != nil {
-			onGatheringCompleteHandler = handler
-		}
-
 		sdpMid := ""
 
 		if mid, ok := g.sdpMid.Load().(string); ok {
@@ -456,7 +462,9 @@ func (g *ICEGatherer) Gather() error { //nolint:cyclop
 			onLocalCandidateHandler(&c)
 		} else {
 			g.setState(ICEGathererStateComplete)
-			onGatheringCompleteHandler()
+			if handler := g.onGatheringCompleteHandler.Load(); handler != nil && *handler != nil {
+				(*handler)()
+			}
 
 			// If gathering completes before flushing (i.e., before SetLocalDescription), avoid triggering nil.
 			// Users expect valid candidates to be emitted before the nil completion signal.
@@ -555,8 +563,8 @@ func (g *ICEGatherer) close(shouldGracefullyClose bool) error {
 	// onGatheringCompleteHandler is used solely by the GatheringCompletePromise helper and the common usage
 	// for that helper is aided by ensuring that this completion is fired in case the PC/ICEGatherer are closed
 	// before gathering actually completes. If things have already completed then this should be a no-op
-	if handler, ok := g.onGatheringCompleteHandler.Load().(func()); ok && handler != nil {
-		handler()
+	if handler := g.onGatheringCompleteHandler.Load(); handler != nil && *handler != nil {
+		(*handler)()
 	}
 
 	g.agent = nil

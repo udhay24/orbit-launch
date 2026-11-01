@@ -50,12 +50,6 @@ func (f *H265) unmarshal(ctx *unmarshalContext) error {
 			// some cameras ship parameters with Annex-B prefix
 			f.SPS = bytes.TrimPrefix(f.SPS, []byte{0, 0, 0, 1})
 
-			var spsp h265.SPS
-			err = spsp.Unmarshal(f.SPS)
-			if err != nil {
-				return fmt.Errorf("invalid SPS: %w", err)
-			}
-
 		case "sprop-pps":
 			var err error
 			f.PPS, err = base64.StdEncoding.DecodeString(val)
@@ -85,6 +79,8 @@ func (f *H265) unmarshal(ctx *unmarshalContext) error {
 }
 
 // Codec implements Format.
+//
+// Deprecated: will be removed in the next version.
 func (f *H265) Codec() string {
 	return "H265"
 }
@@ -224,6 +220,8 @@ func (f *H265) CreateEncoder() (*rtph265.Encoder, error) {
 }
 
 // SafeSetParams sets the codec parameters.
+//
+// Deprecated: set parameters directly then use ServerStream.ReloadDesc() to reload them.
 func (f *H265) SafeSetParams(vps []byte, sps []byte, pps []byte) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
@@ -233,6 +231,8 @@ func (f *H265) SafeSetParams(vps []byte, sps []byte, pps []byte) {
 }
 
 // SafeParams returns the codec parameters.
+//
+// Deprecated: set parameters directly then use ServerStream.ReloadDesc() to reload them.
 func (f *H265) SafeParams() ([]byte, []byte, []byte) {
 	f.mutex.RLock()
 	defer f.mutex.RUnlock()

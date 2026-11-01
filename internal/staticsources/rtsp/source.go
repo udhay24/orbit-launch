@@ -2,10 +2,12 @@
 package rtsp
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/url"
-	"regexp"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5"
@@ -20,7 +22,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtsp"
-	"github.com/bluenviron/mediamtx/internal/protocols/tls"
+	ptls "github.com/bluenviron/mediamtx/internal/protocols/tls"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
@@ -83,11 +85,53 @@ type Source struct {
 	WriteQueueSize    int
 	UDPReadBufferSize uint
 	Parent            parent
+
+	mutex  sync.RWMutex
+	client *gortsplib.Client
 }
 
 // Log implements logger.Writer.
 func (s *Source) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[RTSP source] "+format, args...)
+}
+
+// Info returns runtime information.
+func (s *Source) Info() defs.StaticSourceInfo {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if s.client == nil {
+		return defs.StaticSourceInfo{}
+	}
+
+	stats := s.client.Stats().Session
+
+	transport := ""
+	if tr := s.client.Transport(); tr.Session != nil {
+		transport = tr.Session.Protocol.String()
+	}
+
+	remoteAddr := ""
+	if netConn := s.client.NetConn(); netConn != nil {
+		remoteAddr = netConn.RemoteAddr().String()
+	}
+
+	return defs.StaticSourceInfo{
+		TypeSpecific: &defs.APIStaticSourceTypeSpecificRTSP{
+			RemoteAddr:                remoteAddr,
+			Transport:                 transport,
+			InboundBytes:              stats.InboundBytes,
+			InboundRTPPackets:         stats.InboundRTPPackets,
+			InboundRTPPacketsLost:     stats.InboundRTPPacketsLost,
+			InboundRTPPacketsInError:  stats.InboundRTPPacketsInError,
+			InboundRTPPacketsJitter:   stats.InboundRTPPacketsJitter,
+			InboundRTCPPackets:        stats.InboundRTCPPackets,
+			InboundRTCPPacketsInError: stats.InboundRTCPPacketsInError,
+			OutboundBytes:             stats.OutboundBytes,
+			OutboundRTPPackets:        stats.OutboundRTPPackets,
+			OutboundRTCPPackets:       stats.OutboundRTCPPackets,
+		},
+	}
 }
 
 // Run implements StaticSource.
@@ -128,26 +172,16 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		return err
 	}
 
-	var scheme string
-	if u0.Scheme == "rtsp" || u0.Scheme == "rtsp+http" || u0.Scheme == "rtsp+ws" {
-		scheme = "rtsp"
-	} else {
-		scheme = "rtsps"
-	}
-
-	u, err := base.ParseURL(regexp.MustCompile("^.*?://").ReplaceAllString(params.ResolvedSource, "rtsp://"))
-	if err != nil {
-		return err
+	udpReadBufferSize := s.UDPReadBufferSize
+	if params.Conf.RTSPUDPReadBufferSize != nil {
+		udpReadBufferSize = *params.Conf.RTSPUDPReadBufferSize
 	}
 
 	c := &gortsplib.Client{
-		Scheme:            scheme,
-		Host:              u.Host,
 		Protocol:          params.Conf.RTSPTransport.Protocol,
-		TLSConfig:         tls.MakeConfig(u.Hostname(), params.Conf.SourceFingerprint),
 		ReadTimeout:       time.Duration(s.ReadTimeout),
 		WriteTimeout:      time.Duration(s.WriteTimeout),
-		UDPReadBufferSize: int(s.UDPReadBufferSize),
+		UDPReadBufferSize: int(udpReadBufferSize),
 		WriteQueueSize:    s.WriteQueueSize,
 		AnyPortEnable:     params.Conf.RTSPAnyPort,
 		UDPSourcePortRange: [2]uint16{
@@ -155,7 +189,14 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 			uint16(params.Conf.RTSPUDPSourcePortRange[1]),
 		},
 		OnRequest: func(req *base.Request) {
-			s.Log(logger.Debug, "[c->s] %v", req)
+			if params.Conf.RTSPScale != "" && req.Method == base.Play {
+				if req.Header == nil {
+					req.Header = base.Header{}
+				}
+				req.Header["Scale"] = base.HeaderValue{params.Conf.RTSPScale}
+			}
+
+			s.Log(logger.Debug, "[c->s] %s", rtsp.RequestForLog(req))
 		},
 		OnResponse: func(res *base.Response) {
 			s.Log(logger.Debug, "[s->c] %v", res)
@@ -178,20 +219,57 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		c.Tunnel = gortsplib.TunnelWebSocket
 	}
 
-	if params.Conf.RTSPUDPReadBufferSize != nil {
-		s.UDPReadBufferSize = *params.Conf.RTSPUDPReadBufferSize
+	switch u0.Scheme {
+	case "rtsp", "rtsp+http", "rtsp+ws":
+		u0.Scheme = "rtsp"
+	default:
+		u0.Scheme = "rtsps"
 	}
+
+	u, err := base.ParseURL(u0.String())
+	if err != nil {
+		return err
+	}
+
+	c.Scheme = u.Scheme
+	c.Host = u.Host
+
+	tlsConfig := ptls.MakeConfig(params.Conf.SourceFingerprint)
 
 	if s.DumpPackets {
 		c.DialContext = (&packetdumper.DialContext{
-			Prefix:      "rtsp_source_conn",
-			DialContext: (&net.Dialer{}).DialContext,
+			Prefix: u.Scheme + "_source_conn",
 		}).Do
 
-		c.ListenPacket = (&packetdumper.ListenPacket{
-			Prefix:       "rtsp_source_packetconn",
-			ListenPacket: net.ListenPacket,
+		c.DialTLSContext = (&packetdumper.DialTLSContext{
+			DialContext: c.DialContext,
+			TLSConfig:   tlsConfig,
 		}).Do
+	} else {
+		c.TLSConfig = tlsConfig
+	}
+
+	c.ListenPacket = func(network, address string) (net.PacketConn, error) {
+		pc, err2 := net.ListenPacket(network, address)
+		if err2 != nil {
+			return nil, err2
+		}
+
+		if s.DumpPackets {
+			pc2 := &packetdumper.PacketConn{
+				Wrapped: pc,
+				Prefix:  u.Scheme + "_source_packet_conn",
+			}
+			err2 = pc2.Initialize()
+			if err2 != nil {
+				pc.Close() //nolint:errcheck
+				return nil, err2
+			}
+
+			pc = pc2
+		}
+
+		return pc, nil
 	}
 
 	err = c.Start()
@@ -200,9 +278,19 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 	}
 	defer c.Close()
 
+	s.mutex.Lock()
+	s.client = c
+	s.mutex.Unlock()
+
+	defer func() {
+		s.mutex.Lock()
+		s.client = nil
+		s.mutex.Unlock()
+	}()
+
 	readErr := make(chan error)
 	go func() {
-		readErr <- s.runInner(c, u, params.Conf)
+		readErr <- s.runInner(params.Context, c, u, params.Conf, decodeErrors)
 	}()
 
 	for {
@@ -214,13 +302,19 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 		case <-params.Context.Done():
 			c.Close()
-			<-readErr
+			<-readErr //nolint:errcheck
 			return nil
 		}
 	}
 }
 
-func (s *Source) runInner(c *gortsplib.Client, u *base.URL, pathConf *conf.Path) error {
+func (s *Source) runInner(
+	ctx context.Context,
+	c *gortsplib.Client,
+	u *base.URL,
+	pathConf *conf.Path,
+	decodeErrors *errordumper.Dumper,
+) error {
 	desc, _, err := c.Describe(u)
 	if err != nil {
 		return err
@@ -248,27 +342,75 @@ func (s *Source) runInner(c *gortsplib.Client, u *base.URL, pathConf *conf.Path)
 		Medias: medias,
 	}
 
-	var subStream *stream.SubStream
+	var demuxer *rtsp.MPEGTSDemuxer
 
-	rtsp.ToStream(
-		c,
-		desc2.Medias,
-		pathConf,
-		&subStream,
-		s)
+	if pathConf.RTSPDemuxMpegts {
+		mpegtsMedia, mpegtsFormat := rtsp.FindSingleMPEGTSFormat(desc2)
+		if mpegtsFormat != nil {
+			s.Log(logger.Info, "MPEG-TS demux mode enabled")
 
-	res := s.Parent.SetReady(defs.PathSourceStaticSetReadyReq{
-		Desc:          desc2,
-		UseRTPPackets: true,
-		ReplaceNTP:    !pathConf.UseAbsoluteTimestamp,
-	})
-	if res.Err != nil {
-		return res.Err
+			var streamReady atomic.Bool
+
+			defer func() {
+				if streamReady.Load() {
+					s.Parent.SetNotReady(defs.PathSourceStaticSetNotReadyReq{})
+				}
+			}()
+
+			onTracks := func(desc *description.Session) (*stream.SubStream, error) {
+				res := s.Parent.SetReady(defs.PathSourceStaticSetReadyReq{
+					Desc:          desc,
+					UseRTPPackets: false,
+					ReplaceNTP:    true,
+				})
+				if res.Err != nil {
+					return nil, res.Err
+				}
+
+				streamReady.Store(true)
+
+				return res.SubStream, nil
+			}
+
+			demuxer = &rtsp.MPEGTSDemuxer{
+				Source:       c,
+				Log:          s,
+				Media:        mpegtsMedia,
+				Format:       mpegtsFormat,
+				DecodeErrors: decodeErrors,
+				OnTracks:     onTracks,
+			}
+			err = demuxer.Initialize()
+			if err != nil {
+				return err
+			}
+			defer demuxer.Close()
+		}
 	}
 
-	defer s.Parent.SetNotReady(defs.PathSourceStaticSetNotReadyReq{})
+	if demuxer == nil {
+		var subStream *stream.SubStream
 
-	subStream = res.SubStream
+		rtsp.ToStream(
+			c,
+			desc2.Medias,
+			pathConf,
+			&subStream,
+			s)
+
+		res := s.Parent.SetReady(defs.PathSourceStaticSetReadyReq{
+			Desc:          desc2,
+			UseRTPPackets: true,
+			ReplaceNTP:    !pathConf.UseAbsoluteTimestamp,
+		})
+		if res.Err != nil {
+			return res.Err
+		}
+
+		defer s.Parent.SetNotReady(defs.PathSourceStaticSetNotReadyReq{})
+
+		subStream = res.SubStream
+	}
 
 	rangeHeader, err := createRangeHeader(pathConf)
 	if err != nil {
@@ -280,13 +422,19 @@ func (s *Source) runInner(c *gortsplib.Client, u *base.URL, pathConf *conf.Path)
 		return err
 	}
 
+	if demuxer != nil {
+		demuxerErr := demuxer.Wait(ctx)
+		c.Close()
+		return demuxerErr
+	}
+
 	return c.Wait()
 }
 
 // APISourceDescribe implements StaticSource.
 func (*Source) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: "rtspSource",
+		Type: defs.APIPathSourceTypeRTSPSource,
 		ID:   "",
 	}
 }

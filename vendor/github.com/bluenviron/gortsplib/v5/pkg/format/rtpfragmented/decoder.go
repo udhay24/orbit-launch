@@ -4,9 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/pion/rtp"
-
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4video"
+	"github.com/pion/rtp"
 )
 
 // ErrMorePacketsNeeded is returned when more packets are needed.
@@ -39,6 +38,7 @@ func (d *Decoder) resetFragments() {
 }
 
 // Decode decodes a frame from a RTP packet.
+// On success, the frame contains at least one byte.
 func (d *Decoder) Decode(pkt *rtp.Packet) ([]byte, error) {
 	if len(pkt.Payload) == 0 {
 		return nil, fmt.Errorf("payload is too short")

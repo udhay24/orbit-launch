@@ -1,4 +1,4 @@
-package rtp
+package rtp_test
 
 import (
 	"context"
@@ -13,10 +13,13 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/staticsources/rtp"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func multicastCapableInterface(t *testing.T) string {
+	t.Helper()
+
 	intfs, err := net.Interfaces()
 	require.NoError(t, err)
 
@@ -35,6 +38,7 @@ func TestSourceUDP(t *testing.T) {
 		"unicast",
 		"multicast",
 		"multicast with interface",
+		"multicast with all interfaces",
 		"unicast with source",
 	} {
 		t.Run(ca, func(t *testing.T) {
@@ -50,6 +54,9 @@ func TestSourceUDP(t *testing.T) {
 			case "multicast with interface":
 				src = "udp+rtp://238.0.0.1:9004?interface=" + multicastCapableInterface(t)
 
+			case "multicast with all interfaces":
+				src = "udp+rtp://238.0.0.1:9004?interface=all"
+
 			case "unicast with source":
 				src = "udp+rtp://127.0.0.1:9004?source=127.0.1.1"
 			}
@@ -58,7 +65,7 @@ func TestSourceUDP(t *testing.T) {
 			p.Initialize()
 			defer p.Close()
 
-			so := &Source{
+			so := &rtp.Source{
 				ReadTimeout: conf.Duration(10 * time.Second),
 				Parent:      p,
 			}
@@ -104,6 +111,9 @@ func TestSourceUDP(t *testing.T) {
 			case "multicast with interface":
 				dest = "238.0.0.1:9004"
 
+			case "multicast with all interfaces":
+				dest = "238.0.0.1:9004"
+
 			case "unicast with source":
 				dest = "127.0.0.1:9004"
 			}
@@ -122,7 +132,8 @@ func TestSourceUDP(t *testing.T) {
 			defer conn.Close() //nolint:errcheck
 
 			enc := &rtph264.Encoder{
-				PayloadType: 96,
+				PayloadType:       96,
+				PacketizationMode: 1,
 			}
 			err = enc.Init()
 			require.NoError(t, err)
@@ -143,6 +154,8 @@ func TestSourceUDP(t *testing.T) {
 
 			<-p.Unit
 
+			require.Equal(t, defs.StaticSourceInfo{}, so.Info())
+
 			// the source must be listening on ReloadConf
 			reloadConf <- nil
 		})
@@ -159,7 +172,7 @@ func TestSourceUnixSocket(t *testing.T) {
 			if ca == "relative" {
 				pa = "test_rtp.sock"
 			} else {
-				pa = filepath.Join(os.TempDir(), "test_rtp.sock")
+				pa = filepath.Join(t.TempDir(), "test_rtp.sock")
 			}
 
 			func() {
@@ -167,7 +180,7 @@ func TestSourceUnixSocket(t *testing.T) {
 				p.Initialize()
 				defer p.Close()
 
-				so := &Source{
+				so := &rtp.Source{
 					ReadTimeout: conf.Duration(10 * time.Second),
 					Parent:      p,
 				}
@@ -206,7 +219,8 @@ func TestSourceUnixSocket(t *testing.T) {
 				defer conn.Close()
 
 				enc := &rtph264.Encoder{
-					PayloadType: 96,
+					PayloadType:       96,
+					PacketizationMode: 1,
 				}
 				err = enc.Init()
 				require.NoError(t, err)

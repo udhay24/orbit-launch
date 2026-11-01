@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package srtp
@@ -7,7 +7,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/pion/transport/v4/replaydetector"
+	"github.com/pion/transport/v5/replaydetector"
 )
 
 const (
@@ -32,6 +32,10 @@ type srtpSSRCState struct {
 	rolloverHasProcessed bool
 	index                uint64
 	replayDetector       replaydetector.ReplayDetector
+	// checkAccepter is non-nil when replayDetector also implements the
+	// allocation-free replaydetector.CheckAccepter API, which is then used
+	// instead of Check.
+	checkAccepter replaydetector.CheckAccepter
 }
 
 // Encrypt/Decrypt state for a single SRTCP SSRC.
@@ -39,6 +43,10 @@ type srtcpSSRCState struct {
 	srtcpIndex     uint32
 	ssrc           uint32
 	replayDetector replaydetector.ReplayDetector
+	// checkAccepter is non-nil when replayDetector also implements the
+	// allocation-free replaydetector.CheckAccepter API, which is then used
+	// instead of Check.
+	checkAccepter replaydetector.CheckAccepter
 }
 
 // RCCMode is the mode of Roll-over Counter Carrying Transform from RFC 4771.
@@ -80,6 +88,10 @@ const (
 // access to a Context from multiple goroutines requires external
 // synchronization.
 type Context struct {
+	// constructed is set to true after the Context is fully initialized.
+	// Options can check this flag to reject updates that are only valid during construction.
+	constructed bool
+
 	cipher srtpCipher
 
 	srtpSSRCStates  map[uint32]*srtpSSRCState
@@ -162,7 +174,26 @@ func CreateContext(
 		c.mkis[string(c.sendMKI)] = c.cipher
 	}
 
+	c.constructed = true
+
 	return c, nil
+}
+
+// contextWithKey creates a fresh context with the current settings.
+func (c *Context) contextWithKey(masterKey, masterSalt []byte, profile ProtectionProfile) (*Context, error) {
+	return CreateContext(masterKey, masterSalt, profile, func(next *Context) error {
+		next.newSRTPReplayDetector = c.newSRTPReplayDetector
+		next.newSRTCPReplayDetector = c.newSRTCPReplayDetector
+		next.sendMKI = bytes.Clone(c.sendMKI)
+		next.encryptSRTP = c.encryptSRTP
+		next.encryptSRTCP = c.encryptSRTCP
+		next.rccMode = c.rccMode
+		next.rocTransmitRate = c.rocTransmitRate
+		next.authTagRTPLen = c.authTagRTPLen
+		next.cryptexMode = c.cryptexMode
+
+		return nil
+	})
 }
 
 // AddCipherForMKI adds new MKI with associated masker key and salt.
@@ -201,7 +232,7 @@ func (c *Context) createCipher(mki, masterKey, masterSalt []byte, encryptSRTP, e
 	}
 
 	if masterKeyLen := len(masterKey); masterKeyLen != keyLen {
-		return nil, fmt.Errorf("%w expected(%d) actual(%d)", errShortSrtpMasterKey, keyLen, masterKey)
+		return nil, fmt.Errorf("%w expected(%d) actual(%d)", errShortSrtpMasterKey, keyLen, masterKeyLen)
 	} else if masterSaltLen := len(masterSalt); masterSaltLen != saltLen {
 		return nil, fmt.Errorf("%w expected(%d) actual(%d)", errShortSrtpMasterSalt, saltLen, masterSaltLen)
 	}
@@ -308,67 +339,81 @@ func (s *srtpSSRCState) updateRolloverCount(sequenceNumber uint16, difference in
 	}
 }
 
-func (c *Context) getSRTPSSRCState(ssrc uint32) *srtpSSRCState {
-	s, ok := c.srtpSSRCStates[ssrc]
+func (c *Context) getSRTPSSRCState(ssrc uint32, keepNew bool) (*srtpSSRCState, bool) {
+	state, ok := c.srtpSSRCStates[ssrc]
 	if ok {
-		return s
+		return state, true
 	}
 
-	s = &srtpSSRCState{
+	state = &srtpSSRCState{
 		ssrc:           ssrc,
 		replayDetector: c.newSRTPReplayDetector(),
 	}
-	c.srtpSSRCStates[ssrc] = s
-
-	return s
-}
-
-func (c *Context) getSRTCPSSRCState(ssrc uint32) *srtcpSSRCState {
-	s, ok := c.srtcpSSRCStates[ssrc]
-	if ok {
-		return s
+	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
+	if keepNew {
+		c.srtpSSRCStates[ssrc] = state
 	}
 
-	s = &srtcpSSRCState{
+	return state, false
+}
+
+func (c *Context) getSRTCPSSRCState(ssrc uint32, keepNew bool) (*srtcpSSRCState, bool) {
+	state, ok := c.srtcpSSRCStates[ssrc]
+	if ok {
+		return state, true
+	}
+
+	state = &srtcpSSRCState{
 		ssrc:           ssrc,
 		replayDetector: c.newSRTCPReplayDetector(),
 	}
-	c.srtcpSSRCStates[ssrc] = s
+	state.checkAccepter, _ = state.replayDetector.(replaydetector.CheckAccepter)
+	if keepNew {
+		c.srtcpSSRCStates[ssrc] = state
+	}
 
-	return s
+	return state, false
+}
+
+func (c *Context) setSRTPSSRCState(state *srtpSSRCState) {
+	c.srtpSSRCStates[state.ssrc] = state
+}
+
+func (c *Context) setSRTCPSSRCState(state *srtcpSSRCState) {
+	c.srtcpSSRCStates[state.ssrc] = state
 }
 
 // ROC returns SRTP rollover counter value of specified SSRC.
 func (c *Context) ROC(ssrc uint32) (uint32, bool) {
-	s, ok := c.srtpSSRCStates[ssrc]
+	state, ok := c.srtpSSRCStates[ssrc]
 	if !ok {
 		return 0, false
 	}
 
-	return uint32(s.index >> 16), true //nolint:gosec // G115
+	return uint32(state.index >> 16), true //nolint:gosec // G115
 }
 
 // SetROC sets SRTP rollover counter value of specified SSRC.
 func (c *Context) SetROC(ssrc uint32, roc uint32) {
-	s := c.getSRTPSSRCState(ssrc)
-	s.index = uint64(roc) << 16
-	s.rolloverHasProcessed = false
+	state, _ := c.getSRTPSSRCState(ssrc, true)
+	state.index = uint64(roc) << 16
+	state.rolloverHasProcessed = false
 }
 
 // Index returns SRTCP index value of specified SSRC.
 func (c *Context) Index(ssrc uint32) (uint32, bool) {
-	s, ok := c.srtcpSSRCStates[ssrc]
+	state, ok := c.srtcpSSRCStates[ssrc]
 	if !ok {
 		return 0, false
 	}
 
-	return s.srtcpIndex, true
+	return state.srtcpIndex, true
 }
 
 // SetIndex sets SRTCP index value of specified SSRC.
 func (c *Context) SetIndex(ssrc uint32, index uint32) {
-	s := c.getSRTCPSSRCState(ssrc)
-	s.srtcpIndex = index % (maxSRTCPIndex + 1)
+	state, _ := c.getSRTCPSSRCState(ssrc, true)
+	state.srtcpIndex = index % (maxSRTCPIndex + 1)
 }
 
 //nolint:cyclop
@@ -415,4 +460,30 @@ func (c *Context) checkRCCMode() error {
 	}
 
 	return nil
+}
+
+// UpdateOptions updates Context options after it has been created.
+// This function is not thread-safe, you need to provide synchronization with encrypting/decrypting packets.
+func (c *Context) UpdateOptions(opts ...ContextOption) error {
+	for _, opt := range opts {
+		if err := opt(c); err != nil {
+			return err
+		}
+	}
+
+	c.updateCryptexForCiphers()
+
+	return nil
+}
+
+func (c *Context) updateCryptexForCiphers() {
+	useCryptex := c.cryptexMode != CryptexModeDisabled && c.encryptSRTP
+
+	if c.cipher != nil {
+		c.cipher.setCryptex(useCryptex)
+	}
+
+	for _, cipher := range c.mkis {
+		cipher.setCryptex(useCryptex)
+	}
 }

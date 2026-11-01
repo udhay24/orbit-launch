@@ -23,6 +23,12 @@ func allLayersHaveSameTypeRateChannelsExtType(c *mpeg4audio.StreamMuxConfig) boo
 				continue
 			}
 
+			// A layer with no AudioSpecificConfig reuses the config of a
+			// previous layer (useSameConfig), so it matches by definition.
+			if l.AudioSpecificConfig == nil {
+				continue
+			}
+
 			if l.AudioSpecificConfig.Type != typ ||
 				l.AudioSpecificConfig.SampleRate != rate ||
 				l.AudioSpecificConfig.ChannelConfig != channelConfig ||
@@ -71,7 +77,7 @@ func (f *MPEG4AudioLATM) unmarshal(ctx *unmarshalContext) error {
 				return fmt.Errorf("invalid bitrate: %v", val)
 			}
 
-			f.Bitrate = ptrOf(int(tmp))
+			f.Bitrate = new(int(tmp))
 
 		case "cpresent":
 			f.CPresent = (val == "1")
@@ -89,7 +95,7 @@ func (f *MPEG4AudioLATM) unmarshal(ctx *unmarshalContext) error {
 			}
 
 		case "sbr-enabled":
-			f.SBREnabled = ptrOf((val == "1"))
+			f.SBREnabled = new((val == "1"))
 		}
 	}
 
@@ -114,6 +120,8 @@ func (f *MPEG4AudioLATM) unmarshal(ctx *unmarshalContext) error {
 }
 
 // Codec implements Format.
+//
+// Deprecated: will be removed in the next version.
 func (f *MPEG4AudioLATM) Codec() string {
 	return "MPEG-4 Audio LATM"
 }

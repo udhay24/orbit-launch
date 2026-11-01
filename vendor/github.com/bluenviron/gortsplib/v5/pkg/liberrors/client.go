@@ -279,20 +279,46 @@ func (e ErrClientRTCPPacketTooBigUDP) Error() string {
 	return "RTCP packet is too big to be read with UDP"
 }
 
-// ErrClientSwitchToTCP is an error that can be returned by a client.
-type ErrClientSwitchToTCP struct{}
+// ErrClientSwitchToTCPDueToNoUDP is an error that can be returned by a client.
+type ErrClientSwitchToTCPDueToNoUDP struct{}
 
 // Error implements the error interface.
-func (e ErrClientSwitchToTCP) Error() string {
+func (e ErrClientSwitchToTCPDueToNoUDP) Error() string {
 	return "no UDP packets received, switching to TCP"
 }
 
-// ErrClientSwitchToTCP2 is an error that can be returned by a client.
-type ErrClientSwitchToTCP2 struct{}
+// ErrClientSwitchToTCP is an error that can be returned by a client.
+//
+// Deprecated: replaced by ErrClientSwitchToTCPDueToNoUDP.
+type ErrClientSwitchToTCP = ErrClientSwitchToTCPDueToNoUDP
+
+// ErrClientSwitchToTCPDueToServer is an error that can be returned by a client.
+type ErrClientSwitchToTCPDueToServer struct{}
 
 // Error implements the error interface.
-func (e ErrClientSwitchToTCP2) Error() string {
+func (e ErrClientSwitchToTCPDueToServer) Error() string {
 	return "switching to TCP because server requested it"
+}
+
+// ErrClientSwitchToTCP2 is an error that can be returned by a client.
+//
+// Deprecated: replaced by ErrClientSwitchToTCPDueToServer.
+type ErrClientSwitchToTCP2 = ErrClientSwitchToTCPDueToServer
+
+// ErrClientSwitchToTCPDueToH2640 is an error that can be returned by a client.
+type ErrClientSwitchToTCPDueToH2640 struct{}
+
+// Error implements the error interface.
+func (e ErrClientSwitchToTCPDueToH2640) Error() string {
+	return "switching to TCP to support H264 packetization-mode=0"
+}
+
+// ErrClientSwitchToTCPToEncryptStream is an error that can be returned by a client.
+type ErrClientSwitchToTCPToEncryptStream struct{}
+
+// Error implements the error interface.
+func (e ErrClientSwitchToTCPToEncryptStream) Error() string {
+	return "switching to TCP to encrypt the stream"
 }
 
 // ErrClientAuthSetup is an error that can be returned by a client.
@@ -313,4 +339,12 @@ type ErrClientSDPInvalid struct {
 // Error implements the error interface.
 func (e ErrClientSDPInvalid) Error() string {
 	return fmt.Sprintf("invalid SDP: %v", e.Err)
+}
+
+// ErrClientH264PacketizationMode0 is an error that can be returned by a client.
+type ErrClientH264PacketizationMode0 struct{}
+
+// Error implements the error interface.
+func (e ErrClientH264PacketizationMode0) Error() string {
+	return "H264 packetization-mode=0 is only supported when reading with TCP"
 }

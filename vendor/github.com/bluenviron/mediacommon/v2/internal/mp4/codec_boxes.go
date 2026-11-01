@@ -6,6 +6,7 @@ import (
 	amp4 "github.com/abema/go-mp4"
 
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
@@ -47,17 +48,13 @@ func av1FindSequenceHeader(buf []byte) ([]byte, error) {
 }
 
 func h264FindParams(avcc *amp4.AVCDecoderConfiguration) ([]byte, []byte, error) {
-	if len(avcc.SequenceParameterSets) == 0 {
-		return nil, nil, fmt.Errorf("H264 SPS not provided")
+	if len(avcc.SequenceParameterSets) > 1 || len(avcc.PictureParameterSets) > 1 {
+		return nil, nil, fmt.Errorf("multiple H264 parameters are not supported")
 	}
-	if len(avcc.SequenceParameterSets) > 1 {
-		return nil, nil, fmt.Errorf("multiple H264 SPS are not supported")
-	}
-	if len(avcc.PictureParameterSets) == 0 {
-		return nil, nil, fmt.Errorf("H264 PPS not provided")
-	}
-	if len(avcc.PictureParameterSets) > 1 {
-		return nil, nil, fmt.Errorf("multiple H264 PPS are not supported")
+
+	if len(avcc.SequenceParameterSets) == 0 || len(avcc.SequenceParameterSets[0].NALUnit) == 0 ||
+		len(avcc.PictureParameterSets) == 0 || len(avcc.PictureParameterSets[0].NALUnit) == 0 {
+		return nil, nil, fmt.Errorf("H264 parameters not provided")
 	}
 
 	sps := avcc.SequenceParameterSets[0].NALUnit
@@ -67,33 +64,39 @@ func h264FindParams(avcc *amp4.AVCDecoderConfiguration) ([]byte, []byte, error) 
 		return nil, nil, fmt.Errorf("unable to parse H264 SPS: %w", err)
 	}
 
-	pps := avcc.PictureParameterSets[0].NALUnit
-	if len(pps) == 0 {
-		return nil, nil, fmt.Errorf("invalid H264 PPS")
-	}
-
-	return sps, pps, nil
+	return sps, avcc.PictureParameterSets[0].NALUnit, nil
 }
 
-func h265FindParams(params []amp4.HEVCNaluArray) ([]byte, []byte, []byte, error) {
+func h265FindParams(hvcc *amp4.HvcC) ([]byte, []byte, []byte, error) {
 	var vps []byte
 	var sps []byte
 	var pps []byte
 
-	for _, arr := range params {
+	for _, arr := range hvcc.NaluArrays {
 		switch h265.NALUType(arr.NaluType) {
 		case h265.NALUType_VPS_NUT, h265.NALUType_SPS_NUT, h265.NALUType_PPS_NUT:
-			if arr.NumNalus != 1 {
-				return nil, nil, nil, fmt.Errorf("multiple H265 VPS/SPS/PPS are not supported")
+			if len(arr.Nalus) != 1 {
+				return nil, nil, nil, fmt.Errorf("multiple H265 parameters are not supported")
+			}
+
+			if len(arr.Nalus[0].NALUnit) == 0 {
+				return nil, nil, nil, fmt.Errorf("H265 parameter not provided")
 			}
 
 			switch h265.NALUType(arr.NaluType) {
 			case h265.NALUType_VPS_NUT:
+				if vps != nil {
+					return nil, nil, nil, fmt.Errorf("multiple H265 VPS are not supported")
+				}
 				vps = arr.Nalus[0].NALUnit
 
 			case h265.NALUType_SPS_NUT:
+				if sps != nil {
+					return nil, nil, nil, fmt.Errorf("multiple H265 SPS are not supported")
+				}
 				sps = arr.Nalus[0].NALUnit
 
+				// a valid SPS is required to marshal the codec back
 				var spsp h265.SPS
 				err := spsp.Unmarshal(sps)
 				if err != nil {
@@ -101,21 +104,16 @@ func h265FindParams(params []amp4.HEVCNaluArray) ([]byte, []byte, []byte, error)
 				}
 
 			case h265.NALUType_PPS_NUT:
+				if pps != nil {
+					return nil, nil, nil, fmt.Errorf("multiple H265 PPS are not supported")
+				}
 				pps = arr.Nalus[0].NALUnit
 			}
 		}
 	}
 
-	if len(vps) == 0 {
-		return nil, nil, nil, fmt.Errorf("H265 VPS not provided")
-	}
-
-	if len(sps) == 0 {
-		return nil, nil, nil, fmt.Errorf("H265 SPS not provided")
-	}
-
-	if len(pps) == 0 {
-		return nil, nil, nil, fmt.Errorf("H265 PPS not provided")
+	if vps == nil || sps == nil || pps == nil {
+		return nil, nil, nil, fmt.Errorf("H265 parameters not provided")
 	}
 
 	return vps, sps, pps, nil
@@ -153,6 +151,7 @@ const (
 	waitingDac3
 	waitingDec3
 	waitingPcmC
+	waitingDfLa
 	waitingAdditional
 )
 
@@ -276,7 +275,7 @@ func (r *CodecBoxesReader) Read(h *amp4.ReadHandle) (any, error) {
 		}
 		hvcc := box.(*amp4.HvcC)
 
-		vps, sps, pps, err := h265FindParams(hvcc.NaluArrays)
+		vps, sps, pps, err := h265FindParams(hvcc)
 		if err != nil {
 			return nil, err
 		}
@@ -354,6 +353,48 @@ func (r *CodecBoxesReader) Read(h *amp4.ReadHandle) (any, error) {
 
 		r.Codec = &codecs.Opus{
 			ChannelCount: int(dops.OutputChannelCount),
+		}
+		r.state = waitingAdditional
+
+	case "fLaC":
+		if r.state != initial {
+			return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
+		}
+
+		box, _, err := h.ReadPayload()
+		if err != nil {
+			return nil, err
+		}
+		flac := box.(*amp4.AudioSampleEntry)
+
+		r.sampleRate = int(flac.SampleRate / 65536)
+		r.channelCount = int(flac.ChannelCount)
+		r.state = waitingDfLa
+		return h.Expand()
+
+	case "dfLa":
+		if r.state != waitingDfLa {
+			return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
+		}
+
+		box, _, err := h.ReadPayload()
+		if err != nil {
+			return nil, err
+		}
+		dfla := box.(*amp4.DfLa)
+
+		if len(dfla.Blocks) < 4 {
+			return nil, fmt.Errorf("FLAC dfLa box is too short")
+		}
+
+		var streamInfo flac.StreamInfo
+		err = streamInfo.Unmarshal(dfla.Blocks[4:])
+		if err != nil {
+			return nil, err
+		}
+
+		r.Codec = &codecs.FLAC{
+			StreamInfo: &streamInfo,
 		}
 		r.state = waitingAdditional
 
@@ -489,7 +530,7 @@ func (r *CodecBoxesReader) Read(h *amp4.ReadHandle) (any, error) {
 		r.Codec = &codecs.AC3{
 			SampleRate:   r.sampleRate,
 			ChannelCount: r.channelCount,
-			Fscod:        dac3.Fscod,
+			Fscod:        dac3.Fscod, //nolint:staticcheck
 			Bsid:         dac3.Bsid,
 			Bsmod:        dac3.Bsmod,
 			Acmod:        dac3.Acmod,
@@ -523,18 +564,22 @@ func (r *CodecBoxesReader) Read(h *amp4.ReadHandle) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		dec3 := box.(*Dec3)
+		dec3 := box.(*amp4.Dec3)
+
+		if dec3.NumIndSub != 0 {
+			return nil, fmt.Errorf("multi-substream E-AC-3 content is not supported")
+		}
 
 		r.Codec = &codecs.EAC3{
 			SampleRate:   r.sampleRate,
 			ChannelCount: r.channelCount,
 			DataRate:     dec3.DataRate,
-			Asvc:         dec3.Asvc != 0,
-			Bsmod:        dec3.Bsmod,
-			Acmod:        dec3.Acmod,
-			LfeOn:        dec3.LfeOn != 0,
-			NumDepSub:    dec3.NumDepSub,
-			ChanLoc:      dec3.ChanLoc,
+			Asvc:         dec3.IndSubs[0].Asvc != 0,
+			Bsmod:        dec3.IndSubs[0].Bsmod,
+			Acmod:        dec3.IndSubs[0].Acmod,
+			LfeOn:        dec3.IndSubs[0].LfeOn != 0,
+			NumDepSub:    dec3.IndSubs[0].NumDepSub,
+			ChanLoc:      dec3.IndSubs[0].ChanLoc,
 		}
 		r.state = waitingAdditional
 
@@ -592,6 +637,8 @@ func WriteCodecBoxes(w *Writer, codec codecs.Codec, trackID int, info *CodecInfo
 		|    |esds|
 		|Opus| (Opus)
 		|    |dOps|
+		|fLaC| (FLAC)
+		|    |dfLa|
 		|mp4a| (MPEG-4/1 audio)
 		|    |esds|
 		|ac-3| (AC-3)
@@ -722,8 +769,8 @@ func WriteCodecBoxes(w *Writer, codec codecs.Codec, trackID int, info *CodecInfo
 			BitDepthChromaMinus8: uint8(info.H265SPS.BitDepthChromaMinus8),
 			// AvgFrameRate
 			// ConstantFrameRate
-			NumTemporalLayers: 1,
-			// TemporalIdNested
+			NumTemporalLayers:  (info.H265SPS.MaxSubLayersMinus1 + 1),
+			TemporalIdNested:   boolToUint8(info.H265SPS.TemporalIDNestingFlag),
 			LengthSizeMinusOne: 3,
 			NumOfNaluArrays:    3,
 			NaluArrays: []amp4.HEVCNaluArray{
@@ -995,6 +1042,43 @@ func WriteCodecBoxes(w *Writer, codec codecs.Codec, trackID int, info *CodecInfo
 			return err
 		}
 
+	case *codecs.FLAC:
+		_, err := w.WriteBoxStart(&amp4.AudioSampleEntry{ // <fLaC>
+			SampleEntry: amp4.SampleEntry{
+				AnyTypeBox: amp4.AnyTypeBox{
+					Type: amp4.StrToBoxType("fLaC"),
+				},
+				DataReferenceIndex: 1,
+			},
+			ChannelCount: uint16(codec.StreamInfo.ChannelCount),
+			SampleSize:   uint16(codec.StreamInfo.BitDepth),
+			SampleRate:   codec.StreamInfo.SampleRate * 65536,
+		})
+		if err != nil {
+			return err
+		}
+
+		enc, err := codec.StreamInfo.Marshal()
+		if err != nil {
+			return err
+		}
+
+		// build METADATA_BLOCK_HEADER: is_last=1, block_type=0 (STREAMINFO), length=len(StreamInfo)
+		blockLen := len(enc)
+		header := []byte{
+			0x80, // is_last=1, block_type=0
+			byte(blockLen >> 16),
+			byte(blockLen >> 8),
+			byte(blockLen),
+		}
+
+		_, err = w.WriteBox(&amp4.DfLa{ // <dfLa/>
+			Blocks: append(header, enc...),
+		})
+		if err != nil {
+			return err
+		}
+
 	case *codecs.MPEG4Audio:
 		var channelCount uint16
 
@@ -1186,17 +1270,19 @@ func WriteCodecBoxes(w *Writer, codec codecs.Codec, trackID int, info *CodecInfo
 			return fmt.Errorf("unsupported sample rate: %v", codec.SampleRate)
 		}
 
-		_, err = w.WriteBox(&Dec3{
+		_, err = w.WriteBox(&amp4.Dec3{
 			DataRate:  codec.DataRate,
 			NumIndSub: 0,
-			Fscod:     fscod,
-			Bsid:      16,
-			Asvc:      boolToUint8(codec.Asvc),
-			Bsmod:     codec.Bsmod,
-			Acmod:     codec.Acmod,
-			LfeOn:     boolToUint8(codec.LfeOn),
-			NumDepSub: codec.NumDepSub,
-			ChanLoc:   codec.ChanLoc,
+			IndSubs: []amp4.Dec3IndSub{{
+				Fscod:     fscod,
+				Bsid:      16,
+				Asvc:      boolToUint8(codec.Asvc),
+				Bsmod:     codec.Bsmod,
+				Acmod:     codec.Acmod,
+				LfeOn:     boolToUint8(codec.LfeOn),
+				NumDepSub: codec.NumDepSub,
+				ChanLoc:   codec.ChanLoc,
+			}},
 		})
 		if err != nil {
 			return err

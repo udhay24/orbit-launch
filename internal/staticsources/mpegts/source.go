@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	mcmpegts "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
@@ -39,6 +40,11 @@ func (s *Source) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[MPEG-TS source] "+format, args...)
 }
 
+// Info returns runtime information.
+func (*Source) Info() defs.StaticSourceInfo {
+	return defs.StaticSourceInfo{}
+}
+
 // Run implements StaticSource.
 func (s *Source) Run(params defs.StaticSourceRunParams) error {
 	s.Log(logger.Debug, "connecting")
@@ -56,6 +62,21 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		l := &unix.Listener{
 			Path: params.Path,
 		}
+
+		if s.DumpPackets {
+			l.Listen = func(network, address string) (net.Listener, error) {
+				ln, err2 := net.Listen(network, address)
+				if err2 != nil {
+					return nil, err2
+				}
+
+				return &packetdumper.Listener{
+					Wrapped: ln,
+					Prefix:  "mpegts_source_unix_conn",
+				}, nil
+			}
+		}
+
 		err = l.Initialize()
 		if err != nil {
 			return err
@@ -68,36 +89,38 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 			udpReadBufferSize = *params.Conf.MPEGTSUDPReadBufferSize
 		}
 
-		listenPacket := net.ListenPacket
-
-		if s.DumpPackets {
-			listenPacket = func(network, address string) (net.PacketConn, error) {
-				pc, err2 := net.ListenPacket(network, address)
-				if err2 != nil {
-					return nil, err2
-				}
-
-				d := &packetdumper.PacketConn{
-					Prefix:     "mpegts_source_packetconn",
-					PacketConn: pc,
-				}
-				err2 = d.Initialize()
-				if err2 != nil {
-					return nil, err2
-				}
-
-				return d, nil
-			}
-		}
-
 		params := udp.URLToParams(u)
+
 		l := &udp.Listener{
 			Address:           params.Address,
 			Source:            params.Source,
 			IntfName:          params.IntfName,
 			UDPReadBufferSize: int(udpReadBufferSize),
-			ListenPacket:      listenPacket,
 		}
+
+		l.ListenPacket = func(network, address string) (net.PacketConn, error) {
+			pc, err2 := net.ListenPacket(network, address)
+			if err2 != nil {
+				return nil, err2
+			}
+
+			if s.DumpPackets {
+				pc2 := &packetdumper.PacketConn{
+					Wrapped: pc,
+					Prefix:  "mpegts_source_packet_conn",
+				}
+				err2 = pc2.Initialize()
+				if err2 != nil {
+					pc.Close() //nolint:errcheck
+					return nil, err2
+				}
+
+				pc = pc2
+			}
+
+			return pc, nil
+		}
+
 		err = l.Initialize()
 		if err != nil {
 			return err
@@ -120,7 +143,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 		case <-params.Context.Done():
 			nc.Close()
-			<-readerErr
+			<-readerErr //nolint:errcheck
 			return fmt.Errorf("terminated")
 		}
 	}
@@ -128,7 +151,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 func (s *Source) runReader(nc net.Conn) error {
 	nc.SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
-	mr := &mpegts.EnhancedReader{R: nc}
+	mr := &mcmpegts.Reader{R: nc}
 	err := mr.Initialize()
 	if err != nil {
 		return err
@@ -183,7 +206,7 @@ func (s *Source) runReader(nc net.Conn) error {
 // APISourceDescribe implements StaticSource.
 func (*Source) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: "mpegtsSource",
+		Type: defs.APIPathSourceTypeMPEGTSSource,
 		ID:   "",
 	}
 }

@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/av1"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
+
+	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
 )
 
 type procEntryFMP4 struct {
@@ -16,7 +19,7 @@ type procEntryFMP4 struct {
 }
 
 type clientTrackProcessorFMP4StreamProcessor interface {
-	onPartTrackProcessed(ctx context.Context)
+	onPartTrackProcessed()
 }
 
 type clientTrackProcessorFMP4 struct {
@@ -33,7 +36,13 @@ func (t *clientTrackProcessorFMP4) initialize() error {
 	switch t.track.track.Codec.(type) {
 	case *codecs.AV1:
 		t.decodePayload = func(sample *fmp4.Sample) ([][]byte, error) {
-			return sample.GetAV1()
+			var tu av1.Bitstream
+			err := tu.Unmarshal(sample.Payload)
+			if err != nil {
+				return nil, err
+			}
+
+			return tu, nil
 		}
 
 	case *codecs.VP9:
@@ -43,12 +52,24 @@ func (t *clientTrackProcessorFMP4) initialize() error {
 
 	case *codecs.H264:
 		t.decodePayload = func(sample *fmp4.Sample) ([][]byte, error) {
-			return sample.GetH264()
+			var au h264.AVCC
+			err := au.Unmarshal(sample.Payload)
+			if err != nil {
+				return nil, err
+			}
+
+			return au, nil
 		}
 
 	case *codecs.H265:
 		t.decodePayload = func(sample *fmp4.Sample) ([][]byte, error) {
-			return sample.GetH265()
+			var au h264.AVCC
+			err := au.Unmarshal(sample.Payload)
+			if err != nil {
+				return nil, err
+			}
+
+			return [][]byte(au), nil
 		}
 
 	case *codecs.Opus:
@@ -60,6 +81,11 @@ func (t *clientTrackProcessorFMP4) initialize() error {
 		t.decodePayload = func(sample *fmp4.Sample) ([][]byte, error) {
 			return [][]byte{sample.Payload}, nil
 		}
+
+	case *codecs.FLAC:
+		t.decodePayload = func(sample *fmp4.Sample) ([][]byte, error) {
+			return [][]byte{sample.Payload}, nil
+		}
 	}
 
 	t.queue = make(chan *procEntryFMP4)
@@ -67,22 +93,24 @@ func (t *clientTrackProcessorFMP4) initialize() error {
 	return nil
 }
 
-func (t *clientTrackProcessorFMP4) run(ctx context.Context) error {
+func (t *clientTrackProcessorFMP4) run(errGroupCtx context.Context) error {
 	for {
 		select {
 		case entry := <-t.queue:
-			err := t.process(ctx, entry)
+			err := t.process(errGroupCtx, entry)
 			if err != nil {
 				return err
 			}
 
-		case <-ctx.Done():
+		case <-errGroupCtx.Done():
 			return nil
 		}
 	}
 }
 
-func (t *clientTrackProcessorFMP4) process(ctx context.Context, entry *procEntryFMP4) error {
+func (t *clientTrackProcessorFMP4) process(errGroupCtx context.Context, entry *procEntryFMP4) error {
+	defer t.streamProcessor.onPartTrackProcessed()
+
 	dts := entry.dts
 
 	for _, sample := range entry.partTrack.Samples {
@@ -95,10 +123,10 @@ func (t *clientTrackProcessorFMP4) process(ctx context.Context, entry *procEntry
 
 		var ntp *time.Time
 		if entry.ntp != nil {
-			ntp = ptrOf(entry.ntp.Add(timestampToDuration(dts-entry.dts, t.track.track.ClockRate)))
+			ntp = new(entry.ntp.Add(timestampToDuration(dts-entry.dts, t.track.track.ClockRate)))
 		}
 
-		err = t.track.handleData(ctx, pts, dts, ntp, data)
+		err = t.track.handleData(errGroupCtx, pts, dts, ntp, data)
 		if err != nil {
 			return err
 		}
@@ -106,16 +134,15 @@ func (t *clientTrackProcessorFMP4) process(ctx context.Context, entry *procEntry
 		dts += int64(sample.Duration)
 	}
 
-	t.streamProcessor.onPartTrackProcessed(ctx)
 	return nil
 }
 
-func (t *clientTrackProcessorFMP4) push(ctx context.Context, entry *procEntryFMP4) error {
+func (t *clientTrackProcessorFMP4) push(errGroupCtx context.Context, entry *procEntryFMP4) error {
 	select {
 	case t.queue <- entry:
 		return nil
 
-	case <-ctx.Done():
+	case <-errGroupCtx.Done():
 		return fmt.Errorf("terminated")
 	}
 }

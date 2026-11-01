@@ -1,6 +1,12 @@
 # Install
 
-There are several installation methods available: standalone binary, Docker image, Arch Linux package, FreeBSD or OpenWrt binary.
+There are several installation methods available:
+
+- [Standalone binary](#standalone-binary): use this if you are running Windows, macOS or you just want to try out _MediaMTX_.
+- [Docker container](#docker-container): use this if you want to run _MediaMTX_ in an isolated and deterministic way. This is recommended for production environments.
+- [Arch Linux package](#arch-linux-package): use this if you are running Arch Linux.
+- [FreeBSD package](#freebsd-package): use this if you are running FreeBSD.
+- [OpenWrt binary](#openwrt-binary): use this if you are running OpenWrt.
 
 ## Standalone binary
 
@@ -12,7 +18,7 @@ There are several installation methods available: standalone binary, Docker imag
    ./mediamtx
    ```
 
-## Docker image
+## Docker container
 
 Download and launch the `bluenviron/mediamtx:1` image with the following environment variables and ports:
 
@@ -24,14 +30,17 @@ docker run --rm -it \
 -p 1935:1935 \
 -p 8888:8888 \
 -p 8889:8889 \
+-p 8892:8892 \
 -p 8890:8890/udp \
 -p 8189:8189/udp \
+-p 8892:8892/udp \
+-p 8893:8893/udp \
 bluenviron/mediamtx:1
 ```
 
 Fill the `MTX_WEBRTCADDITIONALHOSTS` environment variable with the IP that will be used to connect to the server.
 
-The `MTX_RTSPTRANSPORTS=tcp` environment variable is meant to disable the UDP transport protocol of the RTSP server (which require the real IP address and port of incoming UDP packets, that are sometimes replaced by the Docker network stack). If you want to use it, you need to bypass the Docker network stack through the `--network=host` flag (which is not compatible with Windows, macOS and Kubernetes):
+The `MTX_RTSPTRANSPORTS=tcp` environment variable is meant to disable the UDP transport protocol of the RTSP server (which requires the real IP address and port of incoming UDP packets, that are sometimes replaced by the Docker network stack). If you want to use it, you need to bypass the Docker network stack through the `--network=host` flag (which is not compatible with Windows, macOS and Kubernetes):
 
 ```sh
 docker run --rm -it --network=host bluenviron/mediamtx:1
@@ -48,24 +57,27 @@ There are four image variants:
 
 The `1` tag corresponds to the latest `1.x.x` release, that should guarantee backward compatibility when upgrading. It is also possible to bind the image to a specific release, by using the release name as tag (`bluenviron/mediamtx:{docker_version_tag}`).
 
-The base image does not contain any utility, in order to minimize size and frequency of updates. If you need additional software (like curl, wget, GStreamer), you can build a custom image by using the _MediaMTX_ image as a base stage, by creating a file named `Dockerfile` with this content:
+The base image does not contain any utility, in order to minimize size and frequency of updates. If you need additional software (like curl, wget, GStreamer), you can build a custom image by creating a file named `Dockerfile` with this content:
 
-```
+```dockerfile
 FROM bluenviron/mediamtx:1 AS mediamtx
+
+# pick any Linux-based operating system you want.
 FROM ubuntu:24.04
 
 COPY --from=mediamtx /mediamtx /
 COPY --from=mediamtx /mediamtx.yml /
 
+# add anything you need, GStreamer is just an example.
 RUN apt update && apt install -y \
-   (insert additional utilities here)
+   gstreamer1.0-tools
 
 ENTRYPOINT [ "/mediamtx" ]
 ```
 
 And then build it:
 
-```
+```sh
 docker build . -t my-mediamtx
 ```
 
@@ -79,7 +91,7 @@ cd mediamtx
 makepkg -si
 ```
 
-## FreeBSD
+## FreeBSD package
 
 Available via ports tree or using packages (2025Q2 and later) as listed below:
 
@@ -92,4 +104,4 @@ pkg install mediamtx
 
 If the architecture of the OpenWrt device is amd64, armv6, armv7 or arm64, use the [standalone binary method](#standalone-binary) and download a Linux binary that corresponds to your architecture.
 
-Otherwise, [compile the server from source](../6-misc/1-compile.md).
+Otherwise, [compile the server from source](../7-misc/1-compile.md).

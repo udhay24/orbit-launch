@@ -2,6 +2,7 @@ package qlog
 
 import (
 	"fmt"
+	"hash/crc32"
 
 	"github.com/quic-go/quic-go/internal/protocol"
 	"github.com/quic-go/quic-go/internal/qerr"
@@ -48,6 +49,14 @@ type Initiator string
 const (
 	InitiatorLocal  Initiator = "local"
 	InitiatorRemote Initiator = "remote"
+)
+
+// Direction identifies the sending or receiving side of an endpoint.
+type Direction string
+
+const (
+	DirectionSending   Direction = "sending"
+	DirectionReceiving Direction = "receiving"
 )
 
 type streamType protocol.StreamType
@@ -293,3 +302,12 @@ const (
 	// StatelessReset indicates the connection was closed due to receiving a stateless reset from the peer
 	ConnectionCloseTriggerStatelessReset ConnectionCloseTrigger = "stateless_reset"
 )
+
+// DatagramPayloadChecksum is the CRC32c checksum of a UDP datagram payload.
+// ponytail: zero means absent; use an optional value if zero-valued checksums need to be logged.
+type DatagramPayloadChecksum uint32
+
+// CalculateDatagramPayloadChecksum computes the checksum of a UDP datagram payload.
+func CalculateDatagramPayloadChecksum(payload []byte) DatagramPayloadChecksum {
+	return DatagramPayloadChecksum(crc32.Checksum(payload, crc32.MakeTable(crc32.Castagnoli)))
+}

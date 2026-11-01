@@ -26,7 +26,7 @@ import (
 
 	idtlsnet "github.com/pion/dtls/v3/internal/net"
 	dtlsnet "github.com/pion/dtls/v3/pkg/net"
-	"github.com/pion/transport/v4/deadline"
+	"github.com/pion/transport/v5/deadline"
 )
 
 const (
@@ -67,8 +67,6 @@ type listener struct {
 func (l *listener) Accept() (net.PacketConn, net.Addr, error) {
 	select {
 	case c := <-l.acceptCh:
-		l.connWG.Add(1)
-
 		return c, c.raddr, nil
 
 	case <-l.readDoneCh:
@@ -86,35 +84,30 @@ func (l *listener) Accept() (net.PacketConn, net.Addr, error) {
 func (l *listener) Close() error {
 	var err error
 	l.doneOnce.Do(func() {
+		l.connLock.Lock()
 		l.accepting.Store(false)
 		close(l.doneCh)
 
-		l.connLock.Lock()
 		// Close unaccepted connections
+		var pending []*PacketConn
 	lclose:
 		for {
 			select {
 			case c := <-l.acceptCh:
-				close(c.doneCh)
-				// If we have an alternate identifier, remove it from the connection
-				// map.
-				if id := c.id.Load(); id != nil {
-					delete(l.conns, id.(string)) //nolint:forcetypeassert
-				}
-				// If we haven't already removed the remote address, remove it
-				// from the connection map.
-				if c.rmraddr.Load() == nil {
-					delete(l.conns, c.raddr.String())
-					c.rmraddr.Store(true)
-				}
+				pending = append(pending, c)
 			default:
 				break lclose
 			}
 		}
-		nConns := len(l.conns)
 		l.connLock.Unlock()
 
 		l.connWG.Done()
+		for _, conn := range pending {
+			_ = conn.Close()
+		}
+		l.connLock.Lock()
+		nConns := len(l.conns)
+		l.connLock.Unlock()
 
 		if nConns == 0 {
 			// Wait if this is the final connection.
@@ -157,17 +150,30 @@ type ListenConfig struct {
 	// the identifier is not already associated with the connection, it will be
 	// added.
 	ConnectionIdentifier func([]byte) (string, bool)
+
+	// Internal listen config used to open the UDP socket.
+	ListenConfig net.ListenConfig
 }
 
 // Listen creates a new listener based on the ListenConfig.
+//
+//nolint:contextcheck
 func (lc *ListenConfig) Listen(network string, laddr *net.UDPAddr) (dtlsnet.PacketListener, error) {
 	if lc.Backlog == 0 {
 		lc.Backlog = defaultListenBacklog
 	}
 
-	conn, err := net.ListenUDP(network, laddr)
+	laddrStr := ":0"
+	if laddr != nil {
+		laddrStr = laddr.String()
+	}
+	innerConn, err := lc.ListenConfig.ListenPacket(context.Background(), network, laddrStr)
 	if err != nil {
 		return nil, err
+	}
+	conn, ok := innerConn.(*net.UDPConn)
+	if !ok {
+		return nil, errors.New("listen packet not a *net.UDPConn") //nolint:err113
 	}
 
 	packetListener := &listener{
@@ -253,10 +259,13 @@ func (l *listener) getConn(raddr net.Addr, buf []byte) (*PacketConn, bool, error
 			}
 		}
 		conn = l.newPacketConn(raddr)
+		l.connWG.Add(1)
 		select {
 		case l.acceptCh <- conn:
 			l.conns[raddr.String()] = conn
 		default:
+			l.connWG.Done()
+
 			return nil, false, ErrListenQueueExceeded
 		}
 	}

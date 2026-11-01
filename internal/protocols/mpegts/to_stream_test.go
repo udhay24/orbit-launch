@@ -10,9 +10,11 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/test"
-	"github.com/stretchr/testify/require"
 )
 
 func TestToStream(t *testing.T) {
@@ -65,9 +67,10 @@ func TestToStream(t *testing.T) {
 						Programs: []*mpeg4audio.StreamMuxConfigProgram{{
 							Layers: []*mpeg4audio.StreamMuxConfigLayer{{
 								AudioSpecificConfig: &mpeg4audio.AudioSpecificConfig{
-									Type:         2,
-									SampleRate:   48000,
-									ChannelCount: 2,
+									Type:          2,
+									SampleRate:    48000,
+									ChannelConfig: 2,
+									ChannelCount:  2, //nolint:staticcheck
 								},
 								LatmBufferFullness: 255,
 							}},
@@ -99,7 +102,7 @@ func TestToStream(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			r := &EnhancedReader{R: &buf}
+			r := &mpegts.Reader{R: &buf}
 			err := r.Initialize()
 			require.NoError(t, err)
 
@@ -136,7 +139,7 @@ func TestToStream(t *testing.T) {
 									AudioSpecificConfig: &mpeg4audio.AudioSpecificConfig{
 										Type:          2,
 										SampleRate:    48000,
-										ChannelCount:  2,
+										ChannelCount:  2, //nolint:staticcheck
 										ChannelConfig: 2,
 									},
 									LatmBufferFullness: 255,
@@ -165,7 +168,7 @@ func TestToStreamNoSupportedCodecs(t *testing.T) {
 	_, err = mux.WriteTables()
 	require.NoError(t, err)
 
-	r := &EnhancedReader{R: &buf}
+	r := &mpegts.Reader{R: &buf}
 	err = r.Initialize()
 	require.NoError(t, err)
 
@@ -197,7 +200,7 @@ func TestToStreamSkipUnsupportedTracks(t *testing.T) {
 	_, err = mux.WriteTables()
 	require.NoError(t, err)
 
-	r := &EnhancedReader{R: &buf}
+	r := &mpegts.Reader{R: &buf}
 	err = r.Initialize()
 	require.NoError(t, err)
 

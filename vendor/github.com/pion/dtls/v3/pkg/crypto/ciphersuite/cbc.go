@@ -3,11 +3,12 @@
 
 package ciphersuite
 
-import ( //nolint:gci
+import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"hash"
 
@@ -90,8 +91,8 @@ func (c *CBC) Encrypt(pkt *recordlayer.RecordLayer, raw []byte) ([]byte, error) 
 	// Generate + Append padding
 	padding := make([]byte, blockSize-len(payload)%blockSize)
 	paddingLen := len(padding)
-	for i := 0; i < paddingLen; i++ {
-		padding[i] = byte(paddingLen - 1)
+	for i := range paddingLen {
+		padding[i] = byte(paddingLen - 1) //nolint:gosec //G115
 	}
 	payload = append(payload, padding...)
 
@@ -143,14 +144,10 @@ func (c *CBC) Decrypt(header recordlayer.Header, in []byte) ([]byte, error) {
 	// Padding+MAC needs to be checked in constant time
 	// Otherwise we reveal information about the level of correctness
 	paddingLen, paddingGood := examinePadding(body)
-	if paddingGood != 255 {
-		return nil, errInvalidMAC
-	}
-
 	macSize := mac.Size()
-	if len(body) < macSize {
-		return nil, errInvalidMAC
-	}
+	macSpaceGood := subtle.ConstantTimeLessOrEq(paddingLen, len(body)-macSize)
+	paddingAndSpaceGood := int(paddingGood&1) & macSpaceGood
+	paddingLen = subtle.ConstantTimeSelect(paddingAndSpaceGood, paddingLen, 1)
 
 	dataEnd := len(body) - macSize - paddingLen
 
@@ -167,7 +164,8 @@ func (c *CBC) Decrypt(header recordlayer.Header, in []byte) ([]byte, error) {
 		)
 	}
 	// Compute Local MAC and compare
-	if err != nil || !hmac.Equal(actualMAC, expectedMAC) {
+	macGood := subtle.ConstantTimeCompare(actualMAC, expectedMAC)
+	if err != nil || macGood&paddingAndSpaceGood != 1 {
 		return nil, errInvalidMAC
 	}
 
@@ -232,7 +230,7 @@ func (c *CBC) hmacCID(
 	msg.AddUint8(protocolVersion.Major)
 	msg.AddUint8(protocolVersion.Minor)
 	msg.AddUint16(epoch)
-	util.AddUint48(&msg, sequenceNumber)
+	msg.AddUint48(sequenceNumber)
 	msg.AddBytes(cid)
 	msg.AddUint16(uint16(len(payload))) //nolint:gosec //G115
 	msg.AddBytes(ip.Content)

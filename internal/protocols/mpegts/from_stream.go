@@ -17,6 +17,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/substructs"
 	srt "github.com/datarhei/gosrt"
 
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -72,6 +73,7 @@ func FromStream(
 							if !h265.IsRandomAccess(u.Payload.(unit.PayloadH265)) {
 								return nil
 							}
+
 							dtsExtractor = &h265.DTSExtractor{}
 							dtsExtractor.Initialize()
 						}
@@ -107,12 +109,11 @@ func FromStream(
 							return nil
 						}
 
-						idrPresent := h264.IsRandomAccess(u.Payload.(unit.PayloadH264))
-
 						if dtsExtractor == nil {
-							if !idrPresent {
+							if !h264.IsRandomAccess(u.Payload.(unit.PayloadH264)) {
 								return nil
 							}
+
 							dtsExtractor = &h264.DTSExtractor{}
 							dtsExtractor.Initialize()
 						}
@@ -185,7 +186,7 @@ func FromStream(
 						if !firstReceived {
 							firstReceived = true
 						} else if u.PTS < lastPTS {
-							return fmt.Errorf("MPEG-1 Video streams with B-frames are not supported (yet)")
+							return fmt.Errorf("MPEG-1/2 Video streams with B-frames are not supported (yet)")
 						}
 						lastPTS = u.PTS
 
@@ -402,7 +403,7 @@ func FromStream(
 	for _, medi := range desc.Medias {
 		for _, forma := range medi.Formats {
 			if !slices.Contains(setuppedFormats, forma) {
-				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, forma.Codec())
+				r.Parent.Log(logger.Warn, "skipping track %d (%s)", n, formatlabel.FormatToLabel(forma))
 			}
 			n++
 		}

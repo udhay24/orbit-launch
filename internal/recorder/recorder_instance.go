@@ -22,6 +22,7 @@ type recorderInstance struct {
 	stream            *stream.Stream
 	onSegmentCreate   OnSegmentCreateFunc
 	onSegmentComplete OnSegmentCompleteFunc
+	location          *time.Location
 	parent            logger.Writer
 
 	streamID    uuid.UUID
@@ -47,8 +48,8 @@ func (ri *recorderInstance) initialize() {
 		ri.format,
 	)
 	ri.reader = &stream.Reader{
-		SkipBytesSent: true,
-		Parent:        ri,
+		SkipOutboundBytes: true,
+		Parent:            ri,
 	}
 
 	ri.terminate = make(chan struct{})

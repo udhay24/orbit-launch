@@ -4,6 +4,7 @@
 package ice
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +14,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/transport/v4/packetio"
+	"github.com/pion/transport/v5/packetio"
 )
 
 type bufferedConn struct {
@@ -41,7 +42,7 @@ func newBufferedConn(conn net.Conn, bufSize int, logger logging.LeveledLogger) n
 }
 
 func (bc *bufferedConn) Write(b []byte) (int, error) {
-	n, err := bc.buf.Write(b)
+	n, err := bc.buf.Write(b, nil)
 	if err != nil {
 		return n, err
 	}
@@ -52,7 +53,7 @@ func (bc *bufferedConn) Write(b []byte) (int, error) {
 func (bc *bufferedConn) writeProcess() {
 	pktBuf := make([]byte, receiveMTU)
 	for atomic.LoadInt32(&bc.closed) == 0 {
-		n, err := bc.buf.Read(pktBuf)
+		n, _, err := bc.buf.Read(pktBuf, nil)
 		if errors.Is(err, io.EOF) {
 			return
 		}
@@ -91,6 +92,9 @@ type tcpPacketConn struct {
 	closedChan chan struct{}
 	closeOnce  sync.Once
 	aliveTimer *time.Timer
+
+	// refs counts outstanding sharedPacketConn wrappers handed out by the mux.
+	refs atomic.Int32
 }
 
 type streamingPacket struct {
@@ -229,12 +233,21 @@ func (t *tcpPacketConn) isClosed() bool {
 	}
 }
 
-// WriteTo is for passive and s-o candidates.
-func (t *tcpPacketConn) ReadFrom(b []byte) (n int, rAddr net.Addr, err error) {
-	pkt, ok := <-t.recvChan
+// ReadFrom is for passive and s-o candidates.
+func (t *tcpPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	return t.readFromContext(context.Background(), b)
+}
 
-	if !ok {
-		return 0, nil, io.ErrClosedPipe
+func (t *tcpPacketConn) readFromContext(ctx context.Context, b []byte) (int, net.Addr, error) {
+	var pkt streamingPacket
+	var ok bool
+	select {
+	case pkt, ok = <-t.recvChan:
+		if !ok {
+			return 0, nil, io.ErrClosedPipe
+		}
+	case <-ctx.Done():
+		return 0, nil, ctx.Err()
 	}
 
 	if pkt.Err != nil {
@@ -245,10 +258,10 @@ func (t *tcpPacketConn) ReadFrom(b []byte) (n int, rAddr net.Addr, err error) {
 		return 0, pkt.RAddr, io.ErrShortBuffer
 	}
 
-	n = len(pkt.Data)
+	n := len(pkt.Data)
 	copy(b, pkt.Data[:n])
 
-	return n, pkt.RAddr, err
+	return n, pkt.RAddr, nil
 }
 
 // WriteTo is for active and s-o candidates.

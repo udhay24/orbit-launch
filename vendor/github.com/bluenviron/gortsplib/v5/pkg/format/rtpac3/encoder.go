@@ -3,19 +3,14 @@ package rtpac3
 import (
 	"crypto/rand"
 
-	"github.com/pion/rtp"
-
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/ac3"
+	"github.com/pion/rtp"
 )
 
 const (
 	rtpVersion            = 2
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func randUint32() (uint32, error) {
 	var b [4]byte
@@ -34,7 +29,7 @@ func packetCount(avail, le int) int {
 	return n
 }
 
-// Encoder is a AC-3 encoder.
+// Encoder is a RTP/AC-3 encoder.
 // Specification: RFC4184
 type Encoder struct {
 	// payload type of packets.
@@ -69,7 +64,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -80,6 +75,8 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes frames into RTP packets.
+// Frames must contain at least 1 element, each element must contain at least 1 byte.
+// The method might panic otherwise.
 func (e *Encoder) Encode(frames [][]byte) ([]*rtp.Packet, error) {
 	var rets []*rtp.Packet
 	var batch [][]byte

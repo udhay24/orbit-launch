@@ -9,6 +9,7 @@ import (
 
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 	tscodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts/codecs"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/bluenviron/gohlslib/v2/pkg/codecs"
 )
@@ -21,12 +22,15 @@ func mpegtsPickLeadingTrack(mpegtsTracks []*mpegts.Track) int {
 		}
 	}
 
+	// pick first non-KLV track
+	for i, track := range mpegtsTracks {
+		if _, ok := track.Codec.(*tscodecs.KLV); !ok {
+			return i
+		}
+	}
+
 	// otherwise, pick first track
 	return 0
-}
-
-func leadingTimeConvMPEGTS(client clientStreamDownloaderClient) *clientTimeConvMPEGTS {
-	return client.getLeadingTimeConv().(*clientTimeConvMPEGTS)
 }
 
 type switchableReader struct {
@@ -38,25 +42,27 @@ func (r *switchableReader) Read(p []byte) (int, error) {
 }
 
 type clientStreamProcessorStreamDownloader interface {
-	setTracks(ctx context.Context, tracks []*Track) ([]*clientTrack, bool)
-	onProcessorError(ctx context.Context, err error)
+	setTracks(errGroupCtx context.Context, tracks []*Track) ([]*clientTrack, bool)
+	onProcessorError(errGroupCtx context.Context, err error)
 }
 
 type clientStreamProcessorMPEGTS struct {
 	onDecodeError    ClientOnDecodeErrorFunc
 	isLeading        bool
 	segmentQueue     *clientSegmentQueue
-	rp               *clientRoutinePool
+	errGroup         *errgroup.Group
 	streamDownloader clientStreamProcessorStreamDownloader
 	client           clientStreamDownloaderClient
 
-	switchableReader   *switchableReader
-	reader             *mpegts.Reader
-	trackProcessors    map[*Track]*clientTrackProcessorMPEGTS
-	curSegment         *segmentData
-	leadingTrackFound  bool
-	dateTimeProcessed  bool
-	clientStreamTracks []*clientTrack
+	switchableReader  *switchableReader
+	reader            *mpegts.Reader
+	trackProcessors   map[*Track]*clientTrackProcessorMPEGTS
+	curSegment        *segmentData
+	leadingTrackFound bool
+	dateTimeProcessed bool
+	streamTracks      []*clientTrack
+	timeConv          *clientTimeConvMPEGTS
+	queuedSamples     []func() error
 
 	chTrackProcessorDone chan struct{}
 }
@@ -65,29 +71,29 @@ func (p *clientStreamProcessorMPEGTS) initialize() {
 	p.chTrackProcessorDone = make(chan struct{}, clientMaxTracksPerStream)
 }
 
-func (p *clientStreamProcessorMPEGTS) run(ctx context.Context) error {
+func (p *clientStreamProcessorMPEGTS) run(errGroupCtx context.Context) error {
 	for {
-		seg, ok := p.segmentQueue.pull(ctx)
+		seg, ok := p.segmentQueue.pull(errGroupCtx)
 		if !ok {
 			return fmt.Errorf("terminated")
 		}
 
 		if seg.err != nil {
-			p.streamDownloader.onProcessorError(ctx, seg.err)
-			<-ctx.Done()
+			p.streamDownloader.onProcessorError(errGroupCtx, seg.err)
+			<-errGroupCtx.Done()
 			return fmt.Errorf("terminated")
 		}
 
-		err := p.processSegment(ctx, seg)
+		err := p.processSegment(errGroupCtx, seg)
 		if err != nil {
 			return err
 		}
 	}
 }
 
-func (p *clientStreamProcessorMPEGTS) processSegment(ctx context.Context, seg *segmentData) error {
+func (p *clientStreamProcessorMPEGTS) processSegment(errGroupCtx context.Context, seg *segmentData) error {
 	if p.switchableReader == nil {
-		err := p.initializeReader(ctx, seg.payload)
+		err := p.initializeReader(errGroupCtx, seg.payload)
 		if err != nil {
 			return err
 		}
@@ -113,12 +119,12 @@ func (p *clientStreamProcessorMPEGTS) processSegment(ctx context.Context, seg *s
 		return fmt.Errorf("could not find data of leading track")
 	}
 
-	return p.joinTrackProcessors(ctx)
+	return p.joinTrackProcessors(errGroupCtx)
 }
 
-func (p *clientStreamProcessorMPEGTS) joinTrackProcessors(ctx context.Context) error {
+func (p *clientStreamProcessorMPEGTS) joinTrackProcessors(errGroupCtx context.Context) error {
 	for _, proc := range p.trackProcessors {
-		err := proc.push(ctx, nil)
+		err := proc.push(errGroupCtx, nil)
 		if err != nil {
 			return err
 		}
@@ -127,7 +133,7 @@ func (p *clientStreamProcessorMPEGTS) joinTrackProcessors(ctx context.Context) e
 	for range p.trackProcessors {
 		select {
 		case <-p.chTrackProcessorDone:
-		case <-ctx.Done():
+		case <-errGroupCtx.Done():
 			return nil
 		}
 	}
@@ -135,14 +141,14 @@ func (p *clientStreamProcessorMPEGTS) joinTrackProcessors(ctx context.Context) e
 	return nil
 }
 
-func (p *clientStreamProcessorMPEGTS) onPartProcessorDone(ctx context.Context) {
+func (p *clientStreamProcessorMPEGTS) onPartProcessorDone(errGroupCtx context.Context) {
 	select {
 	case p.chTrackProcessorDone <- struct{}{}:
-	case <-ctx.Done():
+	case <-errGroupCtx.Done():
 	}
 }
 
-func (p *clientStreamProcessorMPEGTS) initializeReader(ctx context.Context, firstPayload []byte) error {
+func (p *clientStreamProcessorMPEGTS) initializeReader(errGroupCtx context.Context, firstPayload []byte) error {
 	p.switchableReader = &switchableReader{bytes.NewReader(firstPayload)}
 
 	p.reader = &mpegts.Reader{R: p.switchableReader}
@@ -159,7 +165,7 @@ func (p *clientStreamProcessorMPEGTS) initializeReader(ctx context.Context, firs
 
 	for _, track := range p.reader.Tracks() {
 		switch track.Codec.(type) {
-		case *tscodecs.H264, *tscodecs.MPEG4Audio:
+		case *tscodecs.H264, *tscodecs.MPEG4Audio, *tscodecs.KLV:
 			supportedTracks = append(supportedTracks, track)
 		}
 	}
@@ -174,7 +180,7 @@ func (p *clientStreamProcessorMPEGTS) initializeReader(ctx context.Context, firs
 
 	for i, mpegtsTrack := range supportedTracks {
 		tracks[i] = &Track{
-			Codec:     codecs.FromMPEGTS(mpegtsTrack.Codec),
+			Codec:     fromMPEGTS(mpegtsTrack.Codec),
 			ClockRate: 90000,
 		}
 	}
@@ -184,68 +190,35 @@ func (p *clientStreamProcessorMPEGTS) initializeReader(ctx context.Context, firs
 	}
 
 	var ok bool
-	p.clientStreamTracks, ok = p.streamDownloader.setTracks(ctx, tracks)
+	p.streamTracks, ok = p.streamDownloader.setTracks(errGroupCtx, tracks)
 	if !ok {
 		return fmt.Errorf("terminated")
 	}
 
+	err = p.initializeTrackProcessors(errGroupCtx)
+	if err != nil {
+		return err
+	}
+
 	for i, mpegtsTrack := range supportedTracks {
-		track := p.clientStreamTracks[i]
+		track := p.streamTracks[i]
 		isLeadingTrack := (i == leadingTrackID)
-		var trackProc *clientTrackProcessorMPEGTS
-
-		processSample := func(rawPTS int64, rawDTS int64, data [][]byte) error {
-			if isLeadingTrack {
-				p.leadingTrackFound = true
-
-				if p.trackProcessors == nil {
-					err2 := p.initializeTrackProcessors(ctx, rawDTS)
-					if err2 != nil {
-						return err2
-					}
-				}
-			}
-
-			if trackProc == nil {
-				trackProc = p.trackProcessors[track.track]
-
-				// wait leading track before proceeding
-				if trackProc == nil {
-					return nil
-				}
-			}
-
-			pts := leadingTimeConvMPEGTS(p.client).convert(rawPTS)
-			dts := leadingTimeConvMPEGTS(p.client).convert(rawDTS)
-
-			if !p.dateTimeProcessed && p.isLeading && isLeadingTrack {
-				p.dateTimeProcessed = true
-
-				if p.curSegment.dateTime != nil {
-					leadingTimeConvMPEGTS(p.client).setNTP(*p.curSegment.dateTime, dts)
-				}
-				leadingTimeConvMPEGTS(p.client).setLeadingNTPReceived()
-			}
-
-			ntp := leadingTimeConvMPEGTS(p.client).getNTP(ctx, dts)
-
-			return trackProc.push(ctx, &procEntryMPEGTS{
-				pts:  pts,
-				dts:  dts,
-				ntp:  ntp,
-				data: data,
-			})
-		}
+		trackProc := p.trackProcessors[track.track]
 
 		switch track.track.Codec.(type) {
 		case *codecs.H264:
 			p.reader.OnDataH264(mpegtsTrack, func(pts int64, dts int64, au [][]byte) error {
-				return processSample(pts, dts, au)
+				return p.processSample(errGroupCtx, isLeadingTrack, trackProc, pts, dts, au)
 			})
 
 		case *codecs.MPEG4Audio:
 			p.reader.OnDataMPEG4Audio(mpegtsTrack, func(pts int64, aus [][]byte) error {
-				return processSample(pts, pts, aus)
+				return p.processSample(errGroupCtx, isLeadingTrack, trackProc, pts, pts, aus)
+			})
+
+		case *codecs.KLV:
+			p.reader.OnDataKLV(mpegtsTrack, func(pts int64, data []byte) error {
+				return p.processSample(errGroupCtx, isLeadingTrack, trackProc, pts, pts, [][]byte{data})
 			})
 		}
 	}
@@ -253,39 +226,122 @@ func (p *clientStreamProcessorMPEGTS) initializeReader(ctx context.Context, firs
 	return nil
 }
 
-func (p *clientStreamProcessorMPEGTS) initializeTrackProcessors(
-	ctx context.Context,
-	dts int64,
+func (p *clientStreamProcessorMPEGTS) processSample(
+	errGroupCtx context.Context,
+	isLeadingTrack bool,
+	trackProc *clientTrackProcessorMPEGTS,
+	rawPTS int64,
+	rawDTS int64,
+	data [][]byte,
 ) error {
-	if p.isLeading {
-		timeConv := &clientTimeConvMPEGTS{
-			startDTS: dts,
-		}
-		timeConv.initialize()
+	if isLeadingTrack {
+		p.leadingTrackFound = true
+	}
 
-		p.client.setLeadingTimeConv(timeConv)
+	if p.timeConv == nil {
+		if isLeadingTrack {
+			err := p.initializeTimeConv(errGroupCtx, rawDTS)
+			if err != nil {
+				return err
+			}
+
+			err = p.processSample2(errGroupCtx, isLeadingTrack, trackProc, rawPTS, rawDTS, data)
+			if err != nil {
+				return err
+			}
+
+			for _, call := range p.queuedSamples {
+				err = call()
+				if err != nil {
+					return err
+				}
+			}
+			p.queuedSamples = nil
+
+			return nil
+		}
+
+		if len(p.queuedSamples) >= clientMaxMPEGTSQueuedSamples {
+			return fmt.Errorf("too many queued samples")
+		}
+
+		p.queuedSamples = append(p.queuedSamples, func() error {
+			return p.processSample2(errGroupCtx, isLeadingTrack, trackProc, rawPTS, rawDTS, data)
+		})
+		return nil
+	}
+
+	return p.processSample2(errGroupCtx, isLeadingTrack, trackProc, rawPTS, rawDTS, data)
+}
+
+func (p *clientStreamProcessorMPEGTS) processSample2(
+	errGroupCtx context.Context,
+	isLeadingTrack bool,
+	trackProc *clientTrackProcessorMPEGTS,
+	rawPTS int64,
+	rawDTS int64,
+	data [][]byte,
+) error {
+	pts := p.timeConv.convert(rawPTS)
+	dts := p.timeConv.convert(rawDTS)
+
+	if !p.dateTimeProcessed && p.isLeading && isLeadingTrack {
+		p.dateTimeProcessed = true
+
+		if p.curSegment.dateTime != nil {
+			p.timeConv.setNTP(*p.curSegment.dateTime, dts)
+		}
+		p.timeConv.setLeadingNTPReceived()
+	}
+
+	ntp := p.timeConv.getNTP(errGroupCtx, dts)
+
+	return trackProc.push(errGroupCtx, &procEntryMPEGTS{
+		pts:  pts,
+		dts:  dts,
+		ntp:  ntp,
+		data: data,
+	})
+}
+
+func (p *clientStreamProcessorMPEGTS) initializeTrackProcessors(errGroupCtx context.Context) error {
+	p.trackProcessors = make(map[*Track]*clientTrackProcessorMPEGTS)
+
+	for _, track := range p.streamTracks {
+		trackProc := &clientTrackProcessorMPEGTS{
+			track:           track,
+			streamProcessor: p,
+		}
+		trackProc.initialize()
+
+		p.errGroup.Go(func() error {
+			return trackProc.run(errGroupCtx)
+		})
+
+		p.trackProcessors[track.track] = trackProc
+	}
+
+	return nil
+}
+
+func (p *clientStreamProcessorMPEGTS) initializeTimeConv(errGroupCtx context.Context, startDTS int64) error {
+	if p.isLeading {
+		p.timeConv = &clientTimeConvMPEGTS{
+			startDTS: startDTS,
+		}
+		p.timeConv.initialize()
+
+		p.client.setTimeConv(p.timeConv)
 	} else {
-		ok := p.client.waitLeadingTimeConv(ctx)
+		tmp, ok := p.client.waitTimeConv(errGroupCtx)
 		if !ok {
 			return fmt.Errorf("terminated")
 		}
 
-		_, ok = p.client.getLeadingTimeConv().(*clientTimeConvMPEGTS)
+		p.timeConv, ok = tmp.(*clientTimeConvMPEGTS)
 		if !ok {
 			return fmt.Errorf("stream playlists are mixed MPEGTS/FMP4")
 		}
-	}
-
-	p.trackProcessors = make(map[*Track]*clientTrackProcessorMPEGTS)
-
-	for _, track := range p.clientStreamTracks {
-		proc := &clientTrackProcessorMPEGTS{
-			track:           track,
-			streamProcessor: p,
-		}
-		proc.initialize()
-		p.rp.add(proc)
-		p.trackProcessors[track.track] = proc
 	}
 
 	return nil

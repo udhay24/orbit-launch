@@ -47,11 +47,18 @@ var (
 	h264DefaultPPS = []byte{0x08, 0x06, 0x07, 0x08}
 )
 
-func generateHvcC(vps, sps, pps []byte) *mp4.HvcC {
+func boolToUint8(v bool) uint8 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func generateHvcC(vps, sps, pps []byte) (*mp4.HvcC, error) {
 	var psps h265.SPS
 	err := psps.Unmarshal(sps)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	return &mp4.HvcC{
@@ -75,8 +82,8 @@ func generateHvcC(vps, sps, pps []byte) *mp4.HvcC {
 		BitDepthChromaMinus8: uint8(psps.BitDepthChromaMinus8),
 		// AvgFrameRate
 		// ConstantFrameRate
-		NumTemporalLayers: 1,
-		// TemporalIdNested
+		NumTemporalLayers:  (psps.MaxSubLayersMinus1 + 1),
+		TemporalIdNested:   boolToUint8(psps.TemporalIDNestingFlag),
 		LengthSizeMinusOne: 3,
 		NumOfNaluArrays:    3,
 		NaluArrays: []mp4.HEVCNaluArray{
@@ -105,14 +112,14 @@ func generateHvcC(vps, sps, pps []byte) *mp4.HvcC {
 				}},
 			},
 		},
-	}
+	}, nil
 }
 
-func generateAvcC(sps, pps []byte) *mp4.AVCDecoderConfiguration {
+func generateAvcC(sps, pps []byte) (*mp4.AVCDecoderConfiguration, error) {
 	var psps h264.SPS
 	err := psps.Unmarshal(sps)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 
 	return &mp4.AVCDecoderConfiguration{ // <avcc/>
@@ -140,7 +147,7 @@ func generateAvcC(sps, pps []byte) *mp4.AVCDecoderConfiguration {
 				NALUnit: pps,
 			},
 		},
-	}
+	}, nil
 }
 
 func audioRateRTMPToInt(v message.AudioRate) int {
@@ -182,16 +189,35 @@ type Writer struct {
 
 	videoTrackToID map[*Track]uint8
 	audioTrackToID map[*Track]uint8
+	readerDone     chan struct{}
+	readerErr      error
 }
 
 // Initialize initializes Writer.
 func (w *Writer) Initialize() error {
+	if sc, ok := w.Conn.(*ServerConn); ok && !sc.actionAccepted {
+		err := sc.AcceptAction()
+		if err != nil {
+			return err
+		}
+	}
+
 	err := w.writeTracks()
 	if err != nil {
 		return err
 	}
 
+	// Drain incoming data until the connection returns a read error.
+	w.readerDone = make(chan struct{})
+	go w.reader()
+
 	return nil
+}
+
+// Wait waits until reading from the connection fails and returns the read error.
+func (w *Writer) Wait() error {
+	<-w.readerDone
+	return w.readerErr
 }
 
 func (w *Writer) writeTracks() error {
@@ -241,11 +267,11 @@ func (w *Writer) writeTracks() error {
 	}
 
 	if len(videoTracks) > 1 {
-		var val amf0.Object
+		val := make(amf0.Object, len(videoTracks)-1)
 
-		for id, track := range videoTracks[1:] {
-			val = append(val, amf0.ObjectEntry{
-				Key: strconv.FormatInt(int64(id+2), 10),
+		for i, track := range videoTracks[1:] {
+			val[i] = amf0.ObjectEntry{
+				Key: strconv.FormatInt(int64(i+2), 10),
 				Value: amf0.Object{
 					{
 						Key:   "videocodecid",
@@ -256,7 +282,7 @@ func (w *Writer) writeTracks() error {
 						Value: float64(0),
 					},
 				},
-			})
+			}
 		}
 
 		metadata = append(metadata, amf0.ObjectEntry{
@@ -266,11 +292,11 @@ func (w *Writer) writeTracks() error {
 	}
 
 	if len(audioTracks) > 1 {
-		var val amf0.Object
+		val := make(amf0.Object, len(audioTracks)-1)
 
-		for id, track := range audioTracks[1:] {
-			val = append(val, amf0.ObjectEntry{
-				Key: strconv.FormatInt(int64(id+2), 10),
+		for i, track := range audioTracks[1:] {
+			val[i] = amf0.ObjectEntry{
+				Key: strconv.FormatInt(int64(i+2), 10),
 				Value: amf0.Object{
 					{
 						Key:   "audiocodecid",
@@ -281,7 +307,7 @@ func (w *Writer) writeTracks() error {
 						Value: float64(0),
 					},
 				},
-			})
+			}
 		}
 
 		metadata = append(metadata, amf0.ObjectEntry{
@@ -375,11 +401,17 @@ func (w *Writer) writeTracks() error {
 				pps = h265DefaultPPS
 			}
 
+			var hvcc *mp4.HvcC
+			hvcc, err = generateHvcC(vps, sps, pps)
+			if err != nil {
+				return err
+			}
+
 			var msg message.Message = &message.VideoExSequenceStart{
 				ChunkStreamID:   message.VideoChunkStreamID,
 				MessageStreamID: 0x1000000,
 				FourCC:          message.FourCCHEVC,
-				HEVCConfig:      generateHvcC(vps, sps, pps),
+				HEVCConfig:      hvcc,
 			}
 
 			if id != 0 {
@@ -402,14 +434,20 @@ func (w *Writer) writeTracks() error {
 				pps = h264DefaultPPS
 			}
 
+			var avcc *mp4.AVCDecoderConfiguration
+			avcc, err = generateAvcC(sps, pps)
+			if err != nil {
+				return err
+			}
+
 			if id == 0 {
 				err = w.Conn.Write(&message.Video{
 					ChunkStreamID:   message.VideoChunkStreamID,
 					MessageStreamID: 0x1000000,
 					Codec:           message.CodecH264,
-					IsKeyFrame:      true,
-					Type:            message.VideoTypeConfig,
-					AVCConfig:       generateAvcC(sps, pps),
+					FrameType:       message.VideoFrameTypeKeyFrame,
+					PacketType:      message.VideoPacketTypeConfig,
+					AVCConfig:       avcc,
 				})
 				if err != nil {
 					return err
@@ -422,7 +460,7 @@ func (w *Writer) writeTracks() error {
 						ChunkStreamID:   message.VideoChunkStreamID,
 						MessageStreamID: 0x1000000,
 						FourCC:          message.FourCCAVC,
-						AVCConfig:       generateAvcC(sps, pps),
+						AVCConfig:       avcc,
 					},
 				})
 				if err != nil {
@@ -439,11 +477,28 @@ func (w *Writer) writeTracks() error {
 				ChunkStreamID:   message.AudioChunkStreamID,
 				MessageStreamID: 0x1000000,
 				FourCC:          message.FourCCOpus,
-				OpusConfig: &message.OpusIDHeader{
-					Version:      0x1,
-					ChannelCount: uint8(codec.ChannelCount),
-					PreSkip:      3840,
-				},
+				OpusConfig:      codec.IDHeader,
+			}
+
+			if id != 0 {
+				msg = &message.AudioExMultitrack{
+					MultitrackType: 0x0,
+					TrackID:        uint8(id),
+					Wrapped:        msg,
+				}
+			}
+
+			err = w.Conn.Write(msg)
+			if err != nil {
+				return err
+			}
+
+		case *codecs.FLAC:
+			var msg message.Message = &message.AudioExSequenceStart{
+				ChunkStreamID:   message.AudioChunkStreamID,
+				MessageStreamID: 0x1000000,
+				FourCC:          message.FourCCFLAC,
+				FlacConfig:      codec.StreamInfo,
 			}
 
 			if id != 0 {
@@ -530,6 +585,17 @@ func (w *Writer) writeTracks() error {
 	}
 
 	return nil
+}
+
+func (w *Writer) reader() {
+	for {
+		_, err := w.Conn.Read()
+		if err != nil {
+			w.readerErr = err
+			close(w.readerDone)
+			return
+		}
+	}
 }
 
 // WriteAV1 writes a AV1 temporal unit.
@@ -637,12 +703,17 @@ func (w *Writer) WriteH264(track *Track, pts time.Duration, dts time.Duration, a
 	id := w.videoTrackToID[track]
 
 	if id == 0 {
+		frameType := message.VideoFrameTypeInterFrame
+		if h264.IsRandomAccess(au) {
+			frameType = message.VideoFrameTypeKeyFrame
+		}
+
 		return w.Conn.Write(&message.Video{
 			ChunkStreamID:   message.VideoChunkStreamID,
 			MessageStreamID: 0x1000000,
 			Codec:           message.CodecH264,
-			IsKeyFrame:      h264.IsRandomAccess(au),
-			Type:            message.VideoTypeAU,
+			FrameType:       frameType,
+			PacketType:      message.VideoPacketTypeAU,
 			AU:              avcc,
 			DTS:             dts,
 			PTSDelta:        pts - dts,
@@ -685,6 +756,29 @@ func (w *Writer) WriteOpus(track *Track, pts time.Duration, pkt []byte) error {
 		DTS:             pts,
 		FourCC:          message.FourCCOpus,
 		Payload:         pkt,
+	}
+
+	id := w.audioTrackToID[track]
+
+	if id != 0 {
+		msg = &message.AudioExMultitrack{
+			MultitrackType: 0x0,
+			TrackID:        id,
+			Wrapped:        msg,
+		}
+	}
+
+	return w.Conn.Write(msg)
+}
+
+// WriteFLAC writes a FLAC frame.
+func (w *Writer) WriteFLAC(track *Track, pts time.Duration, frame []byte) error {
+	var msg message.Message = &message.AudioExCodedFrames{
+		ChunkStreamID:   message.AudioChunkStreamID,
+		MessageStreamID: 0x1000000,
+		FourCC:          message.FourCCFLAC,
+		Payload:         frame,
+		DTS:             pts,
 	}
 
 	id := w.audioTrackToID[track]
@@ -829,10 +923,6 @@ func (w *Writer) WriteLPCM(track *Track, pts time.Duration, samples []byte) erro
 	rate, _ := audioRateIntToRTMP(codec.SampleRate)
 
 	le := len(samples)
-	if le%2 != 0 {
-		return fmt.Errorf("invalid payload length: %d", le)
-	}
-
 	samplesCopy := append([]byte(nil), samples...)
 
 	// convert from big endian to little endian

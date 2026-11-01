@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2023 The Pion community <https://pion.ly>
+// SPDX-FileCopyrightText: 2026 The Pion community <https://pion.ly>
 // SPDX-License-Identifier: MIT
 
 package srtp
@@ -10,6 +10,7 @@ import (
 
 	"github.com/pion/logging"
 	"github.com/pion/rtp"
+	"github.com/pion/transport/v5/packetio"
 )
 
 const defaultSessionSRTPReplayProtectionWindow = 64
@@ -21,6 +22,10 @@ const defaultSessionSRTPReplayProtectionWindow = 64
 type SessionSRTP struct {
 	session
 	writeStream *WriteStreamSRTP
+
+	// readHeader is reused by decrypt across packets to avoid a per-packet
+	// allocation and must only be used on the session read loop.
+	readHeader rtp.Header
 }
 
 // NewSessionSRTP creates a SRTP session using conn as the underlying transport.
@@ -134,7 +139,9 @@ func (s *SessionSRTP) write(b []byte) (int, error) {
 // get expanded by growBuffer.
 var bufferpool = sync.Pool{ // nolint:gochecknoglobals
 	New: func() any {
-		return make([]byte, 1492)
+		buf := make([]byte, 1492)
+
+		return &buf
 	},
 }
 
@@ -147,10 +154,13 @@ func (s *SessionSRTP) writeRTP(header *rtp.Header, payload []byte) (int, error) 
 	// small, allocate a new buffer itself.  In either case, it is
 	// safe to put the buffer back into the pool, but only after
 	// nextConn.Write has returned.
-	ibuf := bufferpool.Get()
-	defer bufferpool.Put(ibuf)
+	pbuf, ok := bufferpool.Get().(*[]byte)
+	if !ok {
+		return 0, errStartedChannelUsedIncorrectly
+	}
+	defer bufferpool.Put(pbuf)
 
-	buf := ibuf.([]byte)                                                      // nolint:forcetypeassert
+	buf := *pbuf
 	headerLen, marshalSize := rtp.HeaderAndPacketMarshalSize(header, payload) // nolint:staticcheck
 	if len(buf) < marshalSize+20 {
 		// The buffer is too small, so we need to allocate a new one. Add 20 bytes for auth tag like
@@ -177,10 +187,35 @@ func (s *SessionSRTP) setWriteDeadline(t time.Time) error {
 	return s.session.nextConn.SetWriteDeadline(t)
 }
 
-func (s *SessionSRTP) decrypt(buf []byte) error {
-	header := &rtp.Header{}
+func (s *SessionSRTP) decrypt(buf []byte, attrs packetio.Attributes) error {
+	header := &s.readHeader
+
+	// Save the CSRC and extension slices in case the packet fails to decrypt
+	// or authenticate; if the packet doesn't authenticate, then restore the
+	// old slices to prevent an attacker from growing the memory footprint.
+	oldCSRC := header.CSRC
+	oldExtensions := header.Extensions
+
 	headerLen, err := header.Unmarshal(buf)
 	if err != nil {
+		header.CSRC = oldCSRC
+		header.Extensions = oldExtensions
+
+		return err
+	}
+
+	// Decrypt and authenticate the packet before using the SSRC from the header.
+	// The SSRC field is part of the unauthenticated RTP header, so it must not be
+	// used to allocate per-SSRC state (stream, replay detector, etc.) until after
+	// the auth tag has been verified. Doing so before authentication would allow an
+	// unauthenticated peer to exhaust memory by spoofing arbitrary SSRCs.
+	s.session.remoteContextMutex.Lock()
+	decrypted, err := s.remoteContext.decryptRTP(buf, buf, header, headerLen)
+	s.session.remoteContextMutex.Unlock()
+	if err != nil {
+		header.CSRC = oldCSRC
+		header.Extensions = oldExtensions
+
 		return err
 	}
 
@@ -199,15 +234,38 @@ func (s *SessionSRTP) decrypt(buf []byte) error {
 		return errFailedTypeAssertion
 	}
 
-	decrypted, err := s.remoteContext.decryptRTP(buf, buf, header, headerLen)
-	if err != nil {
+	return readStream.write(decrypted, attrs)
+}
+
+// UpdateOptions applies opts to both the local and remote Context. Unlike Context.UpdateOptions,
+// this is safe to call concurrently with WriteRTP and with the session's read loop.
+func (s *SessionSRTP) UpdateOptions(opts ...ContextOption) error {
+	if err := s.UpdateLocalOptions(opts...); err != nil {
 		return err
 	}
 
-	_, err = readStream.write(decrypted)
-	if err != nil {
-		return err
-	}
+	return s.UpdateRemoteOptions(opts...)
+}
 
-	return nil
+// UpdateLocalOptions applies opts to the local (encrypting) Context only. Unlike
+// Context.UpdateOptions, this is safe to call concurrently with WriteRTP.
+func (s *SessionSRTP) UpdateLocalOptions(opts ...ContextOption) error {
+	s.session.localContextMutex.Lock()
+	defer s.session.localContextMutex.Unlock()
+
+	return s.localContext.UpdateOptions(opts...)
+}
+
+// UpdateRemoteOptions applies opts to the remote (decrypting) Context only. Unlike
+// Context.UpdateOptions, this is safe to call concurrently with the session's read loop.
+func (s *SessionSRTP) UpdateRemoteOptions(opts ...ContextOption) error {
+	s.session.remoteContextMutex.Lock()
+	defer s.session.remoteContextMutex.Unlock()
+
+	return s.remoteContext.UpdateOptions(opts...)
+}
+
+// UpdateKey resets packet state with fresh keys.
+func (s *SessionSRTP) UpdateKey(keys SessionKeys, profile ProtectionProfile) error {
+	return s.session.updateKey(keys, profile)
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,11 +14,13 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/bluenviron/mediamtx/internal/api"
 	"github.com/bluenviron/mediamtx/internal/auth"
@@ -28,14 +31,17 @@ import (
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
 	"github.com/bluenviron/mediamtx/internal/pprof"
+	"github.com/bluenviron/mediamtx/internal/publishallowlist"
 	"github.com/bluenviron/mediamtx/internal/recordcleaner"
 	"github.com/bluenviron/mediamtx/internal/rlimit"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
+	"github.com/bluenviron/mediamtx/internal/servers/moq"
 	"github.com/bluenviron/mediamtx/internal/servers/rtmp"
 	"github.com/bluenviron/mediamtx/internal/servers/rtsp"
 	"github.com/bluenviron/mediamtx/internal/servers/srt"
 	"github.com/bluenviron/mediamtx/internal/servers/webrtc"
 	"github.com/bluenviron/mediamtx/internal/streamregistry"
+	"github.com/bluenviron/mediamtx/internal/upgrade"
 )
 
 //go:generate go run ./versiongetter
@@ -54,6 +60,55 @@ var defaultConfPathsNotWin = []string{
 	"/usr/local/etc/mediamtx.yml",
 	"/usr/etc/mediamtx.yml",
 	"/etc/mediamtx/mediamtx.yml",
+}
+
+func currentDefaultConfPaths() []string {
+	paths := append([]string(nil), defaultConfPaths...)
+	if runtime.GOOS != "windows" {
+		paths = append(paths, defaultConfPathsNotWin...)
+	}
+	return paths
+}
+
+func formatConfPaths(paths []string) []string {
+	list := make([]string, len(paths))
+	for i, pa := range paths {
+		a, _ := filepath.Abs(pa)
+		list[i] = a
+	}
+	return list
+}
+
+func newTempLogger() (*logger.Logger, error) {
+	l := &logger.Logger{
+		Level:        logger.Warn,
+		Destinations: []logger.Destination{logger.DestinationStdout},
+		Structured:   false,
+		File:         "",
+		SysLogPrefix: "",
+	}
+	return l, l.Initialize()
+}
+
+func validateConf(confPath string) bool {
+	fmt.Printf("configuration file: %s\n", confPath)
+
+	tempLogger, err := newTempLogger()
+	if err != nil {
+		fmt.Printf("ERR: %v\n", err)
+		return false
+	}
+	defer tempLogger.Close()
+
+	_, _, err = conf.Load(confPath, nil, tempLogger)
+	if err != nil {
+		fmt.Printf("ERR: %v\n", err)
+		return false
+	}
+
+	fmt.Printf("configuration file is valid\n")
+
+	return true
 }
 
 func goArm() string {
@@ -97,39 +152,95 @@ func getRTPMaxPayloadSize(udpMaxPayloadSize int, rtspEncryption conf.Encryption)
 	return v
 }
 
+func supportsIPv6() bool {
+	ln, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: 0})
+	if err != nil {
+		return false
+	}
+	defer ln.Close() //nolint:errcheck
+
+	return true
+}
+
+// matchInternalUserIDs returns the IDs of newUsers. Users are matched by
+// configuration and not by position, therefore a user that is unchanged,
+// added, removed or moved keeps its ID, and only new users get a new one.
+func matchInternalUserIDs(
+	oldUsers []conf.AuthInternalUser,
+	oldIDs []uuid.UUID,
+	newUsers []conf.AuthInternalUser,
+) []uuid.UUID {
+	reused := make([]bool, len(oldUsers))
+	ids := make([]uuid.UUID, len(newUsers))
+
+	for i, user := range newUsers {
+		for j, old := range oldUsers {
+			if !reused[j] && j < len(oldIDs) && reflect.DeepEqual(old, user) {
+				reused[j] = true
+				ids[i] = oldIDs[j]
+				break
+			}
+		}
+
+		if ids[i] == uuid.Nil {
+			ids[i] = uuid.New()
+		}
+	}
+
+	return ids
+}
+
 var cli struct {
-	Confpath string `arg:"" default:""`
-	Version  bool   `help:"print version"`
-	Upgrade  bool   `help:"upgrade executable to the latest version"`
+	Confpath     string `arg:"" default:""`
+	Version      bool   `help:"print version"`
+	CheckVersion bool   `help:"check whether a new version is available"`
+	Upgrade      bool   `help:"upgrade executable to the latest version"`
+	ValidateConf string `help:"check whether a configuration file is valid" placeholder:"path"`
 }
 
 // Core is an instance of MediaMTX.
 type Core struct {
-	ctx             context.Context
-	ctxCancel       func()
-	confPath        string
+	ctx              context.Context
+	ctxCancel        func()
+	confPath         string
+	supportsIPv6     bool
+	logger           *logger.Logger
+	externalCmdPool  *externalcmd.Pool
+	authManager      *auth.Manager
+	metrics          *metrics.Metrics
+	pprof            *pprof.PPROF
+	recordCleaner    *recordcleaner.Cleaner
+	playbackServer   *playback.Server
+	pathManager      *pathManager
+	rtspServer       *rtsp.Server
+	rtspsServer      *rtsp.Server
+	rtmpServer       *rtmp.Server
+	rtmpsServer      *rtmp.Server
+	hlsServer        *hls.Server
+	webRTCServer     *webrtc.Server
+	srtServer        *srt.Server
+	streamRegistry   *streamregistry.Registry
+	publishAllowlist *publishallowlist.Allowlist
+	moqServer        *moq.Server
+	api              *api.API
+	confWatcher      *confwatcher.ConfWatcher
+
+	confMutex       sync.RWMutex
 	conf            *conf.Conf
-	logger          *logger.Logger
-	externalCmdPool *externalcmd.Pool
-	authManager     *auth.Manager
-	metrics         *metrics.Metrics
-	pprof           *pprof.PPROF
-	recordCleaner   *recordcleaner.Cleaner
-	playbackServer  *playback.Server
-	pathManager     *pathManager
-	rtspServer      *rtsp.Server
-	rtspsServer     *rtsp.Server
-	rtmpServer      *rtmp.Server
-	rtmpsServer     *rtmp.Server
-	hlsServer       *hls.Server
-	webRTCServer    *webrtc.Server
-	srtServer       *srt.Server
-	streamRegistry  *streamregistry.Registry
-	api             *api.API
-	confWatcher     *confwatcher.ConfWatcher
+	internalUserIDs []uuid.UUID
 
 	// in
-	chAPIConfigSet chan *conf.Conf
+	chFatalError                   chan struct{}
+	chAPIConfigGlobalPatch         chan configGlobalPatchReq
+	chAPIConfigPathDefaultsPatch   chan configPathDefaultsPatchReq
+	chAPIConfigPathAdd             chan configPathAddReq
+	chAPIConfigPathPatch           chan configPathPatchReq
+	chAPIConfigPathReplace         chan configPathReplaceReq
+	chAPIConfigPathDelete          chan configPathDeleteReq
+	chAPIConfigInternalUserAdd     chan configInternalUserReq
+	chAPIConfigInternalUserPatch   chan configInternalUserReq
+	chAPIConfigInternalUserReplace chan configInternalUserReq
+	chAPIConfigInternalUserDelete  chan configInternalUserReq
 
 	// out
 	done chan struct{}
@@ -156,15 +267,54 @@ func New(args []string) (*Core, bool) {
 	_, err = parser.Parse(args)
 	parser.FatalIfErrorf(err)
 
+	oneShotCount := 0
+	if cli.Version {
+		oneShotCount++
+	}
+	if cli.CheckVersion {
+		oneShotCount++
+	}
+	if cli.Upgrade {
+		oneShotCount++
+	}
+	if cli.ValidateConf != "" {
+		oneShotCount++
+	}
+	if oneShotCount > 1 {
+		fmt.Printf("ERR: %v\n", "only one of --version, --check-version, --upgrade and --validate-conf can be used at a time")
+		return nil, false
+	}
+
 	if cli.Version {
 		fmt.Println(string(version))
 		os.Exit(0)
 	}
 
-	if cli.Upgrade {
-		err = upgrade() //nolint:staticcheck
-		if err != nil { //nolint:staticcheck
+	if cli.CheckVersion {
+		var newVersionAvailable bool
+		newVersionAvailable, err = upgrade.CheckVersion(string(version), getArch())
+		if err != nil {
 			fmt.Printf("ERR: %v\n", err)
+			os.Exit(1)
+		}
+		if newVersionAvailable {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	if cli.Upgrade {
+		err = upgrade.Upgrade(string(version), getArch())
+		if err != nil {
+			fmt.Printf("ERR: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
+	if cli.ValidateConf != "" {
+		ok := validateConf(cli.ValidateConf)
+		if !ok {
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -173,31 +323,40 @@ func New(args []string) (*Core, bool) {
 	ctx, ctxCancel := context.WithCancel(context.Background())
 
 	p := &Core{
-		ctx:            ctx,
-		ctxCancel:      ctxCancel,
-		chAPIConfigSet: make(chan *conf.Conf),
-		done:           make(chan struct{}),
+		ctx:                            ctx,
+		ctxCancel:                      ctxCancel,
+		chFatalError:                   make(chan struct{}),
+		chAPIConfigGlobalPatch:         make(chan configGlobalPatchReq),
+		chAPIConfigPathDefaultsPatch:   make(chan configPathDefaultsPatchReq),
+		chAPIConfigPathAdd:             make(chan configPathAddReq),
+		chAPIConfigPathPatch:           make(chan configPathPatchReq),
+		chAPIConfigPathReplace:         make(chan configPathReplaceReq),
+		chAPIConfigPathDelete:          make(chan configPathDeleteReq),
+		chAPIConfigInternalUserAdd:     make(chan configInternalUserReq),
+		chAPIConfigInternalUserPatch:   make(chan configInternalUserReq),
+		chAPIConfigInternalUserReplace: make(chan configInternalUserReq),
+		chAPIConfigInternalUserDelete:  make(chan configInternalUserReq),
+		done:                           make(chan struct{}),
 	}
 
-	tempLogger := &logger.Logger{
-		Level:        logger.Warn,
-		Destinations: []logger.Destination{logger.DestinationStdout},
-		Structured:   false,
-		File:         "",
-		SysLogPrefix: "",
+	tempLogger, err := newTempLogger()
+	if err != nil {
+		fmt.Printf("ERR: %v\n", err)
+		return nil, false
 	}
-	tempLogger.Initialize() //nolint:errcheck
+	defer tempLogger.Close()
 
-	confPaths := append([]string(nil), defaultConfPaths...)
-	if runtime.GOOS != "windows" {
-		confPaths = append(confPaths, defaultConfPathsNotWin...)
-	}
+	confPaths := currentDefaultConfPaths()
 
-	p.conf, p.confPath, err = conf.Load(cli.Confpath, confPaths, tempLogger)
+	loadedConf, confPath, err := conf.Load(cli.Confpath, confPaths, tempLogger)
 	if err != nil {
 		fmt.Printf("ERR: %s\n", err)
 		return nil, false
 	}
+
+	p.confPath = confPath
+	p.conf = loadedConf
+	p.internalUserIDs = newInternalUserIDs(len(loadedConf.AuthInternalUsers))
 
 	err = p.createResources(true)
 	if err != nil {
@@ -206,7 +365,7 @@ func New(args []string) (*Core, bool) {
 		} else {
 			fmt.Printf("ERR: %s\n", err)
 		}
-		p.closeResources(nil, false)
+		p.closeResources(nil) //nolint:errcheck
 		return nil, false
 	}
 
@@ -250,6 +409,9 @@ func (p *Core) run() {
 outer:
 	for {
 		select {
+		case <-p.chFatalError:
+			break outer
+
 		case <-confChanged:
 			p.Log(logger.Info, "reloading configuration (file changed)")
 
@@ -259,20 +421,141 @@ outer:
 				break outer
 			}
 
-			err = p.reloadConf(newConf, false)
+			err = p.applyConf(newConf)
 			if err != nil {
 				p.Log(logger.Error, "%s", err)
 				break outer
 			}
 
-		case newConf := <-p.chAPIConfigSet:
-			p.Log(logger.Info, "reloading configuration (API request)")
+		case req := <-p.chAPIConfigGlobalPatch:
+			newConf, err := p.doAPIConfigGlobalPatch(req.conf)
 
-			err := p.reloadConf(newConf, true)
-			if err != nil {
-				p.Log(logger.Error, "%s", err)
+			// reply before reloading, since the reload might cause the API server to close.
+			req.res <- err
+
+			if err == nil {
+				err = p.applyConf(newConf)
+				if err != nil {
+					p.Log(logger.Error, "%s", err)
+					break outer
+				}
+			}
+
+		case req := <-p.chAPIConfigPathDefaultsPatch:
+			newConf, err := p.doAPIConfigPathDefaultsPatch(req.conf)
+
+			var fatalErr error
+			if err == nil {
+				fatalErr = p.applyConf(newConf)
+				err = fatalErr
+			}
+
+			req.res <- err
+
+			if fatalErr != nil {
+				p.Log(logger.Error, "%s", fatalErr)
 				break outer
 			}
+
+		case req := <-p.chAPIConfigPathAdd:
+			newConf, err := p.doAPIConfigPathAdd(req.name, req.conf)
+
+			var fatalErr error
+			if err == nil {
+				fatalErr = p.applyConf(newConf)
+				err = fatalErr
+			}
+
+			req.res <- err
+
+			if fatalErr != nil {
+				p.Log(logger.Error, "%s", fatalErr)
+				break outer
+			}
+
+		case req := <-p.chAPIConfigPathPatch:
+			newConf, err := p.doAPIConfigPathPatch(req.name, req.conf)
+
+			var fatalErr error
+			if err == nil {
+				fatalErr = p.applyConf(newConf)
+				err = fatalErr
+			}
+
+			req.res <- err
+
+			if fatalErr != nil {
+				p.Log(logger.Error, "%s", fatalErr)
+				break outer
+			}
+
+		case req := <-p.chAPIConfigPathReplace:
+			newConf, err := p.doAPIConfigPathReplace(req.name, req.conf)
+
+			var fatalErr error
+			if err == nil {
+				fatalErr = p.applyConf(newConf)
+				err = fatalErr
+			}
+
+			req.res <- err
+
+			if fatalErr != nil {
+				p.Log(logger.Error, "%s", fatalErr)
+				break outer
+			}
+
+		case req := <-p.chAPIConfigPathDelete:
+			newConf, err := p.doAPIConfigPathDelete(req.name)
+
+			var fatalErr error
+			if err == nil {
+				fatalErr = p.applyConf(newConf)
+				err = fatalErr
+			}
+
+			req.res <- err
+
+			if fatalErr != nil {
+				p.Log(logger.Error, "%s", fatalErr)
+				break outer
+			}
+
+		case req := <-p.chAPIConfigInternalUserAdd:
+			newConf, newIDs, id, err := p.doAPIConfigInternalUserAdd(req)
+
+			if err == nil {
+				p.applyInternalUsers(newConf, newIDs)
+			}
+
+			req.res <- configInternalUserRes{id: id, err: err}
+
+		case req := <-p.chAPIConfigInternalUserPatch:
+			newConf, newIDs, id, err := p.doAPIConfigInternalUserPatch(req)
+
+			if err == nil {
+				p.applyInternalUsers(newConf, newIDs)
+			}
+
+			req.res <- configInternalUserRes{id: id, err: err}
+
+		case req := <-p.chAPIConfigInternalUserReplace:
+			newConf, newIDs, id, err := p.doAPIConfigInternalUserReplace(req)
+
+			if err == nil {
+				p.applyInternalUsers(newConf, newIDs)
+			}
+
+			req.res <- configInternalUserRes{id: id, err: err}
+
+		case req := <-p.chAPIConfigInternalUserDelete:
+			newConf, newIDs, id, err := p.doAPIConfigInternalUserDelete(req)
+
+			if err == nil {
+				p.applyInternalUsers(newConf, newIDs)
+			}
+
+			req.res <- configInternalUserRes{id: id, err: err}
 
 		case <-interrupt:
 			p.Log(logger.Info, "shutting down gracefully")
@@ -285,7 +568,16 @@ outer:
 
 	p.ctxCancel()
 
-	p.closeResources(nil, false)
+	p.closeResources(nil) //nolint:errcheck
+}
+
+// OnFatalError is called by servers.
+func (p *Core) OnFatalError(ctx context.Context, _ error) {
+	select {
+	case p.chFatalError <- struct{}{}:
+	case <-ctx.Done():
+	case <-p.ctx.Done():
+	}
 }
 
 func (p *Core) createResources(initial bool) error {
@@ -313,15 +605,9 @@ func (p *Core) createResources(initial bool) error {
 			a, _ := filepath.Abs(p.confPath)
 			p.Log(logger.Info, "configuration loaded from %s", a)
 		} else {
-			list := make([]string, len(defaultConfPaths))
-			for i, pa := range defaultConfPaths {
-				a, _ := filepath.Abs(pa)
-				list[i] = a
-			}
-
 			p.Log(logger.Warn,
 				"configuration file not found (looked in %s), using an empty configuration",
-				strings.Join(list, ", "))
+				strings.Join(formatConfPaths(currentDefaultConfPaths()), ", "))
 		}
 
 		// on Linux, try to raise the number of file descriptors that can be opened
@@ -330,6 +616,8 @@ func (p *Core) createResources(initial bool) error {
 
 		gin.SetMode(gin.ReleaseMode)
 
+		p.supportsIPv6 = supportsIPv6()
+
 		p.externalCmdPool = &externalcmd.Pool{}
 		p.externalCmdPool.Initialize()
 	}
@@ -337,7 +625,7 @@ func (p *Core) createResources(initial bool) error {
 	if p.authManager == nil {
 		p.authManager = &auth.Manager{
 			Method:             p.conf.AuthMethod,
-			InternalUsers:      p.conf.AuthInternalUsers,
+			InternalUsers:      p.conf.AuthInternalUsersComputed,
 			HTTPAddress:        p.conf.AuthHTTPAddress,
 			HTTPFingerprint:    p.conf.AuthHTTPFingerprint,
 			HTTPExclude:        p.conf.AuthHTTPExclude,
@@ -346,8 +634,12 @@ func (p *Core) createResources(initial bool) error {
 			JWTClaimKey:        p.conf.AuthJWTClaimKey,
 			JWTExclude:         p.conf.AuthJWTExclude,
 			JWTInHTTPQuery:     p.conf.AuthJWTInHTTPQuery,
+			JWTIssuer:          p.conf.AuthJWTIssuer,
+			JWTAudience:        p.conf.AuthJWTAudience,
 			ReadTimeout:        time.Duration(p.conf.ReadTimeout),
+			Parent:             p,
 		}
+		p.authManager.Initialize()
 	}
 
 	if p.conf.Metrics &&
@@ -426,8 +718,26 @@ func (p *Core) createResources(initial bool) error {
 		p.playbackServer = i
 	}
 
+	if p.conf.PublishAllowlist && p.publishAllowlist == nil {
+		p.publishAllowlist = &publishallowlist.Allowlist{
+			RedisAddress:  p.conf.PublishAllowlistAddress,
+			RedisPassword: p.conf.PublishAllowlistPassword,
+			RedisDB:       p.conf.PublishAllowlistDB,
+			Key:           p.conf.PublishAllowlistKey,
+			PathPrefix:    p.conf.PublishAllowlistPathPrefix,
+			FailOpen:      p.conf.PublishAllowlistFailOpen,
+			Parent:        p,
+		}
+		p.publishAllowlist.Initialize()
+	}
+
 	if p.pathManager == nil {
 		rtpMaxPayloadSize := getRTPMaxPayloadSize(p.conf.UDPMaxPayloadSize, p.conf.RTSPEncryption)
+
+		var allowlist pathManagerPublishAllowlist
+		if p.publishAllowlist != nil {
+			allowlist = p.publishAllowlist
+		}
 
 		p.pathManager = &pathManager{
 			logLevel:            p.conf.LogLevel,
@@ -437,13 +747,16 @@ func (p *Core) createResources(initial bool) error {
 			writeTimeout:        p.conf.WriteTimeout,
 			writeQueueSize:      p.conf.WriteQueueSize,
 			udpReadBufferSize:   p.conf.UDPReadBufferSize,
+			udpMaxPayloadSize:   p.conf.UDPMaxPayloadSize,
 			rtpMaxPayloadSize:   rtpMaxPayloadSize,
+			supportsIPv6:        p.supportsIPv6,
 			pathConfs:           p.conf.Paths,
 			authManager:         p.authManager,
 			externalCmdPool:     p.externalCmdPool,
 			metrics:             p.metrics,
 			maxPublishers:       p.conf.MaxPublishers,
 			publisherHysteresis: p.conf.PublisherHysteresis,
+			publishAllowlist:    allowlist,
 			parent:              p,
 		}
 		p.pathManager.initialize()
@@ -472,10 +785,11 @@ func (p *Core) createResources(initial bool) error {
 			MulticastIPRange:    p.conf.MulticastIPRange,
 			MulticastRTPPort:    p.conf.MulticastRTPPort,
 			MulticastRTCPPort:   p.conf.MulticastRTCPPort,
-			IsTLS:               false,
+			Encryption:          false,
 			ServerCert:          "",
 			ServerKey:           "",
 			RTSPAddress:         p.conf.RTSPAddress,
+			TrustedProxies:      p.conf.RTSPTrustedProxies,
 			Transports:          p.conf.RTSPTransports,
 			RunOnConnect:        p.conf.RunOnConnect,
 			RunOnConnectRestart: p.conf.RunOnConnectRestart,
@@ -515,10 +829,11 @@ func (p *Core) createResources(initial bool) error {
 			MulticastIPRange:    p.conf.MulticastIPRange,
 			MulticastRTPPort:    p.conf.MulticastSRTPPort,
 			MulticastRTCPPort:   p.conf.MulticastSRTCPPort,
-			IsTLS:               true,
+			Encryption:          true,
 			ServerCert:          p.conf.RTSPServerCert,
 			ServerKey:           p.conf.RTSPServerKey,
 			RTSPAddress:         p.conf.RTSPAddress,
+			TrustedProxies:      p.conf.RTSPTrustedProxies,
 			Transports:          p.conf.RTSPTransports,
 			RunOnConnect:        p.conf.RunOnConnect,
 			RunOnConnectRestart: p.conf.RunOnConnectRestart,
@@ -544,10 +859,11 @@ func (p *Core) createResources(initial bool) error {
 			DumpPackets:         p.conf.DumpPackets,
 			ReadTimeout:         p.conf.ReadTimeout,
 			WriteTimeout:        p.conf.WriteTimeout,
-			IsTLS:               false,
+			Encryption:          false,
 			ServerCert:          "",
 			ServerKey:           "",
 			RTSPAddress:         p.conf.RTSPAddress,
+			TrustedProxies:      p.conf.RTMPTrustedProxies,
 			RunOnConnect:        p.conf.RunOnConnect,
 			RunOnConnectRestart: p.conf.RunOnConnectRestart,
 			RunOnDisconnect:     p.conf.RunOnDisconnect,
@@ -571,11 +887,12 @@ func (p *Core) createResources(initial bool) error {
 			Address:             p.conf.RTMPSAddress,
 			ReadTimeout:         p.conf.ReadTimeout,
 			WriteTimeout:        p.conf.WriteTimeout,
-			IsTLS:               true,
+			Encryption:          true,
 			ServerCert:          p.conf.RTMPServerCert,
 			ServerKey:           p.conf.RTMPServerKey,
 			DumpPackets:         p.conf.DumpPackets,
 			RTSPAddress:         p.conf.RTSPAddress,
+			TrustedProxies:      p.conf.RTMPTrustedProxies,
 			RunOnConnect:        p.conf.RunOnConnect,
 			RunOnConnectRestart: p.conf.RunOnConnectRestart,
 			RunOnDisconnect:     p.conf.RunOnDisconnect,
@@ -608,9 +925,11 @@ func (p *Core) createResources(initial bool) error {
 			PartDuration:    p.conf.HLSPartDuration,
 			SegmentMaxSize:  p.conf.HLSSegmentMaxSize,
 			Directory:       p.conf.HLSDirectory,
+			CDNSecret:       p.conf.HLSCDNSecret,
 			ReadTimeout:     p.conf.ReadTimeout,
 			WriteTimeout:    p.conf.WriteTimeout,
 			MuxerCloseAfter: p.conf.HLSMuxerCloseAfter,
+			ExternalCmdPool: p.externalCmdPool,
 			Metrics:         p.metrics,
 			PathManager:     p.pathManager,
 			Parent:          p,
@@ -625,29 +944,31 @@ func (p *Core) createResources(initial bool) error {
 	if p.conf.WebRTC &&
 		p.webRTCServer == nil {
 		i := &webrtc.Server{
-			Address:               p.conf.WebRTCAddress,
-			DumpPackets:           p.conf.DumpPackets,
-			Encryption:            p.conf.WebRTCEncryption,
-			ServerKey:             p.conf.WebRTCServerKey,
-			ServerCert:            p.conf.WebRTCServerCert,
-			AllowOrigins:          p.conf.WebRTCAllowOrigins,
-			TrustedProxies:        p.conf.WebRTCTrustedProxies,
-			ReadTimeout:           p.conf.ReadTimeout,
-			WriteTimeout:          p.conf.WriteTimeout,
-			UDPReadBufferSize:     p.conf.UDPReadBufferSize,
-			LocalUDPAddress:       p.conf.WebRTCLocalUDPAddress,
-			LocalTCPAddress:       p.conf.WebRTCLocalTCPAddress,
-			IPsFromInterfaces:     p.conf.WebRTCIPsFromInterfaces,
-			IPsFromInterfacesList: p.conf.WebRTCIPsFromInterfacesList,
-			AdditionalHosts:       p.conf.WebRTCAdditionalHosts,
-			ICEServers:            p.conf.WebRTCICEServers2,
-			STUNGatherTimeout:     p.conf.WebRTCSTUNGatherTimeout,
-			HandshakeTimeout:      p.conf.WebRTCHandshakeTimeout,
-			TrackGatherTimeout:    p.conf.WebRTCTrackGatherTimeout,
-			ExternalCmdPool:       p.externalCmdPool,
-			Metrics:               p.metrics,
-			PathManager:           p.pathManager,
-			Parent:                p,
+			Address:                      p.conf.WebRTCAddress,
+			DumpPackets:                  p.conf.DumpPackets,
+			Encryption:                   p.conf.WebRTCEncryption,
+			ServerKey:                    p.conf.WebRTCServerKey,
+			ServerCert:                   p.conf.WebRTCServerCert,
+			AllowOrigins:                 p.conf.WebRTCAllowOrigins,
+			TrustedProxies:               p.conf.WebRTCTrustedProxies,
+			ReadTimeout:                  p.conf.ReadTimeout,
+			WriteTimeout:                 p.conf.WriteTimeout,
+			UDPReadBufferSize:            p.conf.UDPReadBufferSize,
+			LocalUDPAddress:              p.conf.WebRTCLocalUDPAddress,
+			LocalTCPAddress:              p.conf.WebRTCLocalTCPAddress,
+			SupportsIPv6:                 p.supportsIPv6,
+			IPsFromInterfaces:            p.conf.WebRTCIPsFromInterfaces,
+			IPsFromInterfacesList:        p.conf.WebRTCIPsFromInterfacesList,
+			IPsFromInterfacesExcludeList: p.conf.WebRTCIPsFromInterfacesExcludeList,
+			AdditionalHosts:              p.conf.WebRTCAdditionalHosts,
+			ICEServers:                   p.conf.WebRTCICEServers2Computed,
+			STUNGatherTimeout:            p.conf.WebRTCSTUNGatherTimeout,
+			HandshakeTimeout:             p.conf.WebRTCHandshakeTimeout,
+			TrackGatherTimeout:           p.conf.WebRTCTrackGatherTimeout,
+			ExternalCmdPool:              p.externalCmdPool,
+			Metrics:                      p.metrics,
+			PathManager:                  p.pathManager,
+			Parent:                       p,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -664,6 +985,7 @@ func (p *Core) createResources(initial bool) error {
 			ReadTimeout:         p.conf.ReadTimeout,
 			WriteTimeout:        p.conf.WriteTimeout,
 			UDPMaxPayloadSize:   p.conf.UDPMaxPayloadSize,
+			UDPReadBufferSize:   p.conf.UDPReadBufferSize,
 			RunOnConnect:        p.conf.RunOnConnect,
 			RunOnConnectRestart: p.conf.RunOnConnectRestart,
 			RunOnDisconnect:     p.conf.RunOnDisconnect,
@@ -702,6 +1024,30 @@ func (p *Core) createResources(initial bool) error {
 		p.streamRegistry = sr
 	}
 
+	if p.conf.MoQ &&
+		p.moqServer == nil {
+		i := &moq.Server{
+			HTTP2Address:      p.conf.MoQHTTP2Address,
+			HTTP3Address:      p.conf.MoQHTTP3Address,
+			QUICAddress:       p.conf.MoQQUICAddress,
+			ServerKey:         p.conf.MoQServerKey,
+			ServerCert:        p.conf.MoQServerCert,
+			AllowOrigins:      p.conf.MoQAllowOrigins,
+			TrustedProxies:    p.conf.MoQTrustedProxies,
+			UDPReadBufferSize: p.conf.UDPReadBufferSize,
+			ReadTimeout:       p.conf.ReadTimeout,
+			WriteTimeout:      p.conf.WriteTimeout,
+			PathManager:       p.pathManager,
+			Metrics:           p.metrics,
+			Parent:            p,
+		}
+		err = i.Initialize()
+		if err != nil {
+			return err
+		}
+		p.moqServer = i
+	}
+
 	if p.conf.API &&
 		p.api == nil {
 		i := &api.API{
@@ -716,7 +1062,6 @@ func (p *Core) createResources(initial bool) error {
 			TrustedProxies: p.conf.APITrustedProxies,
 			ReadTimeout:    p.conf.ReadTimeout,
 			WriteTimeout:   p.conf.WriteTimeout,
-			Conf:           p.conf,
 			AuthManager:    p.authManager,
 			PathManager:    p.pathManager,
 			RTSPServer:     p.rtspServer,
@@ -727,6 +1072,7 @@ func (p *Core) createResources(initial bool) error {
 			WebRTCServer:   p.webRTCServer,
 			SRTServer:      p.srtServer,
 			StreamRegistry: p.streamRegistry,
+			MoQServer:      p.moqServer,
 			Parent:         p,
 		}
 		err = i.Initialize()
@@ -748,13 +1094,24 @@ func (p *Core) createResources(initial bool) error {
 	return nil
 }
 
-func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
-	closeLogger := newConf == nil ||
-		newConf.LogLevel != p.conf.LogLevel ||
+func (p *Core) closeResources(newConf *conf.Conf) error {
+	// the logger cannot be closed unless Core is closing,
+	// because externalCmdPool is not closed unless Core is closing and that is using the logger.
+	if newConf != nil && (newConf.LogLevel != p.conf.LogLevel ||
 		!reflect.DeepEqual(newConf.LogDestinations, p.conf.LogDestinations) ||
 		newConf.LogFile != p.conf.LogFile ||
 		newConf.SysLogPrefix != p.conf.SysLogPrefix ||
-		newConf.LogStructured != p.conf.LogStructured
+		newConf.LogStructured != p.conf.LogStructured) {
+		p.logger.Level = logger.Level(newConf.LogLevel)
+		p.logger.Destinations = newConf.LogDestinations.ToDestinations()
+		p.logger.Structured = newConf.LogStructured
+		p.logger.File = newConf.LogFile
+		p.logger.SysLogPrefix = newConf.SysLogPrefix
+		err := p.logger.Reload()
+		if err != nil {
+			return err
+		}
+	}
 
 	closeAuthManager := newConf == nil ||
 		newConf.AuthMethod != p.conf.AuthMethod ||
@@ -765,10 +1122,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.AuthJWTJWKSFingerprint != p.conf.AuthJWTJWKSFingerprint ||
 		newConf.AuthJWTClaimKey != p.conf.AuthJWTClaimKey ||
 		!reflect.DeepEqual(newConf.AuthJWTExclude, p.conf.AuthJWTExclude) ||
-		newConf.AuthJWTInHTTPQuery != p.conf.AuthJWTInHTTPQuery ||
+		!reflect.DeepEqual(newConf.AuthJWTInHTTPQuery, p.conf.AuthJWTInHTTPQuery) ||
+		newConf.AuthJWTIssuer != p.conf.AuthJWTIssuer ||
+		newConf.AuthJWTAudience != p.conf.AuthJWTAudience ||
 		newConf.ReadTimeout != p.conf.ReadTimeout
-	if !closeAuthManager && !reflect.DeepEqual(newConf.AuthInternalUsers, p.conf.AuthInternalUsers) {
-		p.authManager.ReloadInternalUsers(newConf.AuthInternalUsers)
+	if !closeAuthManager && !reflect.DeepEqual(newConf.AuthInternalUsersComputed, p.conf.AuthInternalUsersComputed) {
+		p.authManager.ReloadInternalUsers(newConf.AuthInternalUsersComputed)
 	}
 
 	closeMetrics := newConf == nil ||
@@ -782,8 +1141,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
-		closeAuthManager ||
-		closeLogger
+		closeAuthManager
 
 	closePPROF := newConf == nil ||
 		newConf.PPROF != p.conf.PPROF ||
@@ -796,12 +1154,10 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
-		closeAuthManager ||
-		closeLogger
+		closeAuthManager
 
 	closeRecorderCleaner := newConf == nil ||
-		atLeastOneRecordDeleteAfter(newConf.Paths) != atLeastOneRecordDeleteAfter(p.conf.Paths) ||
-		closeLogger
+		atLeastOneRecordDeleteAfter(newConf.Paths) != atLeastOneRecordDeleteAfter(p.conf.Paths)
 	if !closeRecorderCleaner && p.recordCleaner != nil && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
 		p.recordCleaner.ReloadPathConfs(newConf.Paths)
 	}
@@ -817,11 +1173,19 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
-		closeAuthManager ||
-		closeLogger
+		closeAuthManager
 	if !closePlaybackServer && p.playbackServer != nil && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
 		p.playbackServer.ReloadPathConfs(newConf.Paths)
 	}
+
+	closePublishAllowlist := newConf == nil ||
+		newConf.PublishAllowlist != p.conf.PublishAllowlist ||
+		newConf.PublishAllowlistAddress != p.conf.PublishAllowlistAddress ||
+		newConf.PublishAllowlistPassword != p.conf.PublishAllowlistPassword ||
+		newConf.PublishAllowlistDB != p.conf.PublishAllowlistDB ||
+		newConf.PublishAllowlistKey != p.conf.PublishAllowlistKey ||
+		newConf.PublishAllowlistPathPrefix != p.conf.PublishAllowlistPathPrefix ||
+		newConf.PublishAllowlistFailOpen != p.conf.PublishAllowlistFailOpen
 
 	closePathManager := newConf == nil ||
 		newConf.LogLevel != p.conf.LogLevel ||
@@ -835,7 +1199,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.RTSPEncryption != p.conf.RTSPEncryption ||
 		closeMetrics ||
 		closeAuthManager ||
-		closeLogger
+		closePublishAllowlist
 	if !closePathManager && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
 		p.pathManager.ReloadPathConfs(newConf.Paths)
 	}
@@ -857,12 +1221,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.MulticastRTPPort != p.conf.MulticastRTPPort ||
 		newConf.MulticastRTCPPort != p.conf.MulticastRTCPPort ||
 		!reflect.DeepEqual(newConf.RTSPTransports, p.conf.RTSPTransports) ||
+		!reflect.DeepEqual(newConf.RTSPTrustedProxies, p.conf.RTSPTrustedProxies) ||
 		newConf.RunOnConnect != p.conf.RunOnConnect ||
 		newConf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
 		newConf.RunOnDisconnect != p.conf.RunOnDisconnect ||
 		closeMetrics ||
-		closePathManager ||
-		closeLogger
+		closePathManager
 
 	closeRTSPSServer := newConf == nil ||
 		newConf.RTSP != p.conf.RTSP ||
@@ -879,12 +1243,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.RTSPServerKey != p.conf.RTSPServerKey ||
 		newConf.RTSPAddress != p.conf.RTSPAddress ||
 		!reflect.DeepEqual(newConf.RTSPTransports, p.conf.RTSPTransports) ||
+		!reflect.DeepEqual(newConf.RTSPTrustedProxies, p.conf.RTSPTrustedProxies) ||
 		newConf.RunOnConnect != p.conf.RunOnConnect ||
 		newConf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
 		newConf.RunOnDisconnect != p.conf.RunOnDisconnect ||
 		closeMetrics ||
-		closePathManager ||
-		closeLogger
+		closePathManager
 
 	closeRTMPServer := newConf == nil ||
 		newConf.RTMP != p.conf.RTMP ||
@@ -894,12 +1258,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.RTSPAddress != p.conf.RTSPAddress ||
+		!reflect.DeepEqual(newConf.RTMPTrustedProxies, p.conf.RTMPTrustedProxies) ||
 		newConf.RunOnConnect != p.conf.RunOnConnect ||
 		newConf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
 		newConf.RunOnDisconnect != p.conf.RunOnDisconnect ||
 		closeMetrics ||
-		closePathManager ||
-		closeLogger
+		closePathManager
 
 	closeRTMPSServer := newConf == nil ||
 		newConf.RTMP != p.conf.RTMP ||
@@ -911,12 +1275,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.RTMPServerCert != p.conf.RTMPServerCert ||
 		newConf.RTMPServerKey != p.conf.RTMPServerKey ||
 		newConf.RTSPAddress != p.conf.RTSPAddress ||
+		!reflect.DeepEqual(newConf.RTMPTrustedProxies, p.conf.RTMPTrustedProxies) ||
 		newConf.RunOnConnect != p.conf.RunOnConnect ||
 		newConf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
 		newConf.RunOnDisconnect != p.conf.RunOnDisconnect ||
 		closeMetrics ||
-		closePathManager ||
-		closeLogger
+		closePathManager
 
 	closeHLSServer := newConf == nil ||
 		newConf.HLS != p.conf.HLS ||
@@ -936,10 +1300,10 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.HLSMuxerCloseAfter != p.conf.HLSMuxerCloseAfter ||
+		newConf.HLSCDNSecret != p.conf.HLSCDNSecret ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
 		closePathManager ||
-		closeMetrics ||
-		closeLogger
+		closeMetrics
 
 	closeWebRTCServer := newConf == nil ||
 		newConf.WebRTC != p.conf.WebRTC ||
@@ -955,16 +1319,16 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.WebRTCLocalUDPAddress != p.conf.WebRTCLocalUDPAddress ||
 		newConf.WebRTCLocalTCPAddress != p.conf.WebRTCLocalTCPAddress ||
 		newConf.WebRTCIPsFromInterfaces != p.conf.WebRTCIPsFromInterfaces ||
+		!reflect.DeepEqual(newConf.WebRTCIPsFromInterfacesExcludeList, p.conf.WebRTCIPsFromInterfacesExcludeList) ||
 		!reflect.DeepEqual(newConf.WebRTCIPsFromInterfacesList, p.conf.WebRTCIPsFromInterfacesList) ||
 		!reflect.DeepEqual(newConf.WebRTCAdditionalHosts, p.conf.WebRTCAdditionalHosts) ||
-		!reflect.DeepEqual(newConf.WebRTCICEServers2, p.conf.WebRTCICEServers2) ||
+		!reflect.DeepEqual(newConf.WebRTCICEServers2Computed, p.conf.WebRTCICEServers2Computed) ||
 		newConf.WebRTCSTUNGatherTimeout != p.conf.WebRTCSTUNGatherTimeout ||
 		newConf.WebRTCHandshakeTimeout != p.conf.WebRTCHandshakeTimeout ||
 		newConf.WebRTCTrackGatherTimeout != p.conf.WebRTCTrackGatherTimeout ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
 		closeMetrics ||
-		closePathManager ||
-		closeLogger
+		closePathManager
 
 	closeSRTServer := newConf == nil ||
 		newConf.SRT != p.conf.SRT ||
@@ -976,8 +1340,23 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.RunOnConnect != p.conf.RunOnConnect ||
 		newConf.RunOnConnectRestart != p.conf.RunOnConnectRestart ||
 		newConf.RunOnDisconnect != p.conf.RunOnDisconnect ||
-		closePathManager ||
-		closeLogger
+		closeMetrics ||
+		closePathManager
+
+	closeMoQServer := newConf == nil ||
+		newConf.MoQ != p.conf.MoQ ||
+		newConf.MoQHTTP2Address != p.conf.MoQHTTP2Address ||
+		newConf.MoQHTTP3Address != p.conf.MoQHTTP3Address ||
+		newConf.MoQQUICAddress != p.conf.MoQQUICAddress ||
+		newConf.MoQServerKey != p.conf.MoQServerKey ||
+		newConf.MoQServerCert != p.conf.MoQServerCert ||
+		!slices.Equal(newConf.MoQAllowOrigins, p.conf.MoQAllowOrigins) ||
+		!reflect.DeepEqual(newConf.MoQTrustedProxies, p.conf.MoQTrustedProxies) ||
+		newConf.UDPReadBufferSize != p.conf.UDPReadBufferSize ||
+		newConf.ReadTimeout != p.conf.ReadTimeout ||
+		newConf.WriteTimeout != p.conf.WriteTimeout ||
+		closeMetrics ||
+		closePathManager
 
 	closeStreamRegistry := newConf == nil ||
 		newConf.StreamRegistry != p.conf.StreamRegistry ||
@@ -986,8 +1365,7 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		newConf.StreamRegistryDB != p.conf.StreamRegistryDB ||
 		newConf.StreamRegistryServerID != p.conf.StreamRegistryServerID ||
 		newConf.StreamRegistryTTL != p.conf.StreamRegistryTTL ||
-		closePathManager ||
-		closeLogger
+		closePathManager
 
 	closeAPI := newConf == nil ||
 		newConf.API != p.conf.API ||
@@ -1005,11 +1383,12 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		closeRTSPServer ||
 		closeRTSPSServer ||
 		closeRTMPServer ||
+		closeRTMPSServer ||
 		closeHLSServer ||
 		closeWebRTCServer ||
 		closeSRTServer ||
 		closeStreamRegistry ||
-		closeLogger
+		closeMoQServer
 
 	if newConf == nil && p.confWatcher != nil {
 		p.confWatcher.Close()
@@ -1020,8 +1399,6 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		if closeAPI {
 			p.api.Close()
 			p.api = nil
-		} else if !calledByAPI { // avoid a loop
-			p.api.ReloadConf(newConf)
 		}
 	}
 
@@ -1034,6 +1411,11 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 	if closeSRTServer && p.srtServer != nil {
 		p.srtServer.Close()
 		p.srtServer = nil
+	}
+
+	if closeMoQServer && p.moqServer != nil {
+		p.moqServer.Close()
+		p.moqServer = nil
 	}
 
 	if closeWebRTCServer && p.webRTCServer != nil {
@@ -1071,6 +1453,11 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		p.pathManager = nil
 	}
 
+	if closePublishAllowlist && p.publishAllowlist != nil {
+		p.publishAllowlist.Close()
+		p.publishAllowlist = nil
+	}
+
 	if closePlaybackServer && p.playbackServer != nil {
 		p.playbackServer.Close()
 		p.playbackServer = nil
@@ -1100,38 +1487,40 @@ func (p *Core) closeResources(newConf *conf.Conf, calledByAPI bool) {
 		p.externalCmdPool.Close()
 	}
 
-	if closeLogger && p.logger != nil {
-		if newConf == nil {
-			p.logger.Close()
-		}
+	if newConf == nil && p.logger != nil {
+		p.logger.Close()
 		p.logger = nil
-	}
-}
-
-func (p *Core) reloadConf(newConf *conf.Conf, calledByAPI bool) error {
-	oldLogger := p.logger
-
-	p.closeResources(newConf, calledByAPI)
-
-	p.conf = newConf
-
-	err := p.createResources(false)
-	if err != nil {
-		p.logger = oldLogger
-		return err
-	}
-
-	if p.logger != oldLogger {
-		oldLogger.Close()
 	}
 
 	return nil
 }
 
-// APIConfigSet is called by api.
-func (p *Core) APIConfigSet(conf *conf.Conf) {
-	select {
-	case p.chAPIConfigSet <- conf:
-	case <-p.ctx.Done():
+// applyInternalUsers applies a configuration that differs from the current one
+// only by internal users, without considering anything else.
+func (p *Core) applyInternalUsers(newConf *conf.Conf, newIDs []uuid.UUID) {
+	p.authManager.ReloadInternalUsers(newConf.AuthInternalUsers)
+
+	p.confMutex.Lock()
+	p.conf = newConf
+	p.internalUserIDs = newIDs
+	p.confMutex.Unlock()
+}
+
+func (p *Core) applyConf(newConf *conf.Conf) error {
+	newIDs := p.internalUserIDs
+	if !reflect.DeepEqual(p.conf.AuthInternalUsers, newConf.AuthInternalUsers) {
+		newIDs = matchInternalUserIDs(p.conf.AuthInternalUsers, p.internalUserIDs, newConf.AuthInternalUsers)
 	}
+
+	err := p.closeResources(newConf)
+	if err != nil {
+		return err
+	}
+
+	p.confMutex.Lock()
+	p.conf = newConf
+	p.internalUserIDs = newIDs
+	p.confMutex.Unlock()
+
+	return p.createResources(false)
 }

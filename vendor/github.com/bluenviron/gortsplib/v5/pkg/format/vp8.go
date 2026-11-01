@@ -28,7 +28,7 @@ func (f *VP8) unmarshal(ctx *unmarshalContext) error {
 				return fmt.Errorf("invalid max-fr: %v", val)
 			}
 
-			f.MaxFR = ptrOf(int(n))
+			f.MaxFR = new(int(n))
 
 		case "max-fs":
 			n, err := strconv.ParseUint(val, 10, 31)
@@ -36,7 +36,7 @@ func (f *VP8) unmarshal(ctx *unmarshalContext) error {
 				return fmt.Errorf("invalid max-fs: %v", val)
 			}
 
-			f.MaxFS = ptrOf(int(n))
+			f.MaxFS = new(int(n))
 		}
 	}
 
@@ -44,6 +44,8 @@ func (f *VP8) unmarshal(ctx *unmarshalContext) error {
 }
 
 // Codec implements Format.
+//
+// Deprecated: will be removed in the next version.
 func (f *VP8) Codec() string {
 	return "VP8"
 }

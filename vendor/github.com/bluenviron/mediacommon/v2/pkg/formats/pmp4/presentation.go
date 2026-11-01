@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 
 	amp4 "github.com/abema/go-mp4"
@@ -40,6 +41,7 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 		waitingMoov
 		waitingMvhd
 		waitingTrak
+		waitingEdts
 		waitingElst
 		waitingTkhd
 		waitingMdhd
@@ -49,16 +51,18 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 		waitingSampleProps
 	)
 
-	var state readState
-	var trackDuration uint32
-	var curTrack *Track
-	var codecBoxesReader *imp4.CodecBoxesReader
-
 	type chunk struct {
 		sampleCount int
 		offset      uint32
 	}
 
+	var state readState
+	var stszReceived bool
+	var stcoReceived bool
+	var trackDuration uint64
+	var trackDurationV1 bool
+	var curTrack *Track
+	var codecBoxesReader *imp4.CodecBoxesReader
 	var curChunks []*chunk
 	var curSampleSizes []uint32
 
@@ -106,7 +110,7 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			return h.Expand()
 
 		case "trak":
-			if state != waitingTrak && state != waitingSampleProps {
+			if state != waitingTrak && (state != waitingSampleProps || !stcoReceived) {
 				return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
 			}
 
@@ -115,6 +119,8 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			curSampleSizes = nil
 			p.Tracks = append(p.Tracks, curTrack)
 			state = waitingTkhd
+			stszReceived = false
+			stcoReceived = false
 			return h.Expand()
 
 		case "tkhd":
@@ -129,13 +135,14 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			tkhd := box.(*amp4.Tkhd)
 
 			curTrack.ID = int(tkhd.TrackID)
-			state = waitingElst
+			state = waitingEdts
 
 		case "edts":
-			if state != waitingElst {
+			if state != waitingEdts {
 				return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
 			}
 
+			state = waitingElst
 			return h.Expand()
 
 		case "elst":
@@ -146,10 +153,12 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			state = waitingMdhd
 
 		case "mdia":
-			if state != waitingMdhd {
+			// edts is optional (ISO/IEC 14496-12, 8.6.5)
+			if state != waitingEdts && state != waitingMdhd {
 				return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
 			}
 
+			state = waitingMdhd
 			return h.Expand()
 
 		case "mdhd":
@@ -168,7 +177,8 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			}
 
 			curTrack.TimeScale = mdhd.Timescale
-			trackDuration = mdhd.DurationV0
+			trackDuration = mdhd.GetDuration()
+			trackDurationV1 = mdhd.GetVersion() == 1
 			state = waitingStsd
 
 		case "minf", "stbl":
@@ -210,12 +220,21 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 				}
 			}
 
-			sampleDuration := uint32(0)
+			sampleDuration := uint64(0)
 			for _, sa := range curTrack.Samples {
-				sampleDuration += sa.Duration
+				sampleDuration += uint64(sa.Duration)
 			}
 
 			curTrack.TimeOffset = int32(trackDuration) - int32(sampleDuration)
+
+			// check only version 1 durations, since version 0 durations
+			// written by previous versions of Marshal may have wrapped around.
+			if trackDurationV1 {
+				timeOffset := int64(trackDuration) - int64(sampleDuration)
+				if trackDuration > math.MaxInt64 || timeOffset < math.MinInt32 || timeOffset > math.MaxInt32 {
+					return nil, fmt.Errorf("invalid duration")
+				}
+			}
 
 			state = waitingSampleProps
 
@@ -252,16 +271,16 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			}
 			ctts := box.(*amp4.Ctts)
 
-			i := 0
+			n := 0
 
-			for _, entry := range ctts.Entries {
-				if (i + int(entry.SampleCount)) > len(curTrack.Samples) {
+			for i, entry := range ctts.Entries {
+				if (n + int(entry.SampleCount)) > len(curTrack.Samples) {
 					return nil, fmt.Errorf("invalid ctts")
 				}
 
 				for range entry.SampleCount {
-					curTrack.Samples[i].PTSOffset = entry.SampleOffsetV1
-					i++
+					curTrack.Samples[n].PTSOffset = int32(ctts.GetSampleOffset(i))
+					n++
 				}
 			}
 
@@ -280,6 +299,10 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 				sampleCount := 0
 
 				for i, entry := range stsc.Entries {
+					if entry.SamplesPerChunk == 0 {
+						return nil, fmt.Errorf("invalid stsc")
+					}
+
 					var chunkCount uint32
 					if i != (len(stsc.Entries) - 1) {
 						chunkCount = stsc.Entries[i+1].FirstChunk - entry.FirstChunk
@@ -292,10 +315,6 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 					}
 
 					if (len(curChunks) + int(chunkCount)) > maxChunks {
-						return nil, fmt.Errorf("invalid stsc")
-					}
-
-					if entry.SamplesPerChunk == 0 {
 						return nil, fmt.Errorf("invalid stsc")
 					}
 
@@ -314,7 +333,7 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			}
 
 		case "stsz":
-			if state != waitingSampleProps {
+			if state != waitingSampleProps || stszReceived {
 				return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
 			}
 
@@ -324,10 +343,23 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 			}
 			stsz := box.(*amp4.Stsz)
 
-			curSampleSizes = stsz.EntrySize
+			if int(stsz.SampleCount) != len(curTrack.Samples) {
+				return nil, fmt.Errorf("invalid stsz")
+			}
+
+			if stsz.SampleSize != 0 {
+				curSampleSizes = make([]uint32, stsz.SampleCount)
+				for i := range curSampleSizes {
+					curSampleSizes[i] = stsz.SampleSize
+				}
+			} else {
+				curSampleSizes = stsz.EntrySize
+			}
+
+			stszReceived = true
 
 		case "stco":
-			if state != waitingSampleProps {
+			if state != waitingSampleProps || !stszReceived || stcoReceived {
 				return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
 			}
 
@@ -345,10 +377,6 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 				chunk.offset = stco.ChunkOffset[i]
 			}
 
-			if len(curSampleSizes) != len(curTrack.Samples) {
-				return nil, fmt.Errorf("invalid stsz")
-			}
-
 			i := 0
 
 			for _, chunk := range curChunks {
@@ -358,11 +386,15 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 					sampleSize := curSampleSizes[i]
 					sampleOffset := off
 
+					if sampleSize == 0 {
+						return nil, fmt.Errorf("invalid sample size")
+					}
+
 					curTrack.Samples[i].PayloadSize = sampleSize
 
 					curTrack.Samples[i].GetPayload = func() ([]byte, error) {
 						_, err2 := r.Seek(int64(sampleOffset), io.SeekStart)
-						if err != nil {
+						if err2 != nil {
 							return nil, err2
 						}
 
@@ -375,6 +407,11 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 					i++
 				}
 			}
+
+			stcoReceived = true
+
+		case "mvex":
+			return nil, fmt.Errorf("fragmented MP4 files are not supported")
 		}
 
 		return nil, nil
@@ -383,7 +420,7 @@ func (p *Presentation) Unmarshal(r io.ReadSeeker) error {
 		return err
 	}
 
-	if state != waitingTrak && state != waitingSampleProps {
+	if state != waitingTrak && (state != waitingSampleProps || !stcoReceived) {
 		return fmt.Errorf("parse error")
 	}
 

@@ -57,10 +57,10 @@ func timeLocationDecode(s string) *time.Location {
 		sign = -1
 	}
 
-	v1, _ := strconv.ParseInt(s[1:3], 10, 64)
-	v2, _ := strconv.ParseInt(s[3:5], 10, 64)
+	v1, _ := strconv.ParseInt(s[1:3], 10, 32)
+	v2, _ := strconv.ParseInt(s[3:5], 10, 32)
 
-	off := sign*int(v1)*3600 + int(v2)*3600
+	off := sign * (int(v1)*3600 + int(v2)*60)
 
 	return time.FixedZone("myzone", off)
 }
@@ -202,31 +202,31 @@ func (p *Path) Decode(format string, v string) bool {
 			p.Path = v
 
 		case "%Y":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			year = int(tmp)
 
 		case "%m":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			month = time.Month(int(tmp))
 
 		case "%d":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			day = int(tmp)
 
 		case "%H":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			hour = int(tmp)
 
 		case "%M":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			minute = int(tmp)
 
 		case "%S":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			second = int(tmp)
 
 		case "%f":
-			tmp, _ := strconv.ParseInt(v, 10, 64)
+			tmp, _ := strconv.ParseInt(v, 10, 32)
 			micros = int(tmp)
 
 		case "%z":
@@ -246,8 +246,16 @@ func (p *Path) Decode(format string, v string) bool {
 	return true
 }
 
-// Encode encodes a path.
+// Encode encodes a path, using the local time zone.
 func (p Path) Encode(format string) string {
+	return p.EncodeWithLocation(format, time.Local)
+}
+
+// EncodeWithLocation encodes a path.
+// The date is converted to the given time zone, regardless of its original one.
+func (p Path) EncodeWithLocation(format string, loc *time.Location) string {
+	p.Start = p.Start.In(loc)
+
 	format = strings.ReplaceAll(format, "%path", p.Path)
 	format = strings.ReplaceAll(format, "%Y", strconv.FormatInt(int64(p.Start.Year()), 10))
 	format = strings.ReplaceAll(format, "%m", leadingZeros(int(p.Start.Month()), 2))

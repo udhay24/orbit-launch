@@ -178,6 +178,31 @@ type statsReportCollector struct {
 	mux             sync.Mutex
 }
 
+// SCTPTransportPartialReliabilityMode indicates the negotiated SCTP partial reliability mode.
+type SCTPTransportPartialReliabilityMode string
+
+// SCTPTransportPartialReliabilityMode values.
+const (
+	SCTPTransportPartialReliabilityModeNone        SCTPTransportPartialReliabilityMode = "none"
+	SCTPTransportPartialReliabilityModeForwardTSN  SCTPTransportPartialReliabilityMode = "forward-tsn"
+	SCTPTransportPartialReliabilityModeIForwardTSN SCTPTransportPartialReliabilityMode = "i-forward-tsn"
+)
+
+// SCTPTransportMetadata describes negotiated SCTP transport capabilities.
+type SCTPTransportMetadata struct {
+	// MessageInterleavingEnabled indicates whether RFC 8260 user message interleaving was negotiated.
+	MessageInterleavingEnabled bool `json:"messageInterleavingEnabled"`
+
+	// PartialReliabilityMode indicates which FORWARD-TSN variant is active.
+	PartialReliabilityMode SCTPTransportPartialReliabilityMode `json:"partialReliabilityMode"`
+
+	// ZeroChecksumSendingEnabled indicates whether outgoing packets use zero checksum.
+	ZeroChecksumSendingEnabled bool `json:"zeroChecksumSendingEnabled"`
+
+	// ZeroChecksumReceivingEnabled indicates whether incoming packets may use zero checksum.
+	ZeroChecksumReceivingEnabled bool `json:"zeroChecksumReceivingEnabled"`
+}
+
 func newStatsReportCollector() *statsReportCollector {
 	return &statsReportCollector{report: make(StatsReport)}
 }
@@ -280,6 +305,10 @@ type InboundRTPStreamStats struct {
 	// Mid represents a mid value of RTPTransceiver owning this stream, if that value is not
 	// null. Otherwise, this member is not present.
 	Mid string `json:"mid"`
+
+	// Rid only exists if a rid has been set for this RTP stream.
+	// Must not exist for audio.
+	Rid string `json:"rid,omitempty"`
 
 	// Timestamp is the timestamp associated with this object.
 	Timestamp StatsTimestamp `json:"timestamp"`
@@ -1986,14 +2015,18 @@ type TransportStats struct {
 	// Present only if DTLS is negotiated.
 	RemoteCertificateID string `json:"remoteCertificateId"`
 
+	// TLSVersion is the negotiated protocol version as four uppercase hexadecimal digits.
+	// It is empty until DTLS negotiation completes. Value is always "FEFD" (DTLS 1.2)
+	TLSVersion string `json:"tlsVersion,omitempty"`
+
 	// DTLSCipher is the descriptive name of the cipher suite used for the DTLS transport,
 	// as defined in the "Description" column of the IANA cipher suite registry.
-	DTLSCipher string `json:"dtlsCipher"`
+	DTLSCipher string `json:"dtlsCipher,omitempty"`
 
 	// SRTPCipher is the descriptive name of the protection profile used for the SRTP
 	// transport, as defined in the "Profile" column of the IANA DTLS-SRTP protection
 	// profile registry.
-	SRTPCipher string `json:"srtpCipher"`
+	SRTPCipher string `json:"srtpCipher,omitempty"`
 }
 
 func (s TransportStats) statsMarker() {}
@@ -2424,6 +2457,9 @@ type SCTPTransportStats struct {
 
 	// UNACKData is the number of unacknowledged DATA chunks, corresponding to sstat_unackdata defined in [RFC6458].
 	UNACKData uint32 `json:"unackData"`
+
+	// Metadata contains negotiated SCTP association metadata.
+	Metadata *SCTPTransportMetadata `json:"metadata,omitempty"`
 
 	// BytesSent represents the total number of bytes sent on this SCTPTransport
 	BytesSent uint64 `json:"bytesSent"`

@@ -120,21 +120,36 @@ func ResetOptions() {
 	output = os.Stdout
 }
 
+var oldLevelVal Level
+
 // ForceSetColorLevel force open color render
 func ForceSetColorLevel(level Level) Level {
-	oldLevelVal := colorLevel
+	oldLevelVal = colorLevel
 	colorLevel = level
 	return oldLevelVal
 }
 
-// ForceColor force open color render
+// ForceColor force open color render. alias of ForceOpenColor
+//
+// Use for testing:
+//
+//	color.ForceColor()
+//	defer color.RevertColorLevel()
 func ForceColor() Level { return ForceOpenColor() }
 
 // ForceOpenColor force open color render
+//
+// Use for testing:
+//
+//	color.ForceColor()
+//	defer color.RevertColorLevel()
 func ForceOpenColor() Level {
 	// TODO should set level to ?
 	return ForceSetColorLevel(LevelRgb)
 }
+
+// RevertColorLevel value
+func RevertColorLevel() { colorLevel = oldLevelVal }
 
 // EnableDebug enable debug mode
 func EnableDebug() { debugMode = true }
@@ -227,8 +242,13 @@ func RenderString(code string, str string) string {
 		return ClearCode(str)
 	}
 
-	// return fmt.Sprintf(FullColorTpl, code, str)
-	return StartSet + code + "m" + str + ResetSet
+	open := StartSet + code + "m"
+	// If the string contains reset sequences, re-apply our color after each
+	// reset so that nested colored args don't break the outer color.
+	if strings.Contains(str, ResetSet) {
+		str = strings.ReplaceAll(str, ResetSet, ResetSet+open)
+	}
+	return open + str + ResetSet
 }
 
 // ClearCode clear color codes.

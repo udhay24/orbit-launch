@@ -5,8 +5,10 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 
+	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
+	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
@@ -16,7 +18,7 @@ type PathNoStreamAvailableError struct {
 }
 
 // Error implements the error interface.
-func (e PathNoStreamAvailableError) Error() string {
+func (e *PathNoStreamAvailableError) Error() string {
 	return fmt.Sprintf("no stream is available on path '%s'", e.PathName)
 }
 
@@ -31,12 +33,14 @@ type Path interface {
 
 // PathFindPathConfRes contains the response of FindPathConf().
 type PathFindPathConfRes struct {
-	Conf *conf.Path
-	Err  error
+	Conf    *conf.Path
+	AuthRes *auth.Result
+	Err     error
 }
 
 // PathFindPathConfReq contains arguments of FindPathConf().
 type PathFindPathConfReq struct {
+	Author        logger.Writer
 	AccessRequest PathAccessRequest
 	Res           chan PathFindPathConfRes
 }
@@ -51,6 +55,7 @@ type PathDescribeRes struct {
 
 // PathDescribeReq contains arguments of Describe().
 type PathDescribeReq struct {
+	Author        logger.Writer
 	AccessRequest PathAccessRequest
 	Res           chan PathDescribeRes
 }
@@ -58,6 +63,7 @@ type PathDescribeReq struct {
 // PathAddPublisherRes contains the response of AddPublisher().
 type PathAddPublisherRes struct {
 	Path      Path
+	AuthRes   *auth.Result
 	SubStream *stream.SubStream
 	Err       error
 }
@@ -81,9 +87,10 @@ type PathRemovePublisherReq struct {
 
 // PathAddReaderRes contains the response of AddReader().
 type PathAddReaderRes struct {
-	Path   Path
-	Stream *stream.Stream
-	Err    error
+	Path    Path
+	AuthRes *auth.Result
+	Stream  *stream.Stream
+	Err     error
 }
 
 // PathAddReaderReq contains arguments of AddReader().

@@ -1,70 +1,47 @@
 package mpegts
 
 import (
-	"context"
 	"errors"
 	"io"
 
 	"github.com/asticode/go-astits"
 )
 
-type wrappedError struct {
-	w error
+const (
+	packetSize = 188
+	syncByte   = 0x47
+)
+
+type robustDemuxerData struct {
+	lastPTS *int64
+	PID     uint16
+	PMT     *astits.PMTData
+	PES     *astits.PESData
 }
 
-func (w wrappedError) Error() string {
-	return w.w.Error()
-}
-
-type errorWrapper struct {
-	R io.Reader
-}
-
-func (r *errorWrapper) Read(p []byte) (int, error) {
-	n, err := r.R.Read(p)
-	if err != nil {
-		// keep io.EOF and io.ErrUnexpectedEOF untouched
-		// since they are needed by astits to handle the last packet of a stream.
-		// they are transformed into astits.ErrNoMorePackets.
-		// https://github.com/asticode/go-astits/blob/7c2bf6b71173d24632371faa01f28a9122db6382/packet_buffer.go#L131
-		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-			err = &wrappedError{w: err}
-		}
-	}
-	return n, err
-}
-
-// this is a wrapper around astits.Demuxer that returns fatal errors only,
-// while decode errors are redirected to a callback.
 type robustDemuxer struct {
-	R             io.Reader
-	OnDecodeError func(err error)
-
-	dem *astits.Demuxer
+	ptsInterceptor *ptsInterceptor
+	astitsDem      *astits.Demuxer
+	OnDecodeError  func(err error)
 }
 
 func (d *robustDemuxer) initialize() {
 	if d.OnDecodeError == nil {
 		d.OnDecodeError = func(_ error) {}
 	}
-
-	d.dem = astits.NewDemuxer(
-		context.Background(),
-		&errorWrapper{R: d.R},
-		astits.DemuxerOptPacketSize(188))
 }
 
-func (d *robustDemuxer) nextData() (*astits.DemuxerData, error) {
+func (d *robustDemuxer) nextData() (*robustDemuxerData, error) {
 	for {
-		data, err := d.dem.NextData()
+		data, err := d.astitsDem.NextData()
 		if err != nil {
-			// error from underlying reader or astits.ErrNoMorePackets: this is fatal.
+			// astits.ErrNoMorePackets / io.EOF: this is fatal.
 			if errors.Is(err, astits.ErrNoMorePackets) {
-				// convert astits.ErrNoMorePackets back into io.EOF
-				return nil, io.EOF
+				return nil, io.EOF // convert back to io.EOF.
 			}
-			var w *wrappedError
-			if errors.As(err, &w) {
+
+			// error from underlying reader: this is fatal.
+			if w, ok := errors.AsType[*wrappedError](err); ok {
 				return nil, w.w
 			}
 
@@ -73,6 +50,17 @@ func (d *robustDemuxer) nextData() (*astits.DemuxerData, error) {
 			continue
 		}
 
-		return data, nil
+		return &robustDemuxerData{
+			lastPTS: func() *int64 {
+				if d.ptsInterceptor.hasLastPTS {
+					pts := d.ptsInterceptor.lastPTS
+					return &pts
+				}
+				return nil
+			}(),
+			PID: data.PID,
+			PMT: data.PMT,
+			PES: data.PES,
+		}, nil
 	}
 }

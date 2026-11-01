@@ -7,42 +7,11 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+
+	"github.com/bluenviron/mediamtx/internal/formatlabel"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/unit"
 )
-
-// FormatsToCodecs returns the name of codecs of given formats.
-func FormatsToCodecs(formats []format.Format) []string {
-	ret := make([]string, len(formats))
-	for i, forma := range formats {
-		ret[i] = forma.Codec()
-	}
-	return ret
-}
-
-func gatherFormats(medias []*description.Media) []format.Format {
-	n := 0
-	for _, media := range medias {
-		n += len(media.Formats)
-	}
-
-	if n == 0 {
-		return nil
-	}
-
-	formats := make([]format.Format, n)
-	n = 0
-
-	for _, media := range medias {
-		n += copy(formats[n:], media.Formats)
-	}
-
-	return formats
-}
-
-func mediasToCodecs(medias []*description.Media) []string {
-	return FormatsToCodecs(gatherFormats(medias))
-}
 
 func formatMPEG4AudioConfig(asc *mpeg4audio.AudioSpecificConfig) string {
 	return fmt.Sprintf("type=%d, sampleRate=%d, channelCount=%d",
@@ -62,19 +31,19 @@ func formatLPCMConfig(f *format.LPCM) string {
 func mediasAreCompatible(medias1 []*description.Media, medias2 []*description.Media) error {
 	if len(medias1) != len(medias2) {
 		return fmt.Errorf("wants to publish %v, but stream expects %v",
-			mediasToCodecs(medias2), mediasToCodecs(medias1))
+			formatlabel.MediasToLabels(medias2), formatlabel.MediasToLabels(medias1))
 	}
 
 	for i := range medias1 {
 		if len(medias1[i].Formats) != len(medias2[i].Formats) {
 			return fmt.Errorf("wants to publish %v, but stream expects %v",
-				mediasToCodecs(medias2), mediasToCodecs(medias1))
+				formatlabel.MediasToLabels(medias2), formatlabel.MediasToLabels(medias1))
 		}
 
 		for j := range medias1[i].Formats {
 			if reflect.TypeOf(medias1[i].Formats[j]) != reflect.TypeOf(medias2[i].Formats[j]) {
 				return fmt.Errorf("wants to publish %v, but stream expects %v",
-					mediasToCodecs(medias2), mediasToCodecs(medias1))
+					formatlabel.MediasToLabels(medias2), formatlabel.MediasToLabels(medias1))
 			}
 		}
 	}
@@ -119,7 +88,7 @@ func mediasAreCompatible(medias1 []*description.Media, medias2 []*description.Me
 // SubStream is a Stream without interruptions.
 type SubStream struct {
 	Stream        *Stream
-	CurDesc       *description.Session
+	InDesc        *description.Session
 	UseRTPPackets bool
 
 	medias map[*description.Media]*subStreamMedia
@@ -132,39 +101,39 @@ func (ss *SubStream) Initialize() error {
 			panic("should not happen")
 		}
 
-		if ss.CurDesc != nil {
+		if ss.InDesc != nil {
 			panic("should not happen")
 		}
 	} else {
-		if ss.CurDesc == nil {
+		if ss.InDesc == nil {
 			panic("should not happen")
 		}
 
-		err := mediasAreCompatible(ss.Stream.Desc.Medias, ss.CurDesc.Medias)
+		err := mediasAreCompatible(ss.Stream.OrigDesc.Medias, ss.InDesc.Medias)
 		if err != nil {
 			return err
 		}
 	}
 
 	if !ss.Stream.AlwaysAvailable {
-		ss.CurDesc = ss.Stream.Desc
+		ss.InDesc = ss.Stream.OrigDesc
 	}
 
 	ss.medias = make(map[*description.Media]*subStreamMedia)
 
-	for i, curMedia := range ss.CurDesc.Medias {
-		media := ss.Stream.Desc.Medias[i]
+	for i, inMedia := range ss.InDesc.Medias {
+		origMedia := ss.Stream.OrigDesc.Medias[i]
 
 		ssm := &subStreamMedia{
-			curMedia:      curMedia,
-			streamMedia:   ss.Stream.medias[media],
+			inMedia:       inMedia,
+			streamMedia:   ss.Stream.medias[origMedia],
 			useRTPPackets: ss.UseRTPPackets,
 		}
 		err := ssm.initialize()
 		if err != nil {
 			return err
 		}
-		ss.medias[curMedia] = ssm
+		ss.medias[inMedia] = ssm
 	}
 
 	if ss.Stream.AlwaysAvailable {
@@ -181,9 +150,11 @@ func (ss *SubStream) Initialize() error {
 		}
 	}
 
+	// keep mutex open to use writeUnit() inside initialize2()
 	ss.Stream.mutex.Lock()
+	defer ss.Stream.mutex.Unlock()
+
 	ss.Stream.subStream = ss
-	ss.Stream.mutex.Unlock()
 
 	for _, ssm := range ss.medias {
 		for _, ssf := range ssm.formats {
@@ -195,7 +166,7 @@ func (ss *SubStream) Initialize() error {
 }
 
 // WriteUnit writes a Unit.
-func (ss *SubStream) WriteUnit(medi *description.Media, forma format.Format, u *unit.Unit) {
+func (ss *SubStream) WriteUnit(inMedia *description.Media, inFormat format.Format, u *unit.Unit) {
 	ss.Stream.mutex.RLock()
 	defer ss.Stream.mutex.RUnlock()
 
@@ -203,8 +174,8 @@ func (ss *SubStream) WriteUnit(medi *description.Media, forma format.Format, u *
 		return
 	}
 
-	ssm := ss.medias[medi]
-	ssf := ssm.formats[forma]
+	ssm := ss.medias[inMedia]
+	ssf := ssm.formats[inFormat]
 
 	ssf.writeUnit(u)
 }

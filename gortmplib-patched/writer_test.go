@@ -1,19 +1,107 @@
-package gortmplib
+package gortmplib_test
 
 import (
 	"bytes"
+	"io"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/abema/go-mp4"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bluenviron/gortmplib"
 	"github.com/bluenviron/gortmplib/pkg/amf0"
 	"github.com/bluenviron/gortmplib/pkg/bytecounter"
 	"github.com/bluenviron/gortmplib/pkg/codecs"
 	"github.com/bluenviron/gortmplib/pkg/message"
 )
+
+var (
+	h265DefaultVPS = []byte{
+		0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x02, 0x20,
+		0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03,
+		0x00, 0x00, 0x03, 0x00, 0x7b, 0x18, 0xb0, 0x24,
+	}
+
+	h265DefaultSPS = []byte{
+		0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03,
+		0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+		0x00, 0x7b, 0xa0, 0x07, 0x82, 0x00, 0x88, 0x7d,
+		0xb6, 0x71, 0x8b, 0x92, 0x44, 0x80, 0x53, 0x88,
+		0x88, 0x92, 0xcf, 0x24, 0xa6, 0x92, 0x72, 0xc9,
+		0x12, 0x49, 0x22, 0xdc, 0x91, 0xaa, 0x48, 0xfc,
+		0xa2, 0x23, 0xff, 0x00, 0x01, 0x00, 0x01, 0x6a,
+		0x02, 0x02, 0x02, 0x01,
+	}
+
+	h265DefaultPPS = []byte{
+		0x44, 0x01, 0xc0, 0x25, 0x2f, 0x05, 0x32, 0x40,
+	}
+
+	h264DefaultSPS = []byte{ // 1920x1080 baseline
+		0x67, 0x42, 0xc0, 0x28, 0xd9, 0x00, 0x78, 0x02,
+		0x27, 0xe5, 0x84, 0x00, 0x00, 0x03, 0x00, 0x04,
+		0x00, 0x00, 0x03, 0x00, 0xf0, 0x3c, 0x60, 0xc9, 0x20,
+	}
+
+	h264DefaultPPS = []byte{0x08, 0x06, 0x07, 0x08}
+)
+
+func TestWriterDrainIncomingData(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	server := &dummyConn{rw: serverConn}
+	server.initialize()
+
+	client := &dummyConn{rw: clientConn}
+	client.initialize()
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := client.Read()
+		readDone <- err
+	}()
+
+	w := &gortmplib.Writer{Conn: server}
+	err := w.Initialize()
+	require.NoError(t, err)
+	require.NoError(t, <-readDone)
+
+	err = client.Write(&message.SetChunkSize{Value: 128})
+	require.NoError(t, err)
+
+	err = client.Write(&message.SetChunkSize{Value: 128})
+	require.NoError(t, err)
+
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- w.Wait()
+	}()
+
+	select {
+	case err = <-waitDone:
+		t.Fatalf("Wait returned before a read error: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	_, err = clientConn.Write([]byte{0})
+	require.NoError(t, err)
+
+	select {
+	case err = <-waitDone:
+		require.EqualError(t, err, "extended chunk stream IDs are not supported (yet)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("Wait did not return after a read error")
+	}
+
+	require.EqualError(t, w.Wait(), "extended chunk stream IDs are not supported (yet)")
+}
 
 func TestWriter(t *testing.T) {
 	for _, ca := range []string{
@@ -26,16 +114,17 @@ func TestWriter(t *testing.T) {
 		"opus",
 		"mp3",
 		"ac-3",
+		"flac",
 		"pcma",
 		"pcmu",
 		"lpcm",
 	} {
 		t.Run(ca, func(t *testing.T) {
-			var tracks []*Track
+			var tracks []*gortmplib.Track
 
 			switch ca {
 			case "h264 + aac":
-				tracks = append(tracks, &Track{Codec: &codecs.H264{
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.H264{
 					SPS: []byte{
 						0x67, 0x64, 0x00, 0x0c, 0xac, 0x3b, 0x50, 0xb0,
 						0x4b, 0x42, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00,
@@ -46,77 +135,97 @@ func TestWriter(t *testing.T) {
 					},
 				}})
 
-				tracks = append(tracks, &Track{Codec: &codecs.MPEG4Audio{
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.MPEG4Audio{
 					Config: &mpeg4audio.AudioSpecificConfig{
-						Type:         2,
-						SampleRate:   44100,
-						ChannelCount: 2,
+						Type:          2,
+						SampleRate:    44100,
+						ChannelConfig: 2,
+						ChannelCount:  2, //nolint:staticcheck
 					},
 				}})
 
 			case "av1":
-				tracks = append(tracks, &Track{Codec: &codecs.AV1{}})
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.AV1{}})
 
 			case "vp9":
-				tracks = append(tracks, &Track{Codec: &codecs.VP9{}})
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.VP9{}})
 
 			case "h265":
-				tracks = append(tracks, &Track{Codec: testCodecH265})
+				tracks = append(tracks, &gortmplib.Track{Codec: testCodecH265})
 
 			case "h265 no params":
-				tracks = append(tracks, &Track{Codec: &codecs.H265{}})
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.H265{}})
 
 			case "h264 no params":
-				tracks = append(tracks, &Track{Codec: &codecs.H264{}})
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.H264{}})
 
 			case "opus":
-				tracks = append(tracks, &Track{Codec: &codecs.Opus{
-					ChannelCount: 2,
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.Opus{
+					IDHeader: &opus.IDHeader{
+						Version:      0x1,
+						ChannelCount: 2,
+						PreSkip:      3840,
+					},
 				}})
 
 			case "mp3":
-				tracks = append(tracks, &Track{Codec: &codecs.MPEG1Audio{}})
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.MPEG1Audio{}})
 
 			case "ac-3":
-				tracks = append(tracks, &Track{Codec: &codecs.AC3{
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.AC3{
 					SampleRate:   44100,
 					ChannelCount: 2,
 				}})
 
+			case "flac":
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.FLAC{
+					StreamInfo: &flac.StreamInfo{
+						MinBlockSize: 16,
+						MaxBlockSize: 65535,
+						SampleRate:   44100,
+						ChannelCount: 2,
+						BitDepth:     16,
+					},
+				}})
+
 			case "pcma":
-				tracks = append(tracks, &Track{Codec: &codecs.G711{
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.G711{
 					MULaw:        false,
 					ChannelCount: 1,
 				}})
 
 			case "pcmu":
-				tracks = append(tracks, &Track{Codec: &codecs.G711{
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.G711{
 					MULaw:        true,
 					ChannelCount: 1,
 				}})
 
 			case "lpcm":
-				tracks = append(tracks, &Track{Codec: &codecs.LPCM{
+				tracks = append(tracks, &gortmplib.Track{Codec: &codecs.LPCM{
 					BitDepth:     16,
 					SampleRate:   44100,
 					ChannelCount: 1,
 				}})
 			}
 
-			var buf bytes.Buffer
+			var input bytes.Buffer
+			var output bytes.Buffer
 			c := &dummyConn{
-				rw: &buf,
+				rw: &readWriter{
+					Reader: &input,
+					Writer: &output,
+				},
 			}
 			c.initialize()
 
-			w := &Writer{
+			w := &gortmplib.Writer{
 				Conn:   c,
 				Tracks: tracks,
 			}
 			err := w.Initialize()
 			require.NoError(t, err)
 
-			bc := bytecounter.NewReadWriter(&buf)
+			bc := bytecounter.NewReadWriter(&output)
 			mrw := message.NewReadWriter(bc, bc, true)
 
 			msg, err := mrw.Read()
@@ -267,6 +376,22 @@ func TestWriter(t *testing.T) {
 					},
 				}, msg)
 
+			case "flac":
+				require.Equal(t, &message.DataAMF0{
+					ChunkStreamID:   4,
+					MessageStreamID: 0x1000000,
+					Payload: []any{
+						"@setDataFrame",
+						"onMetaData",
+						amf0.Object{
+							{Key: "videocodecid", Value: float64(0)},
+							{Key: "videodatarate", Value: float64(0)},
+							{Key: "audiocodecid", Value: float64(message.FourCCFLAC)},
+							{Key: "audiodatarate", Value: float64(0)},
+						},
+					},
+				}, msg)
+
 			case "pcma":
 				require.Equal(t, &message.DataAMF0{
 					ChunkStreamID:   4,
@@ -324,9 +449,10 @@ func TestWriter(t *testing.T) {
 					ChunkStreamID:   message.VideoChunkStreamID,
 					MessageStreamID: 0x1000000,
 					Codec:           message.CodecH264,
-					IsKeyFrame:      true,
-					Type:            message.VideoTypeConfig,
-					AVCConfig: generateAvcC(
+					FrameType:       message.VideoFrameTypeKeyFrame,
+					IsKeyFrame:      true, //nolint:staticcheck
+					PacketType:      message.VideoPacketTypeConfig,
+					AVCConfig: generateAvcC(t,
 						[]byte{
 							0x67, 0x64, 0x00, 0x0c, 0xac, 0x3b, 0x50, 0xb0,
 							0x4b, 0x42, 0x00, 0x00, 0x03, 0x00, 0x02, 0x00,
@@ -352,7 +478,7 @@ func TestWriter(t *testing.T) {
 						Type:          2,
 						SampleRate:    44100,
 						ChannelConfig: 2,
-						ChannelCount:  2,
+						ChannelCount:  2, //nolint:staticcheck
 					},
 				}, msg)
 
@@ -368,8 +494,10 @@ func TestWriter(t *testing.T) {
 					ChunkStreamID:   message.VideoChunkStreamID,
 					MessageStreamID: 0x1000000,
 					Codec:           message.CodecH264,
-					IsKeyFrame:      true,
-					Type:            message.VideoTypeAU,
+					FrameType:       message.VideoFrameTypeKeyFrame,
+					IsKeyFrame:      true, //nolint:staticcheck
+					PacketType:      message.VideoPacketTypeAU,
+					Type:            message.VideoTypeAU, //nolint:staticcheck
 					PTSDelta:        100 * time.Millisecond,
 					AU:              []byte{0, 0, 0, 2, 5, 1},
 				}, msg)
@@ -461,6 +589,7 @@ func TestWriter(t *testing.T) {
 						BitDepthLumaMinus8:         2,
 						Reserved5:                  0b11111,
 						BitDepthChromaMinus8:       2,
+						TemporalIdNested:           1,
 						LengthSizeMinusOne:         0x3,
 						NumTemporalLayers:          1,
 						NumOfNaluArrays:            0x3,
@@ -513,7 +642,7 @@ func TestWriter(t *testing.T) {
 					ChunkStreamID:   message.VideoChunkStreamID,
 					MessageStreamID: 0x1000000,
 					FourCC:          message.FourCCHEVC,
-					HEVCConfig: generateHvcC(h265DefaultVPS,
+					HEVCConfig: generateHvcC(t, h265DefaultVPS,
 						h265DefaultSPS, h265DefaultPPS),
 				}, msg)
 
@@ -536,9 +665,10 @@ func TestWriter(t *testing.T) {
 					ChunkStreamID:   message.VideoChunkStreamID,
 					MessageStreamID: 0x1000000,
 					Codec:           message.CodecH264,
-					IsKeyFrame:      true,
-					Type:            message.VideoTypeConfig,
-					AVCConfig:       generateAvcC(h264DefaultSPS, h264DefaultPPS),
+					FrameType:       message.VideoFrameTypeKeyFrame,
+					IsKeyFrame:      true, //nolint:staticcheck
+					PacketType:      message.VideoPacketTypeConfig,
+					AVCConfig:       generateAvcC(t, h264DefaultSPS, h264DefaultPPS),
 				}, msg)
 
 				err = w.WriteH264(tracks[0], 0, 0, [][]byte{{1, 2}})
@@ -550,7 +680,9 @@ func TestWriter(t *testing.T) {
 					ChunkStreamID:   message.VideoChunkStreamID,
 					MessageStreamID: 0x1000000,
 					Codec:           message.CodecH264,
-					Type:            message.VideoTypeAU,
+					FrameType:       message.VideoFrameTypeInterFrame,
+					PacketType:      message.VideoPacketTypeAU,
+					Type:            message.VideoTypeAU, //nolint:staticcheck
 					AU:              []byte{0, 0, 0, 2, 1, 2},
 				}, msg)
 
@@ -561,7 +693,7 @@ func TestWriter(t *testing.T) {
 					ChunkStreamID:   message.AudioChunkStreamID,
 					MessageStreamID: 0x1000000,
 					FourCC:          message.FourCCOpus,
-					OpusConfig: &message.OpusIDHeader{
+					OpusConfig: &opus.IDHeader{
 						Version:             1,
 						PreSkip:             3840,
 						ChannelCount:        2,
@@ -624,6 +756,34 @@ func TestWriter(t *testing.T) {
 					Payload:         []byte{1, 2},
 				}, msg)
 
+			case "flac":
+				msg, err = mrw.Read()
+				require.NoError(t, err)
+				require.Equal(t, &message.AudioExSequenceStart{
+					ChunkStreamID:   message.AudioChunkStreamID,
+					MessageStreamID: 0x1000000,
+					FourCC:          message.FourCCFLAC,
+					FlacConfig: &flac.StreamInfo{
+						MinBlockSize: 16,
+						MaxBlockSize: 65535,
+						SampleRate:   44100,
+						ChannelCount: 2,
+						BitDepth:     16,
+					},
+				}, msg)
+
+				err = w.WriteFLAC(tracks[0], 0, []byte{1, 2})
+				require.NoError(t, err)
+
+				msg, err = mrw.Read()
+				require.NoError(t, err)
+				require.Equal(t, &message.AudioExCodedFrames{
+					ChunkStreamID:   message.AudioChunkStreamID,
+					MessageStreamID: 0x1000000,
+					FourCC:          message.FourCCFLAC,
+					Payload:         []byte{1, 2},
+				}, msg)
+
 			case "pcma":
 				err = w.WriteG711(tracks[0], 0, []byte{1, 2})
 				require.NoError(t, err)
@@ -669,4 +829,9 @@ func TestWriter(t *testing.T) {
 			}
 		})
 	}
+}
+
+type readWriter struct {
+	io.Reader
+	io.Writer
 }

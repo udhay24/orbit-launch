@@ -9,10 +9,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 	"github.com/pion/rtp"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
-	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
 )
 
 // H264 is the RTP format for the H264 codec.
@@ -50,12 +50,6 @@ func (f *H264) unmarshal(ctx *unmarshalContext) error {
 				// some cameras ship parameters with Annex-B prefix
 				pps = bytes.TrimPrefix(pps, []byte{0, 0, 0, 1})
 
-				var spsp h264.SPS
-				err = spsp.Unmarshal(sps)
-				if err != nil {
-					continue
-				}
-
 				f.SPS = sps
 				f.PPS = pps
 			}
@@ -74,6 +68,8 @@ func (f *H264) unmarshal(ctx *unmarshalContext) error {
 }
 
 // Codec implements Format.
+//
+// Deprecated: will be removed in the next version.
 func (f *H264) Codec() string {
 	return "H264"
 }
@@ -212,6 +208,8 @@ func (f *H264) CreateEncoder() (*rtph264.Encoder, error) {
 }
 
 // SafeSetParams sets the codec parameters.
+//
+// Deprecated: set parameters directly then use ServerStream.ReloadDesc() to reload them.
 func (f *H264) SafeSetParams(sps []byte, pps []byte) {
 	f.mutex.Lock()
 	defer f.mutex.Unlock()
@@ -220,6 +218,8 @@ func (f *H264) SafeSetParams(sps []byte, pps []byte) {
 }
 
 // SafeParams returns the codec parameters.
+//
+// Deprecated: set parameters directly then use ServerStream.ReloadDesc() to reload them.
 func (f *H264) SafeParams() ([]byte, []byte) {
 	f.mutex.RLock()
 	defer f.mutex.RUnlock()

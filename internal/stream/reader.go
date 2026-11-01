@@ -6,6 +6,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/ringbuffer"
+
 	"github.com/bluenviron/mediamtx/internal/counterdumper"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -16,27 +17,27 @@ type OnDataFunc func(*unit.Unit) error
 
 // Reader is a stream reader.
 type Reader struct {
-	SkipBytesSent bool
-	Parent        logger.Writer
+	SkipOutboundBytes bool
+	Parent            logger.Writer
 
-	onDatas         map[*description.Media]map[format.Format]OnDataFunc
-	queueSize       int
-	buffer          *ringbuffer.RingBuffer
-	discardedFrames *counterdumper.Dumper
+	onDatas                 map[*description.Media]map[format.Format]OnDataFunc
+	queueSize               int
+	buffer                  *ringbuffer.RingBuffer
+	outboundFramesDiscarded *counterdumper.Dumper
 
 	// out
 	err chan error
 }
 
 // OnData registers a callback that is called when data from given format is available.
-func (r *Reader) OnData(medi *description.Media, forma format.Format, cb OnDataFunc) {
+func (r *Reader) OnData(origMedia *description.Media, origFormat format.Format, cb OnDataFunc) {
 	if r.onDatas == nil {
 		r.onDatas = make(map[*description.Media]map[format.Format]OnDataFunc)
 	}
-	if r.onDatas[medi] == nil {
-		r.onDatas[medi] = make(map[format.Format]OnDataFunc)
+	if r.onDatas[origMedia] == nil {
+		r.onDatas[origMedia] = make(map[format.Format]OnDataFunc)
 	}
-	r.onDatas[medi][forma] = cb
+	r.onDatas[origMedia][origFormat] = cb
 }
 
 // Formats returns all formats for which the reader has registered a OnData callback.
@@ -65,6 +66,11 @@ func (r *Reader) Formats() []format.Format {
 	return out
 }
 
+// OutboundFramesDiscarded returns the number of frames discarded because the reader is too slow.
+func (r *Reader) OutboundFramesDiscarded() uint64 {
+	return r.outboundFramesDiscarded.Get()
+}
+
 // error returns whenever there's an error.
 // It can be called only after stream.AddReader().
 func (r *Reader) Error() chan error {
@@ -76,7 +82,7 @@ func (r *Reader) start() {
 	r.buffer = buffer
 	r.err = make(chan error)
 
-	r.discardedFrames = &counterdumper.Dumper{
+	r.outboundFramesDiscarded = &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			r.Parent.Log(logger.Warn, "reader is too slow, discarding %d %s",
 				val,
@@ -88,15 +94,15 @@ func (r *Reader) start() {
 				}())
 		},
 	}
-	r.discardedFrames.Start()
+	r.outboundFramesDiscarded.Start()
 
 	go r.run()
 }
 
 func (r *Reader) stop() {
 	r.buffer.Close()
-	r.discardedFrames.Stop()
-	<-r.err
+	r.outboundFramesDiscarded.Stop()
+	<-r.err //nolint:errcheck
 }
 
 func (r *Reader) run() {
@@ -121,6 +127,6 @@ func (r *Reader) runInner() error {
 func (r *Reader) push(cb func() error) {
 	ok := r.buffer.Push(cb)
 	if !ok {
-		r.discardedFrames.Increase()
+		r.outboundFramesDiscarded.Increase()
 	}
 }

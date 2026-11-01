@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortmplib"
@@ -16,7 +17,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/protocols/rtmp"
-	"github.com/bluenviron/mediamtx/internal/protocols/tls"
+	ptls "github.com/bluenviron/mediamtx/internal/protocols/tls"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
@@ -32,11 +33,32 @@ type Source struct {
 	ReadTimeout  conf.Duration
 	WriteTimeout conf.Duration
 	Parent       parent
+
+	mutex  sync.RWMutex
+	client *gortmplib.Client
 }
 
 // Log implements logger.Writer.
 func (s *Source) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[RTMP source] "+format, args...)
+}
+
+// Info returns runtime information.
+func (s *Source) Info() defs.StaticSourceInfo {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if s.client == nil {
+		return defs.StaticSourceInfo{}
+	}
+
+	return defs.StaticSourceInfo{
+		TypeSpecific: &defs.APIStaticSourceTypeSpecificRTMP{
+			RemoteAddr:    s.client.NetConn().RemoteAddr().String(),
+			InboundBytes:  s.client.BytesReceived(),
+			OutboundBytes: s.client.BytesSent(),
+		},
+	}
 }
 
 // Run implements StaticSource.
@@ -58,28 +80,43 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		}
 	}
 
-	dialContext := (&net.Dialer{}).DialContext
-
-	if s.DumpPackets {
-		dialContext = (&packetdumper.DialContext{
-			Prefix:      "rtmp_source_conn",
-			DialContext: dialContext,
-		}).Do
-	}
-
 	connectCtx, connectCtxCancel := context.WithTimeout(params.Context, time.Duration(s.ReadTimeout))
 
 	conn := &gortmplib.Client{
-		URL:         u,
-		TLSConfig:   tls.MakeConfig(u.Hostname(), params.Conf.SourceFingerprint),
-		Publish:     false,
-		DialContext: dialContext,
+		URL:     u,
+		Publish: false,
 	}
+
+	tlsConfig := ptls.MakeConfig(params.Conf.SourceFingerprint)
+
+	if s.DumpPackets {
+		conn.DialContext = (&packetdumper.DialContext{
+			Prefix: u.Scheme + "_source_conn",
+		}).Do
+
+		conn.DialTLSContext = (&packetdumper.DialTLSContext{
+			DialContext: conn.DialContext,
+			TLSConfig:   tlsConfig,
+		}).Do
+	} else {
+		conn.TLSConfig = tlsConfig
+	}
+
 	err = conn.Initialize(connectCtx)
 	connectCtxCancel()
 	if err != nil {
 		return err
 	}
+
+	s.mutex.Lock()
+	s.client = conn
+	s.mutex.Unlock()
+
+	defer func() {
+		s.mutex.Lock()
+		s.client = nil
+		s.mutex.Unlock()
+	}()
 
 	readDone := make(chan error)
 	go func() {
@@ -96,7 +133,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 		case <-params.Context.Done():
 			conn.Close()
-			<-readDone
+			<-readDone //nolint:errcheck
 			return nil
 		}
 	}
@@ -152,7 +189,7 @@ func (s *Source) runReader(conn *gortmplib.Client) error {
 // APISourceDescribe implements StaticSource.
 func (*Source) APISourceDescribe() *defs.APIPathSource {
 	return &defs.APIPathSource{
-		Type: "rtmpSource",
+		Type: defs.APIPathSourceTypeRTMPSource,
 		ID:   "",
 	}
 }

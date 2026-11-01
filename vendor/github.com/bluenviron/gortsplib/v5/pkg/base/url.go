@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// supported schemas
+const (
+	schemeRTSP  = "rtsp"
+	schemeRTSPS = "rtsps"
+)
+
 // URL is a RTSP URL.
 // This is basically an HTTP URL with some additional functions to handle
 // control attributes.
@@ -29,7 +35,7 @@ func ParseURL(s string) (*URL, error) {
 		return nil, err
 	}
 
-	if u.Scheme != "rtsp" && u.Scheme != "rtsps" {
+	if u.Scheme != schemeRTSP && u.Scheme != schemeRTSPS {
 		return nil, fmt.Errorf("unsupported scheme '%s'", u.Scheme)
 	}
 
@@ -72,6 +78,11 @@ func (u *URL) CloneWithoutCredentials() *URL {
 		ForceQuery: u.ForceQuery,
 		RawQuery:   u.RawQuery,
 	})
+}
+
+// RequestURI returns the path and query of the URL (abs_path).
+func (u *URL) RequestURI() string {
+	return (*url.URL)(u).RequestURI()
 }
 
 // Hostname returns u.Host, stripping any valid port number if present.

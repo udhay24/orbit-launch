@@ -6,8 +6,10 @@ import (
 	"io"
 	"time"
 
-	"github.com/bluenviron/gohlslib/v2/pkg/storage"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
+
+	"github.com/bluenviron/gohlslib/v2/pkg/storage"
 )
 
 type muxerSegmentMPEGTS struct {
@@ -20,13 +22,12 @@ type muxerSegmentMPEGTS struct {
 	startNTP       time.Time
 	startDTS       time.Duration
 
-	storage      storage.File
-	storagePart  storage.Part
-	bw           *bufio.Writer
-	size         uint64
-	path         string
-	endDTS       time.Duration // available after finalize()
-	audioAUCount int
+	storage     storage.File
+	storagePart storage.Part
+	bw          *bufio.Writer
+	size        uint64
+	path        string
+	endDTS      time.Duration // available after finalize()
 }
 
 func (s *muxerSegmentMPEGTS) initialize() error {
@@ -58,10 +59,6 @@ func (s *muxerSegmentMPEGTS) getDuration() time.Duration {
 
 func (s *muxerSegmentMPEGTS) getSize() uint64 {
 	return s.storage.Size()
-}
-
-func (*muxerSegmentMPEGTS) isFromForcedRotation() bool {
-	return false
 }
 
 func (s *muxerSegmentMPEGTS) reader() (io.ReadCloser, error) {
@@ -98,8 +95,8 @@ func (s *muxerSegmentMPEGTS) writeH264(
 
 	err := s.mpegtsWriter.WriteH264(
 		track.mpegtsTrack,
-		multiplyAndDivide(pts, 90000, int64(track.ClockRate)),
-		multiplyAndDivide(dts, 90000, int64(track.ClockRate)),
+		pts,
+		dts,
 		au,
 	)
 	if err != nil {
@@ -124,18 +121,46 @@ func (s *muxerSegmentMPEGTS) writeMPEG4Audio(
 	}
 	s.size += size
 
+	tolerance := durationToTimestamp(mpegtsAACPTSDriftTolerance, track.ClockRate)
+
+	// recompute timestamp from scratch.
+	// iOS+MPEG-TS+AAC requires a precise timestamp that might get lost during timestamp conversion.
+	// also reset in case of drifts.
+	if !track.mpegtsAACPTSInitialized ||
+		track.mpegtsAACPTS > (pts+tolerance) ||
+		track.mpegtsAACPTS < (pts-tolerance) {
+		track.mpegtsAACPTS = pts
+		track.mpegtsAACPTSInitialized = true
+	}
+
 	err := s.mpegtsWriter.WriteMPEG4Audio(
 		track.mpegtsTrack,
-		multiplyAndDivide(pts, 90000, int64(track.ClockRate)),
+		multiplyAndDivide(track.mpegtsAACPTS, 90000, int64(track.ClockRate)),
 		aus,
 	)
 	if err != nil {
 		return err
 	}
 
-	if track.isLeading {
-		s.audioAUCount++
-	}
+	track.mpegtsAACPTS += mpeg4audio.SamplesPerAccessUnit * int64(len(aus))
 
 	return nil
+}
+
+func (s *muxerSegmentMPEGTS) writeKLV(
+	track *muxerTrack,
+	pts int64,
+	data []byte,
+) error {
+	size := uint64(len(data))
+	if (s.size + size) > s.segmentMaxSize {
+		return fmt.Errorf("reached maximum segment size")
+	}
+	s.size += size
+
+	return s.mpegtsWriter.WriteKLV(
+		track.mpegtsTrack,
+		pts,
+		data,
+	)
 }

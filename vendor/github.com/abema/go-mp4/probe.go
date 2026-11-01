@@ -127,6 +127,9 @@ func Probe(r io.ReadSeeker) (*ProbeInfo, error) {
 			if _, err := bi.SeekToPayload(r); err != nil {
 				return nil, err
 			}
+			if err := checkPayloadSize(r, bi); err != nil {
+				return nil, err
+			}
 			if _, err := Unmarshal(r, bi.Size-bi.HeaderSize, &ftyp, bi.Context); err != nil {
 				return nil, err
 			}
@@ -141,6 +144,9 @@ func Probe(r io.ReadSeeker) (*ProbeInfo, error) {
 		case BoxTypeMvhd():
 			var mvhd Mvhd
 			if _, err := bi.SeekToPayload(r); err != nil {
+				return nil, err
+			}
+			if err := checkPayloadSize(r, bi); err != nil {
 				return nil, err
 			}
 			if _, err := Unmarshal(r, bi.Size-bi.HeaderSize, &mvhd, bi.Context); err != nil {
@@ -639,9 +645,11 @@ func (samples Samples) GetMaxBitrate(timescale uint32, timeDelta uint64) uint64 
 				break
 			}
 		}
-		bitrate := 8 * size * uint64(timescale) / duration
-		if bitrate > maxBitrate {
-			maxBitrate = bitrate
+		if duration != 0 {
+			bitrate := 8 * size * uint64(timescale) / duration
+			if bitrate > maxBitrate {
+				maxBitrate = bitrate
+			}
 		}
 		for {
 			size -= uint64(samples[begin].Size)

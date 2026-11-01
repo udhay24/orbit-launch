@@ -103,11 +103,7 @@ func (ps *Parts) Unmarshal(byts []byte) error {
 				}
 				tfdt = box.(*amp4.Tfdt)
 
-				if tfdt.Version != 1 {
-					return nil, fmt.Errorf("unsupported tfdt version")
-				}
-
-				curTrack.BaseTime = tfdt.BaseMediaDecodeTimeV1
+				curTrack.BaseTime = tfdt.GetBaseMediaDecodeTime()
 
 			case "trun":
 				if state != waitingTfdtTfhdTrun || tfhd == nil {
@@ -177,7 +173,7 @@ func (ps *Parts) Unmarshal(byts []byte) error {
 							size = tfhd.DefaultSampleSize
 						}
 
-						if len(ptr) < int(size) {
+						if size == 0 || len(ptr) < int(size) {
 							return nil, fmt.Errorf("invalid sample size")
 						}
 

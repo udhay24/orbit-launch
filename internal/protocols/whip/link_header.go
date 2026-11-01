@@ -1,66 +1,140 @@
 package whip
 
 import (
-	"encoding/json"
 	"fmt"
-	"regexp"
+	"strings"
 
 	"github.com/pion/webrtc/v4"
 )
 
+var linkHeaderCredentialReplacer = strings.NewReplacer(
+	`\`, `\\`,
+	`"`, `\"`,
+)
+
 func quoteCredential(v string) string {
-	b, _ := json.Marshal(v)
-	s := string(b)
-	return s[1 : len(s)-1]
+	return linkHeaderCredentialReplacer.Replace(v)
 }
 
-func unquoteCredential(v string) string {
-	var s string
-	json.Unmarshal([]byte("\""+v+"\""), &s) //nolint:errcheck
-	return s
-}
-
-// LinkHeaderMarshal encodes a link header.
-func LinkHeaderMarshal(iceServers []webrtc.ICEServer) []string {
-	ret := make([]string, len(iceServers))
-
-	for i, server := range iceServers {
-		link := "<" + server.URLs[0] + ">; rel=\"ice-server\""
-		if server.Username != "" {
-			link += "; username=\"" + quoteCredential(server.Username) + "\"" +
-				"; credential=\"" + quoteCredential(server.Credential.(string)) + "\"; credential-type=\"password\""
-		}
-		ret[i] = link
+func readQuotedCredential(v string) (string, string, bool) {
+	if len(v) == 0 || v[0] != '"' {
+		return "", "", false
 	}
 
-	return ret
+	var ret strings.Builder
+	ret.Grow(len(v) - 1)
+
+	escaped := false
+
+	for i := 1; i < len(v); i++ {
+		switch v[i] {
+		case '\\':
+			if escaped {
+				ret.WriteByte('\\')
+				escaped = false
+			} else {
+				escaped = true
+			}
+
+		case '"':
+			if escaped {
+				ret.WriteByte('"')
+				escaped = false
+			} else {
+				return ret.String(), v[i+1:], true
+			}
+
+		default:
+			if escaped {
+				return "", "", false
+			}
+			ret.WriteByte(v[i])
+		}
+	}
+
+	return "", "", false
 }
 
-var reLink = regexp.MustCompile(`^<(.+?)>; rel="ice-server"(; username="(.+?)"` +
-	`; credential="(.+?)"; credential-type="password")?`)
+// LinkHeader is a Link header.
+type LinkHeader []webrtc.ICEServer
 
-// LinkHeaderUnmarshal decodes a link header.
-func LinkHeaderUnmarshal(link []string) ([]webrtc.ICEServer, error) {
-	ret := make([]webrtc.ICEServer, len(link))
+// Unmarshal decodes a link header.
+func (lh *LinkHeader) Unmarshal(hdr []string) error {
+	*lh = make([]webrtc.ICEServer, len(hdr))
 
-	for i, li := range link {
-		m := reLink.FindStringSubmatch(li)
-		if m == nil {
-			return nil, fmt.Errorf("invalid link header: '%s'", li)
+	for i, li := range hdr {
+		var ok bool
+		li, ok = strings.CutPrefix(li, "<")
+		if !ok {
+			return fmt.Errorf("invalid link header: '%s'", li)
+		}
+
+		var url string
+		url, li, ok = strings.Cut(li, `>; rel="ice-server"`)
+		if !ok {
+			return fmt.Errorf("invalid link header: '<%s'", hdr[i])
 		}
 
 		s := webrtc.ICEServer{
-			URLs: []string{m[1]},
+			URLs: []string{url},
 		}
 
-		if m[3] != "" {
-			s.Username = unquoteCredential(m[3])
-			s.Credential = unquoteCredential(m[4])
+		if li != "" {
+			li, ok = strings.CutPrefix(li, `; username=`)
+			if !ok {
+				return fmt.Errorf("invalid link header: '<%s'", li)
+			}
+
+			s.Username, li, ok = readQuotedCredential(li)
+			if !ok || s.Username == "" {
+				return fmt.Errorf("invalid link header: '<%s'", li)
+			}
+
+			li, ok = strings.CutPrefix(li, `; credential=`)
+			if !ok {
+				return fmt.Errorf("invalid link header: '<%s'", li)
+			}
+
+			s.Credential, li, ok = readQuotedCredential(li)
+			if !ok {
+				return fmt.Errorf("invalid link header: '<%s'", li)
+			}
+
+			li, ok = strings.CutPrefix(li, `; credential-type="password"`)
+			if !ok || li != "" {
+				return fmt.Errorf("invalid link header: '<%s'", li)
+			}
+
 			s.CredentialType = webrtc.ICECredentialTypePassword
 		}
 
-		ret[i] = s
+		(*lh)[i] = s
 	}
 
-	return ret, nil
+	return nil
+}
+
+// Marshal encodes a link header.
+func (lh LinkHeader) Marshal() []string {
+	ret := make([]string, len(lh))
+
+	for i, server := range lh {
+		var link strings.Builder
+
+		link.WriteByte('<')
+		link.WriteString(server.URLs[0])
+		link.WriteString(`>; rel="ice-server"`)
+
+		if server.Username != "" {
+			link.WriteString(`; username="`)
+			link.WriteString(quoteCredential(server.Username))
+			link.WriteString(`"; credential="`)
+			link.WriteString(quoteCredential(server.Credential.(string)))
+			link.WriteString(`"; credential-type="password"`)
+		}
+
+		ret[i] = link.String()
+	}
+
+	return ret
 }

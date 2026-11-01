@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package webrtc
 
@@ -19,9 +18,9 @@ import (
 	"github.com/pion/dtls/v3/pkg/protocol/handshake"
 	"github.com/pion/ice/v4"
 	"github.com/pion/logging"
-	"github.com/pion/stun/v3"
-	"github.com/pion/transport/v4"
-	"github.com/pion/transport/v4/packetio"
+	"github.com/pion/stun/v4"
+	"github.com/pion/transport/v5"
+	"github.com/pion/transport/v5/packetio"
 	"golang.org/x/net/proxy"
 )
 
@@ -52,13 +51,14 @@ type SettingEngine struct {
 		ICENetworkTypes          []NetworkType
 		InterfaceFilter          func(string) (keep bool)
 		IPFilter                 func(net.IP) (keep bool)
+		RemoteIPFilter           func(net.IP) (keep bool)
 		NAT1To1IPs               []string
 		NAT1To1IPCandidateType   ICECandidateType
 		addressRewriteRules      []ice.AddressRewriteRule
 		MulticastDNSMode         ice.MulticastDNSMode
 		MulticastDNSHostName     string
 		UsernameFragment         string
-		Password                 string
+		Password                 string //nolint:gosec // not a secret.
 		IncludeLoopbackCandidate bool
 	}
 	replayProtection struct {
@@ -82,6 +82,7 @@ type SettingEngine struct {
 		clientHelloMessageHook        func(handshake.MessageClientHello) handshake.Message
 		serverHelloMessageHook        func(handshake.MessageServerHello) handshake.Message
 		certificateRequestMessageHook func(handshake.MessageCertificateRequest) handshake.Message
+		supportedProtocols            []string
 	}
 	sctp struct {
 		maxReceiveBufferSize uint32
@@ -91,6 +92,7 @@ type SettingEngine struct {
 		minCwnd              uint32
 		fastRtxWnd           uint32
 		cwndCAStep           uint32
+		enableSnap           bool
 	}
 	sdpMediaLevelFingerprints                 bool
 	answeringDTLSRole                         DTLSRole
@@ -104,6 +106,7 @@ type SettingEngine struct {
 	iceUDPMux                                 ice.UDPMux
 	iceProxyDialer                            proxy.Dialer
 	iceDisableActiveTCP                       bool
+	iceUseCandidateCheckPriority              bool
 	iceBindingRequestHandler                  func(m *stun.Message, local, remote ice.Candidate, pair *ice.CandidatePair) bool //nolint:lll
 	disableMediaEngineCopy                    bool
 	disableMediaEngineMultipleCodecs          bool
@@ -122,6 +125,7 @@ type renominationSettings struct {
 	generator         ice.NominationValueGenerator
 	automatic         bool
 	automaticInterval *time.Duration
+	attributeType     *uint16
 }
 
 // NominationValueGenerator generates nomination values for ICE renomination.
@@ -150,9 +154,18 @@ func WithRenominationInterval(interval time.Duration) RenominationOption {
 	}
 }
 
+// WithRenominationNominationAttribute overrides the STUN attribute type used for ICE renomination.
+// If unset, the underlying ICE agent default is used.
+func WithRenominationNominationAttribute(attrType uint16) RenominationOption {
+	return func(cfg *renominationSettings) {
+		a := attrType
+		cfg.attributeType = &a
+	}
+}
+
 var errInvalidRenominationInterval = errors.New("renomination interval must be greater than zero")
 
-// SetICERenomination configures ICE renomination using options for generator and scheduling.
+// SetICERenomination configures ICE renomination using options for generator, scheduling, and attribute type.
 // Manual control is not exposed yet. This always enables automatic renomination with the default
 // generator unless a custom one is provided.
 func (e *SettingEngine) SetICERenomination(options ...RenominationOption) error {
@@ -175,6 +188,7 @@ func (e *SettingEngine) SetICERenomination(options ...RenominationOption) error 
 	e.renomination.generator = cfg.generator
 	e.renomination.automatic = true
 	e.renomination.automaticInterval = cfg.automaticInterval
+	e.renomination.attributeType = cfg.attributeType
 
 	return nil
 }
@@ -303,6 +317,13 @@ func (e *SettingEngine) SetInterfaceFilter(filter func(string) (keep bool)) {
 // the amount of information you wish to expose to the remote peer.
 func (e *SettingEngine) SetIPFilter(filter func(net.IP) (keep bool)) {
 	e.candidates.IPFilter = filter
+}
+
+// SetRemoteIPFilter sets the filtering function for remote candidate IP addresses.
+// This can be used to whitelist or blacklist remote candidate IPs before they are
+// added to the ICE agent.
+func (e *SettingEngine) SetRemoteIPFilter(filter func(net.IP) (keep bool)) {
+	e.candidates.RemoteIPFilter = filter
 }
 
 // SetNAT1To1IPs sets a list of external IP addresses of 1:1 (D)NAT
@@ -488,6 +509,12 @@ func (e *SettingEngine) SetICEMaxBindingRequests(d uint16) {
 	e.iceMaxBindingRequests = &d
 }
 
+// SetICEUseCandidateCheckPriority enables checking pair priority before switching
+// selected candidate pair when an ICE Lite agent receives USE-CANDIDATE.
+func (e *SettingEngine) SetICEUseCandidateCheckPriority(enabled bool) {
+	e.iceUseCandidateCheckPriority = enabled
+}
+
 // DisableActiveTCP disables using active TCP for ICE. Active TCP is enabled by default.
 func (e *SettingEngine) DisableActiveTCP(isDisabled bool) {
 	e.iceDisableActiveTCP = isDisabled
@@ -590,6 +617,11 @@ func (e *SettingEngine) EnableSCTPZeroChecksum(isEnabled bool) {
 	e.sctp.enableZeroChecksum = isEnabled
 }
 
+// EnableSctpSnap enables the use of the SCTP SNAP connect optimization.
+func (e *SettingEngine) EnableSctpSnap(isEnabled bool) {
+	e.sctp.enableSnap = isEnabled
+}
+
 // SetSCTPMaxMessageSize sets the largest message we are willing to accept.
 // Leave this 0 for the default max message size.
 func (e *SettingEngine) SetSCTPMaxMessageSize(maxMessageSize uint32) {
@@ -627,6 +659,14 @@ func (e *SettingEngine) SetDTLSCertificateRequestMessageHook(
 	hook func(handshake.MessageCertificateRequest) handshake.Message,
 ) {
 	e.dtls.certificateRequestMessageHook = hook
+}
+
+// SetDTLSSupportedProtocols sets the supported application protocols (ALPN) for the DTLS handshake.
+// Note: RFC 8833 defines two application protocols for WebRTC:
+//   - `webrtc` - mixed media and data communications using SRTP and data channels.
+//   - `c-webrtc` - WebRTC with a promise to protect media confidentiality.
+func (e *SettingEngine) SetDTLSSupportedProtocols(protocols ...string) {
+	e.dtls.supportedProtocols = protocols
 }
 
 // SetSCTPRTOMax sets the maximum retransmission timeout.

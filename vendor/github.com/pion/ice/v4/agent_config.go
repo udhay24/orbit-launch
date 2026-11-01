@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/stun/v3"
-	"github.com/pion/transport/v4"
+	"github.com/pion/stun/v4"
+	"github.com/pion/transport/v5"
 	"golang.org/x/net/proxy"
 )
 
@@ -22,6 +22,10 @@ const (
 
 	// defaultDisconnectedTimeout is the default time till an Agent transitions disconnected.
 	defaultDisconnectedTimeout = 5 * time.Second
+
+	// defaultLiteDisconnectedTimeout uses the RFC 7675 consent-expiry period as a
+	// conservative receive-idle window for lite Agents.
+	defaultLiteDisconnectedTimeout = 10 * time.Second
 
 	// defaultFailedTimeout is the default time till an Agent transitions to failed after disconnected.
 	defaultFailedTimeout = 25 * time.Second
@@ -94,7 +98,10 @@ type AgentConfig struct {
 	// MulticastDNSHostName controls the hostname for this agent. If none is specified a random one will be generated
 	MulticastDNSHostName string
 
-	// DisconnectedTimeout defaults to 5 seconds when this property is nil.
+	// DisconnectedTimeout controls how long a selected pair may receive no traffic
+	// before the Agent transitions to disconnected. It defaults to 10 seconds for
+	// lite Agents and 5 seconds for full Agents when this property is nil. The
+	// longer lite default does not extend the default initial checking deadline.
 	// If the duration is 0, the ICE Agent will never go to disconnected
 	DisconnectedTimeout *time.Duration
 
@@ -112,9 +119,23 @@ type AgentConfig struct {
 	// connecting state.
 	CheckInterval *time.Duration
 
-	// NetworkTypes is an optional configuration for disabling or enabling
-	// support for specific network types.
+	// NetworkTypes controls the candidate network types exposed in ICE candidates
+	// and used for pairing.
+	//
+	// This is independent from the TURN client-to-server transport configured via
+	// WithTURNTransportProtocols. Supported values are the NetworkType variants
+	// (NetworkTypeUDP4, NetworkTypeUDP6, NetworkTypeTCP4, NetworkTypeTCP6).
+	// When empty, all candidate network types are enabled by default.
 	NetworkTypes []NetworkType
+
+	// turnTransportProtocols restricts protocols used internally by this agent when connecting
+	// to TURN servers (the TURN client <-> TURN server transport).
+	//
+	// This is independent from NetworkTypes, which controls candidate network types
+	// exposed in ICE and used for pairing. Configure this via
+	// WithTURNTransportProtocols. Supported values are the NetworkType variants
+	// (NetworkTypeUDP4, NetworkTypeUDP6, NetworkTypeTCP4, NetworkTypeTCP6).
+	turnTransportProtocols []NetworkType
 
 	// CandidateTypes is an optional configuration for disabling or enabling
 	// support for specific candidate types.
@@ -172,6 +193,10 @@ type AgentConfig struct {
 	// IPFilter is a function that you can use in order to whitelist or blacklist
 	// the ips which are used to gather ICE candidates.
 	IPFilter func(net.IP) (keep bool)
+
+	// RemoteIPFilter is a function that you can use in order to whitelist or blacklist
+	// remote candidate IP addresses before they are added to the agent.
+	RemoteIPFilter func(net.IP) (keep bool)
 
 	// InsecureSkipVerify controls if self-signed certificates are accepted when connecting
 	// to TURN servers via TLS or DTLS
@@ -277,6 +302,7 @@ func (config *AgentConfig) initWithDefaults(agent *Agent) { //nolint:cyclop
 	} else {
 		agent.disconnectedTimeout = *config.DisconnectedTimeout
 	}
+	agent.disconnectedTimeoutExplicit = config.DisconnectedTimeout != nil
 
 	if config.FailedTimeout == nil {
 		agent.failedTimeout = defaultFailedTimeout

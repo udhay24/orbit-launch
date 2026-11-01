@@ -36,15 +36,11 @@ func (p *VP8Payloader) Payload(mtu uint16, payload []byte) [][]byte { //nolint:c
 	 *     first packet of each encoded frame.
 	 */
 
+	// Like libwebrtc, always use the 15-bit PictureID so the descriptor size
+	// does not change and SFUs can rewrite the PictureID in place.
 	usingHeaderSize := vp8HeaderSize
 	if p.EnablePictureID {
-		switch {
-		case p.pictureID == 0:
-		case p.pictureID < 128:
-			usingHeaderSize = vp8HeaderSize + 2
-		default:
-			usingHeaderSize = vp8HeaderSize + 3
-		}
+		usingHeaderSize = vp8HeaderSize + 3
 	}
 
 	maxFragmentSize := int(mtu) - usingHeaderSize
@@ -69,18 +65,10 @@ func (p *VP8Payloader) Payload(mtu uint16, payload []byte) [][]byte { //nolint:c
 			first = false
 		}
 		if p.EnablePictureID {
-			switch usingHeaderSize {
-			case vp8HeaderSize:
-			case vp8HeaderSize + 2:
-				out[0] |= 0x80
-				out[1] |= 0x80
-				out[2] |= uint8(p.pictureID & 0x7F) // nolint: gosec // G115 false positive
-			case vp8HeaderSize + 3:
-				out[0] |= 0x80
-				out[1] |= 0x80
-				out[2] |= 0x80 | uint8((p.pictureID>>8)&0x7F) // nolint: gosec // G115 false positive
-				out[3] |= uint8(p.pictureID & 0xFF)           // nolint: gosec // G115 false positive
-			}
+			out[0] |= 0x80
+			out[1] |= 0x80
+			out[2] |= 0x80 | uint8((p.pictureID>>8)&0x7F) // nolint: gosec // G115 false positive
+			out[3] |= uint8(p.pictureID & 0xFF)           // nolint: gosec // G115 false positive
 		}
 
 		copy(out[usingHeaderSize:], payloadData[payloadDataIndex:payloadDataIndex+currentFragmentSize])
@@ -163,14 +151,17 @@ func (p *VP8Packet) Unmarshal(payload []byte) ([]byte, error) { //nolint:gocogni
 		if payloadIndex >= payloadLen {
 			return nil, errShortPacket
 		}
+		//nolint:gosec // G602: payloadIndex bounds checked above
 		if payload[payloadIndex]&0x80 > 0 { // M == 1, PID is 16bit
 			if payloadIndex+1 >= payloadLen {
 				return nil, errShortPacket
 			}
-			p.PictureID = (uint16(payload[payloadIndex]&0x7F) << 8) | uint16(payload[payloadIndex+1])
+			//nolint:gosec // G602: payloadIndex bounds checked above
+			p.PictureID = (uint16(payload[payloadIndex]&0x7F) << 8) |
+				uint16(payload[payloadIndex+1])
 			payloadIndex += 2
 		} else {
-			p.PictureID = uint16(payload[payloadIndex])
+			p.PictureID = uint16(payload[payloadIndex]) //nolint:gosec
 			payloadIndex++
 		}
 	} else {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
 	"github.com/pion/dtls/v3/pkg/crypto/signaturehash"
+	"github.com/pion/dtls/v3/pkg/protocol"
 	"github.com/pion/dtls/v3/pkg/protocol/alert"
 	"github.com/pion/dtls/v3/pkg/protocol/handshake"
 	"github.com/pion/logging"
@@ -82,14 +83,16 @@ func (s handshakeState) String() string {
 }
 
 type handshakeFSM struct {
-	currentFlight      flightVal
-	flights            []*packet
-	retransmit         bool
-	retransmitInterval time.Duration
-	state              *State
-	cache              *handshakeCache
-	cfg                *handshakeConfig
-	closed             chan struct{}
+	currentFlight          flightVal
+	flights                []*packet
+	retransmit             bool
+	retransmitInterval     time.Duration
+	peerRetransmitAfter    time.Time
+	peerRetransmitInterval time.Duration
+	state                  *State
+	cache                  *handshakeCache
+	cfg                    *handshakeConfig
+	closed                 chan struct{}
 }
 
 type handshakeConfig struct {
@@ -136,6 +139,9 @@ type handshakeConfig struct {
 	certificateRequestMessageHook func(handshake.MessageCertificateRequest) handshake.Message
 
 	resumeState *State
+
+	minVersion protocol.Version
+	maxVersion protocol.Version
 }
 
 type flightConn interface {
@@ -241,6 +247,8 @@ func (s *handshakeFSM) prepare(ctx context.Context, conn flightConn) (handshakeS
 		return handshakeErrored, err
 	}
 
+	s.peerRetransmitAfter = time.Time{}
+	s.peerRetransmitInterval = 0
 	s.flights = pkts
 	epoch := s.cfg.initialEpoch
 	nextEpoch := epoch
@@ -286,18 +294,11 @@ func (s *handshakeFSM) wait(ctx context.Context, conn flightConn) (handshakeStat
 	}
 
 	retransmitTimer := time.NewTimer(s.retransmitInterval)
+	defer retransmitTimer.Stop()
 	for {
 		select {
 		case state := <-conn.recvHandshake():
-			if state.isRetransmit {
-				close(state.done)
-				// ignore incoming retransmit hints, only rely on the timer-driven path below
-				// https://github.com/pion/dtls/issues/758
-				continue
-			}
-
 			nextFlight, alert, err := parse(ctx, conn, s.state, s.cache, s.cfg)
-			s.retransmitInterval = s.cfg.initialRetransmitInterval
 			close(state.done)
 			if alert != nil {
 				if alertErr := conn.notify(ctx, alert.Level, alert.Description); alertErr != nil {
@@ -310,7 +311,26 @@ func (s *handshakeFSM) wait(ctx context.Context, conn flightConn) (handshakeStat
 				return handshakeErrored, err
 			}
 			if nextFlight == 0 {
+				if s.shouldRetransmitClientHello(state) {
+					if s.currentFlight != flight2 {
+						s.backoffPeerRetransmit()
+					}
+
+					return handshakeSending, nil
+				}
+
 				break
+			}
+			if s.currentFlight == flight3 && nextFlight == flight3 {
+				// A new cookie doesn't bypass or reset the retry backoff.
+				select {
+				case <-retransmitTimer.C:
+					s.backoffRetransmit()
+				case <-ctx.Done():
+					return handshakeErrored, ctx.Err()
+				}
+			} else if !state.isRetransmit {
+				s.retransmitInterval = s.cfg.initialRetransmitInterval
 			}
 			s.cfg.log.Tracef(
 				"[handshake:%s] %s -> %s",
@@ -330,15 +350,8 @@ func (s *handshakeFSM) wait(ctx context.Context, conn flightConn) (handshakeStat
 				return handshakeWaiting, nil
 			}
 
-			// RFC 4347 4.2.4.1:
-			// Implementations SHOULD use an initial timer value of 1 second (the minimum defined in RFC 2988 [RFC2988])
-			// and double the value at each retransmission, up to no less than the RFC 2988 maximum of 60 seconds.
-			if !s.cfg.disableRetransmitBackoff {
-				s.retransmitInterval *= 2
-			}
-			if s.retransmitInterval > time.Second*60 {
-				s.retransmitInterval = time.Second * 60
-			}
+			s.backoffRetransmit()
+			s.backoffPeerRetransmit()
 
 			return handshakeSending, nil
 		case <-ctx.Done():
@@ -361,4 +374,36 @@ func (s *handshakeFSM) finish(ctx context.Context, c flightConn) (handshakeState
 	case <-ctx.Done():
 		return handshakeErrored, ctx.Err()
 	}
+}
+
+// Back off timer-driven retries without shortening a configured interval above
+// the normal cap. Clamp before doubling to avoid duration overflow.
+// https://www.rfc-editor.org/rfc/rfc6347.html#section-4.2.4.1
+func (s *handshakeFSM) backoffRetransmit() {
+	if !s.cfg.disableRetransmitBackoff && s.retransmitInterval < time.Minute {
+		s.retransmitInterval = min(s.retransmitInterval, 30*time.Second) * 2
+	}
+}
+
+// Allow the first repeated ClientHello to recover a lost response immediately.
+// After any retransmission, further repeats must wait for the backed-off interval.
+func (s *handshakeFSM) shouldRetransmitClientHello(state recvHandshakeState) bool {
+	if state.isClientHelloRetransmit && s.currentFlight == flight2 {
+		return true
+	}
+
+	return state.isClientHelloRetransmit &&
+		(s.currentFlight == flight4 || s.currentFlight == flight4b) &&
+		!time.Now().Before(s.peerRetransmitAfter)
+}
+
+// Peer-triggered recovery uses the default interval even when the caller has
+// effectively disabled timer-driven retries with a very large FlightInterval.
+func (s *handshakeFSM) backoffPeerRetransmit() {
+	if s.peerRetransmitInterval == 0 {
+		s.peerRetransmitInterval = initialTickerInterval
+	} else if !s.cfg.disableRetransmitBackoff {
+		s.peerRetransmitInterval = min(s.peerRetransmitInterval, 30*time.Second) * 2
+	}
+	s.peerRetransmitAfter = time.Now().Add(s.peerRetransmitInterval)
 }

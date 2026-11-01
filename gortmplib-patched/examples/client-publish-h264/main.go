@@ -14,7 +14,7 @@ import (
 )
 
 // This example shows how to:
-// 1. connect to a RTMP server, announce a H264 track.
+// 1. connect to a RTMP server through a URL, announce a H264 track.
 // 2. generate dummy RGBA images.
 // 3. encode images with H264.
 // 4. send H264 access units to the server.
@@ -23,7 +23,8 @@ import (
 // apt install -y libavcodec-dev libswscale-dev gcc pkg-config
 
 func main() {
-	u, err := url.Parse("rtmp://127.0.0.1:1935/stream/test")
+	// URL format is rtmp://user:pass@host:port/path#streamKey
+	u, err := url.Parse("rtmp://127.0.0.1:1935/stream")
 	if err != nil {
 		panic(err)
 	}

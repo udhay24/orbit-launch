@@ -5,15 +5,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bluenviron/gortsplib/v5/pkg/ntp"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
+
+	"github.com/bluenviron/gortsplib/v5/pkg/ntp"
 )
 
 // Sender is a utility to send RTP packets.
 // It is in charge of:
 // - counting sent packets
 // - generating RTCP sender reports.
+// - parsing incoming RTCP receiver reports.
 type Sender struct {
 	ClockRate       int
 	Period          time.Duration
@@ -29,12 +31,13 @@ type Sender struct {
 	lastSystem         time.Time
 	localSSRC          uint32
 	lastSequenceNumber uint16
-	packetCount        uint32
-	packetCount2       uint64
+	sent               uint64
+	reportedLost       uint64
 	octetCount         uint32
 
-	terminate chan struct{}
-	done      chan struct{}
+	terminate   chan struct{}
+	done        chan struct{}
+	firstPacket chan struct{}
 }
 
 // Initialize initializes a Sender.
@@ -45,6 +48,7 @@ func (rs *Sender) Initialize() {
 
 	rs.terminate = make(chan struct{})
 	rs.done = make(chan struct{})
+	rs.firstPacket = make(chan struct{})
 
 	go rs.run()
 }
@@ -58,6 +62,19 @@ func (rs *Sender) Close() {
 func (rs *Sender) run() {
 	defer close(rs.done)
 
+	if rs.ClockRate == 0 {
+		return
+	}
+
+	select {
+	case <-rs.firstPacket:
+		report := rs.report()
+		rs.WritePacketRTCP(report)
+
+	case <-rs.terminate:
+		return
+	}
+
 	t := time.NewTicker(rs.Period)
 	defer t.Stop()
 
@@ -65,9 +82,7 @@ func (rs *Sender) run() {
 		select {
 		case <-t.C:
 			report := rs.report()
-			if report != nil {
-				rs.WritePacketRTCP(report)
-			}
+			rs.WritePacketRTCP(report)
 
 		case <-rs.terminate:
 			return
@@ -79,10 +94,6 @@ func (rs *Sender) report() rtcp.Packet {
 	rs.mutex.RLock()
 	defer rs.mutex.RUnlock()
 
-	if !rs.firstRTPPacketSent || rs.ClockRate == 0 {
-		return nil
-	}
-
 	systemDiff := rs.TimeNow().Sub(rs.lastSystem)
 	ntpTime := rs.lastNTP.Add(systemDiff)
 	rtpTime := rs.lastRTP + uint32(systemDiff.Seconds()*float64(rs.ClockRate))
@@ -91,7 +102,7 @@ func (rs *Sender) report() rtcp.Packet {
 		SSRC:        rs.localSSRC,
 		NTPTime:     ntp.Encode(ntpTime),
 		RTPTime:     rtpTime,
-		PacketCount: rs.packetCount,
+		PacketCount: uint32(rs.sent),
 		OctetCount:  rs.octetCount,
 	}
 }
@@ -102,26 +113,48 @@ func (rs *Sender) ProcessPacket(pkt *rtp.Packet, ntp time.Time, ptsEqualsDTS boo
 	defer rs.mutex.Unlock()
 
 	if ptsEqualsDTS {
+		isFirst := !rs.firstRTPPacketSent
+
 		rs.firstRTPPacketSent = true
 		rs.lastRTP = pkt.Timestamp
 		rs.lastNTP = ntp
 		rs.lastSystem = rs.TimeNow()
 		rs.localSSRC = pkt.SSRC
+
+		if isFirst {
+			close(rs.firstPacket)
+		}
 	}
 
 	rs.lastSequenceNumber = pkt.SequenceNumber
 
-	rs.packetCount++
-	rs.packetCount2++
+	rs.sent++
 	rs.octetCount += uint32(len(pkt.Payload))
+}
+
+// ProcessReceptionReport extracts data from RTCP receiver reports.
+func (rs *Sender) ProcessReceptionReport(report *rtcp.ReceptionReport) {
+	rs.mutex.Lock()
+	defer rs.mutex.Unlock()
+
+	rs.reportedLost = uint64(report.TotalLost)
 }
 
 // Stats are statistics.
 type Stats struct {
+	// outbound RTP packets.
+	Sent uint64
+	// last sequence number of outbound RTP packets.
 	LastSequenceNumber uint16
-	LastRTP            uint32
-	LastNTP            time.Time
-	TotalSent          uint64
+	// last RTP time of outbound RTP packets.
+	LastRTP uint32
+	// last NTP time of outbound RTP packets.
+	LastNTP time.Time
+	// outbound RTP packets reported as lost by the remote receiver.
+	ReportedLost uint64
+
+	// Deprecated: use Sent.
+	TotalSent uint64
 }
 
 // Stats returns statistics.
@@ -134,9 +167,12 @@ func (rs *Sender) Stats() *Stats {
 	}
 
 	return &Stats{
+		Sent:               rs.sent,
 		LastSequenceNumber: rs.lastSequenceNumber,
 		LastRTP:            rs.lastRTP,
 		LastNTP:            rs.lastNTP,
-		TotalSent:          rs.packetCount2,
+		ReportedLost:       rs.reportedLost,
+		// deprecated
+		TotalSent: rs.sent,
 	}
 }

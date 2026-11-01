@@ -6,6 +6,20 @@ import (
 	"io"
 )
 
+func checkPayloadSize(r io.ReadSeeker, bi *BoxInfo) error {
+	fileSize, err := r.Seek(0, io.SeekEnd)
+	if _, seekErr := r.Seek(int64(bi.Offset+bi.HeaderSize), io.SeekStart); seekErr != nil {
+		return seekErr
+	}
+	if err != nil {
+		return nil
+	}
+	if bi.Offset+bi.Size > uint64(fileSize) {
+		return fmt.Errorf("box size exceeds file size: offset=%d, size=%d, fileSize=%d", bi.Offset, bi.Size, fileSize)
+	}
+	return nil
+}
+
 type BoxPath []BoxType
 
 func (lhs BoxPath) compareWith(rhs BoxPath) (forwardMatch bool, match bool) {
@@ -53,6 +67,9 @@ func readBoxStructureFromInternal(r io.ReadSeeker, bi *BoxInfo, path BoxPath, ha
 	// check comatible-brands
 	if len(path) == 0 && bi.Type == BoxTypeFtyp() {
 		var ftyp Ftyp
+		if err := checkPayloadSize(r, bi); err != nil {
+			return nil, err
+		}
 		if _, err := Unmarshal(r, bi.Size-bi.HeaderSize, &ftyp, bi.Context); err != nil {
 			return nil, err
 		}
@@ -67,6 +84,9 @@ func readBoxStructureFromInternal(r io.ReadSeeker, bi *BoxInfo, path BoxPath, ha
 	// parse numbered ilst items after keys box by saving EntryCount field to context
 	if bi.Type == BoxTypeKeys() {
 		var keys Keys
+		if err := checkPayloadSize(r, bi); err != nil {
+			return nil, err
+		}
 		if _, err := Unmarshal(r, bi.Size-bi.HeaderSize, &keys, bi.Context); err != nil {
 			return nil, err
 		}
@@ -107,6 +127,9 @@ func readBoxStructureFromInternal(r io.ReadSeeker, bi *BoxInfo, path BoxPath, ha
 			return nil, 0, err
 		}
 
+		if err := checkPayloadSize(r, bi); err != nil {
+			return nil, 0, err
+		}
 		box, n, err := UnmarshalAny(r, bi.Type, bi.Size-bi.HeaderSize, bi.Context)
 		if err != nil {
 			return nil, 0, err
@@ -133,6 +156,9 @@ func readBoxStructureFromInternal(r io.ReadSeeker, bi *BoxInfo, path BoxPath, ha
 				return nil, err
 			}
 
+			if err := checkPayloadSize(r, bi); err != nil {
+				return nil, err
+			}
 			_, n, err := UnmarshalAny(r, bi.Type, bi.Size-bi.HeaderSize, bi.Context)
 			if err != nil {
 				return nil, err

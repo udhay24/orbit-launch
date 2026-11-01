@@ -2,17 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 //go:build !js
-// +build !js
 
 package webrtc
 
 import (
+	"crypto/rand"
 	"errors"
-	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/pion/datachannel"
 	"github.com/pion/logging"
@@ -54,6 +52,7 @@ type DataChannel struct {
 	onOpenHandler       func()
 	dialHandlerOnce     sync.Once
 	onDialHandler       func()
+	closeHandlerOnce    sync.Once
 	onCloseHandler      func()
 	onBufferedAmountLow func()
 	onErrorHandler      func(error)
@@ -97,7 +96,7 @@ func (api *API) newDataChannel(
 
 	dataChannel := &DataChannel{
 		sctpTransport:     sctpTransport,
-		statsID:           fmt.Sprintf("DataChannel-%d", time.Now().UnixNano()),
+		statsID:           "DataChannel-" + rand.Text(),
 		label:             params.Label,
 		protocol:          params.Protocol,
 		negotiated:        params.Negotiated,
@@ -285,8 +284,14 @@ func (d *DataChannel) onDial() {
 // prior to GracefulClose.
 func (d *DataChannel) OnClose(f func()) {
 	d.mu.Lock()
-	defer d.mu.Unlock()
+	d.closeHandlerOnce = sync.Once{}
 	d.onCloseHandler = f
+	d.mu.Unlock()
+
+	if d.ReadyState() == DataChannelStateClosed {
+		// If the data channel is already closed, call the handler immediately.
+		go d.closeHandlerOnce.Do(f)
+	}
 }
 
 func (d *DataChannel) onClose() {
@@ -295,7 +300,7 @@ func (d *DataChannel) onClose() {
 	d.mu.RUnlock()
 
 	if handler != nil {
-		go handler()
+		go d.closeHandlerOnce.Do(handler)
 	}
 }
 
@@ -461,8 +466,6 @@ func (d *DataChannel) SendText(s string) error {
 }
 
 func (d *DataChannel) ensureOpen() error {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
 	if d.ReadyState() != DataChannelStateOpen {
 		return io.ErrClosedPipe
 	}
@@ -512,7 +515,7 @@ func (d *DataChannel) DetachWithDeadline() (datachannel.ReadWriteCloserDeadliner
 	d.sctpTransport.lock.Lock()
 	n := len(d.sctpTransport.dataChannels)
 	j := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if d == d.sctpTransport.dataChannels[i] {
 			continue
 		}

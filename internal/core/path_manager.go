@@ -2,11 +2,13 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"sort"
 	"sync"
-	"sync/atomic"
+
+	"github.com/google/uuid"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
@@ -15,7 +17,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
-	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
 func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
@@ -23,6 +24,7 @@ func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 
 	clone.Name = newPathConf.Name
 	clone.Regexp = newPathConf.Regexp
+	clone.Forward = newPathConf.Forward
 
 	clone.Record = newPathConf.Record
 	clone.RecordPath = newPathConf.RecordPath
@@ -46,6 +48,8 @@ func pathConfCanBeUpdated(oldPathConf *conf.Path, newPathConf *conf.Path) bool {
 	clone.RPICameraGain = newPathConf.RPICameraGain
 	clone.RPICameraEV = newPathConf.RPICameraEV
 	clone.RPICameraFPS = newPathConf.RPICameraFPS
+	clone.RPICameraTextOverlayEnable = newPathConf.RPICameraTextOverlayEnable
+	clone.RPICameraTextOverlay = newPathConf.RPICameraTextOverlay
 	clone.RPICameraIDRPeriod = newPathConf.RPICameraIDRPeriod
 	clone.RPICameraBitrate = newPathConf.RPICameraBitrate
 
@@ -75,8 +79,12 @@ type pathSetStreamRegistryReq struct {
 	res chan pathSetStreamRegistryRes
 }
 
+type pathManagerPublishAllowlist interface {
+	Check(pathName string) error
+}
+
 type pathManagerAuthManager interface {
-	Authenticate(req *auth.Request) *auth.Error
+	Authenticate(req *auth.Request) (*auth.Result, *auth.Error)
 }
 
 type pathManagerParent interface {
@@ -91,7 +99,9 @@ type pathManager struct {
 	writeTimeout        conf.Duration
 	writeQueueSize      int
 	udpReadBufferSize   uint
+	udpMaxPayloadSize   int
 	rtpMaxPayloadSize   int
+	supportsIPv6        bool
 	pathConfs           map[string]*conf.Path
 	authManager         pathManagerAuthManager
 	externalCmdPool     *externalcmd.Pool
@@ -99,6 +109,7 @@ type pathManager struct {
 	parent              pathManagerParent
 	maxPublishers       int
 	publisherHysteresis int
+	publishAllowlist    pathManagerPublishAllowlist
 
 	ctx               context.Context
 	ctxCancel         func()
@@ -110,19 +121,22 @@ type pathManager struct {
 	publisherLimitHit bool
 
 	// in
-	chReloadConf        chan map[string]*conf.Path
-	chSetHLSServer      chan pathSetHLSServerReq
-	chSetStreamRegistry chan pathSetStreamRegistryReq
-	chRemovePath        chan *path
-	chClosePathIfIdle   chan *path
-	chSetPathReady      chan *path
-	chSetPathNotReady   chan *path
-	chFindPathConf      chan defs.PathFindPathConfReq
-	chDescribe          chan defs.PathDescribeReq
-	chAddReader         chan defs.PathAddReaderReq
-	chAddPublisher      chan defs.PathAddPublisherReq
-	chAPIPathsList      chan pathAPIPathsListReq
-	chAPIPathsGet       chan pathAPIPathsGetReq
+	chReloadConf          chan map[string]*conf.Path
+	chSetHLSServer        chan pathSetHLSServerReq
+	chSetStreamRegistry   chan pathSetStreamRegistryReq
+	chRemovePath          chan *path
+	chClosePathIfIdle     chan *path
+	chSetPathReady        chan *path
+	chSetPathNotReady     chan *path
+	chFindPathConf        chan defs.PathFindPathConfReq
+	chDescribe            chan defs.PathDescribeReq
+	chAddReader           chan defs.PathAddReaderReq
+	chAddPublisher        chan defs.PathAddPublisherReq
+	chAPIPathsList        chan pathAPIPathsListReq
+	chAPIPathsGet         chan pathAPIPathsGetReq
+	chAPIForwardDestsList chan pathAPIForwardDestsListReq
+	chAPIForwardDestsGet  chan pathAPIForwardDestsGetReq
+	chAPIStaticSourcesGet chan pathAPIStaticSourcesGetReq
 }
 
 func (pm *pathManager) initialize() {
@@ -144,6 +158,9 @@ func (pm *pathManager) initialize() {
 	pm.chAddPublisher = make(chan defs.PathAddPublisherReq)
 	pm.chAPIPathsList = make(chan pathAPIPathsListReq)
 	pm.chAPIPathsGet = make(chan pathAPIPathsGetReq)
+	pm.chAPIForwardDestsList = make(chan pathAPIForwardDestsListReq)
+	pm.chAPIForwardDestsGet = make(chan pathAPIForwardDestsGetReq)
+	pm.chAPIStaticSourcesGet = make(chan pathAPIStaticSourcesGetReq)
 
 	for _, pathConf := range pm.pathConfs {
 		if pathConf.Regexp == nil {
@@ -203,7 +220,7 @@ outer:
 			}
 
 		case pa := <-pm.chClosePathIfIdle:
-			if atomic.LoadInt64(pa.pendingRequests) == 0 {
+			if pa.pendingRequests.Load() == 0 {
 				pm.doClosePath(pa)
 			}
 
@@ -230,6 +247,15 @@ outer:
 
 		case req := <-pm.chAPIPathsGet:
 			pm.doAPIPathsGet(req)
+
+		case req := <-pm.chAPIForwardDestsList:
+			pm.doAPIForwardDestsList(req)
+
+		case req := <-pm.chAPIForwardDestsGet:
+			pm.doAPIForwardDestsGet(req)
+
+		case req := <-pm.chAPIStaticSourcesGet:
+			pm.doAPIStaticSourcesGet(req)
 
 		case <-pm.ctx.Done():
 			break outer
@@ -387,13 +413,16 @@ func (pm *pathManager) doFindPathConf(req defs.PathFindPathConfReq) {
 		return
 	}
 
-	err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
+	result, err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
 	if err2 != nil {
 		req.Res <- defs.PathFindPathConfRes{Err: err2}
 		return
 	}
 
-	req.Res <- defs.PathFindPathConfRes{Conf: pathConf}
+	req.Res <- defs.PathFindPathConfRes{
+		Conf:    pathConf,
+		AuthRes: result,
+	}
 }
 
 func (pm *pathManager) doDescribe(req defs.PathDescribeReq) {
@@ -403,35 +432,10 @@ func (pm *pathManager) doDescribe(req defs.PathDescribeReq) {
 		return
 	}
 
-	err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
-	if err2 != nil {
-		req.Res <- defs.PathDescribeRes{Err: err2}
-		return
-	}
-
-	// create path if it doesn't exist
-	if _, ok := pm.paths[req.AccessRequest.Name]; !ok {
-		pm.createPath(pathConf, req.AccessRequest.Name, pathMatches)
-	}
-
-	pa := pm.paths[req.AccessRequest.Name]
-
-	atomic.AddInt64(pa.pendingRequests, 1)
-
-	req.Res <- defs.PathDescribeRes{Path: pa}
-}
-
-func (pm *pathManager) doAddReader(req defs.PathAddReaderReq) {
-	pathConf, pathMatches, err := conf.FindPathConf(pm.pathConfs, req.AccessRequest.Name)
-	if err != nil {
-		req.Res <- defs.PathAddReaderRes{Err: err}
-		return
-	}
-
 	if !req.AccessRequest.SkipAuth {
-		err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
+		_, err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
 		if err2 != nil {
-			req.Res <- defs.PathAddReaderRes{Err: err2}
+			req.Res <- defs.PathDescribeRes{Err: err2}
 			return
 		}
 	}
@@ -443,9 +447,42 @@ func (pm *pathManager) doAddReader(req defs.PathAddReaderReq) {
 
 	pa := pm.paths[req.AccessRequest.Name]
 
-	atomic.AddInt64(pa.pendingRequests, 1)
+	pa.pendingRequests.Add(1)
 
-	req.Res <- defs.PathAddReaderRes{Path: pa}
+	req.Res <- defs.PathDescribeRes{Path: pa}
+}
+
+func (pm *pathManager) doAddReader(req defs.PathAddReaderReq) {
+	pathConf, pathMatches, err := conf.FindPathConf(pm.pathConfs, req.AccessRequest.Name)
+	if err != nil {
+		req.Res <- defs.PathAddReaderRes{Err: err}
+		return
+	}
+
+	result := &auth.Result{}
+
+	if !req.AccessRequest.SkipAuth {
+		var authErr *auth.Error
+		result, authErr = pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
+		if authErr != nil {
+			req.Res <- defs.PathAddReaderRes{Err: authErr}
+			return
+		}
+	}
+
+	// create path if it doesn't exist
+	if _, ok := pm.paths[req.AccessRequest.Name]; !ok {
+		pm.createPath(pathConf, req.AccessRequest.Name, pathMatches)
+	}
+
+	pa := pm.paths[req.AccessRequest.Name]
+
+	pa.pendingRequests.Add(1)
+
+	req.Res <- defs.PathAddReaderRes{
+		Path:    pa,
+		AuthRes: result,
+	}
 }
 
 func (pm *pathManager) doAddPublisher(req defs.PathAddPublisherReq) {
@@ -460,10 +497,13 @@ func (pm *pathManager) doAddPublisher(req defs.PathAddPublisherReq) {
 		return
 	}
 
+	result := &auth.Result{}
+
 	if !req.AccessRequest.SkipAuth {
-		err2 := pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
-		if err2 != nil {
-			req.Res <- defs.PathAddPublisherRes{Err: err2}
+		var authErr *auth.Error
+		result, authErr = pm.authManager.Authenticate(req.AccessRequest.ToAuthRequest())
+		if authErr != nil {
+			req.Res <- defs.PathAddPublisherRes{Err: authErr}
 			return
 		}
 	}
@@ -480,9 +520,12 @@ func (pm *pathManager) doAddPublisher(req defs.PathAddPublisherReq) {
 
 	pa := pm.paths[req.AccessRequest.Name]
 
-	atomic.AddInt64(pa.pendingRequests, 1)
+	pa.pendingRequests.Add(1)
 
-	req.Res <- defs.PathAddPublisherRes{Path: pa}
+	req.Res <- defs.PathAddPublisherRes{
+		Path:    pa,
+		AuthRes: result,
+	}
 }
 
 func (pm *pathManager) doAPIPathsList(req pathAPIPathsListReq) {
@@ -502,6 +545,36 @@ func (pm *pathManager) doAPIPathsGet(req pathAPIPathsGetReq) {
 	req.res <- pathAPIPathsGetRes{path: pa}
 }
 
+func (pm *pathManager) doAPIForwardDestsList(req pathAPIForwardDestsListReq) {
+	pa, ok := pm.paths[req.name]
+	if !ok {
+		req.res <- pathAPIForwardDestsListRes{err: conf.ErrPathNotFound}
+		return
+	}
+
+	req.res <- pathAPIForwardDestsListRes{path: pa}
+}
+
+func (pm *pathManager) doAPIForwardDestsGet(req pathAPIForwardDestsGetReq) {
+	pa, ok := pm.paths[req.name]
+	if !ok {
+		req.res <- pathAPIForwardDestsGetRes{err: conf.ErrPathNotFound}
+		return
+	}
+
+	req.res <- pathAPIForwardDestsGetRes{path: pa}
+}
+
+func (pm *pathManager) doAPIStaticSourcesGet(req pathAPIStaticSourcesGetReq) {
+	pa, ok := pm.paths[req.name]
+	if !ok {
+		req.res <- pathAPIStaticSourcesGetRes{err: conf.ErrPathNotFound}
+		return
+	}
+
+	req.res <- pathAPIStaticSourcesGetRes{path: pa}
+}
+
 func (pm *pathManager) createPath(
 	pathConf *conf.Path,
 	name string,
@@ -516,7 +589,9 @@ func (pm *pathManager) createPath(
 		writeTimeout:      pm.writeTimeout,
 		writeQueueSize:    pm.writeQueueSize,
 		udpReadBufferSize: pm.udpReadBufferSize,
+		udpMaxPayloadSize: pm.udpMaxPayloadSize,
 		rtpMaxPayloadSize: pm.rtpMaxPayloadSize,
+		supportsIPv6:      pm.supportsIPv6,
 		conf:              pathConf,
 		name:              name,
 		matches:           matches,
@@ -572,13 +647,41 @@ func (pm *pathManager) closePathIfIdle(pa *path) {
 	}
 }
 
+// checkPublishAllowlist runs outside of the run() loop since it performs network I/O.
+// Requests with SkipAuth were already checked by FindPathConf.
+func (pm *pathManager) checkPublishAllowlist(author logger.Writer, req *defs.PathAccessRequest) error {
+	if pm.publishAllowlist == nil || !req.Publish || req.SkipAuth {
+		return nil
+	}
+
+	err := pm.publishAllowlist.Check(req.Name)
+	if err != nil {
+		terr := &auth.Error{Wrapped: err}
+		auth.LogAndDelayError(author, terr)
+		return terr
+	}
+
+	return nil
+}
+
 // FindPathConf is called by a reader or publisher.
-func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*conf.Path, error) {
+func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+
 	req.Res = make(chan defs.PathFindPathConfRes)
 	select {
 	case pm.chFindPathConf <- req:
 		res := <-req.Res
-		return res.Conf, res.Err
+		if res.Err != nil {
+			if terr, ok := errors.AsType[*auth.Error](res.Err); ok && !terr.AskCredentials {
+				auth.LogAndDelayError(req.Author, terr)
+			}
+			return nil, res.Err
+		}
+
+		return &res, nil
 
 	case <-pm.ctx.Done():
 		return nil, fmt.Errorf("terminated")
@@ -586,59 +689,88 @@ func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*conf.Path, e
 }
 
 // Describe is called by a reader or publisher.
-func (pm *pathManager) Describe(req defs.PathDescribeReq) defs.PathDescribeRes {
+func (pm *pathManager) Describe(req defs.PathDescribeReq) (*defs.PathDescribeRes, error) {
 	req.Res = make(chan defs.PathDescribeRes)
 	select {
 	case pm.chDescribe <- req:
 		res1 := <-req.Res
 		if res1.Err != nil {
-			return res1
+			if terr, ok := errors.AsType[*auth.Error](res1.Err); ok && !terr.AskCredentials {
+				auth.LogAndDelayError(req.Author, terr)
+			}
+			return nil, res1.Err
 		}
 
-		res2 := res1.Path.(*path).describe(req)
-		if res2.Err != nil {
-			return res2
+		res2, err := res1.Path.(*path).describe(req)
+		if err != nil {
+			return nil, err
 		}
 
 		res2.Path = res1.Path
-		return res2
+		return res2, nil
 
 	case <-pm.ctx.Done():
-		return defs.PathDescribeRes{Err: fmt.Errorf("terminated")}
+		return nil, fmt.Errorf("terminated")
 	}
 }
 
 // AddPublisher is called by a publisher.
-func (pm *pathManager) AddPublisher(req defs.PathAddPublisherReq) (defs.Path, *stream.SubStream, error) {
+func (pm *pathManager) AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+		return nil, err
+	}
+
 	req.Res = make(chan defs.PathAddPublisherRes)
 	select {
 	case pm.chAddPublisher <- req:
-		res := <-req.Res
-		if res.Err != nil {
-			return nil, nil, res.Err
+		res1 := <-req.Res
+		if res1.Err != nil {
+			if terr, ok := errors.AsType[*auth.Error](res1.Err); ok && !terr.AskCredentials {
+				auth.LogAndDelayError(req.Author, terr)
+			}
+			return nil, res1.Err
 		}
 
-		return res.Path.(*path).addPublisher(req)
+		res2, err := res1.Path.(*path).addPublisher(req)
+		if err != nil {
+			return nil, err
+		}
+
+		res2.Path = res1.Path
+		res2.AuthRes = res1.AuthRes
+
+		return res2, nil
 
 	case <-pm.ctx.Done():
-		return nil, nil, fmt.Errorf("terminated")
+		return nil, fmt.Errorf("terminated")
 	}
 }
 
 // AddReader is called by a reader.
-func (pm *pathManager) AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error) {
+func (pm *pathManager) AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
 	req.Res = make(chan defs.PathAddReaderRes)
 	select {
 	case pm.chAddReader <- req:
-		res := <-req.Res
-		if res.Err != nil {
-			return nil, nil, res.Err
+		res1 := <-req.Res
+		if res1.Err != nil {
+			if terr, ok := errors.AsType[*auth.Error](res1.Err); ok && !terr.AskCredentials {
+				auth.LogAndDelayError(req.Author, terr)
+			}
+			return nil, res1.Err
 		}
 
-		return res.Path.(*path).addReader(req)
+		res2, err := res1.Path.(*path).addReader(req)
+		if err != nil {
+			return nil, err
+		}
+
+		res2.Path = res1.Path
+		res2.AuthRes = res1.AuthRes
+
+		return res2, nil
 
 	case <-pm.ctx.Done():
-		return nil, nil, fmt.Errorf("terminated")
+		return nil, fmt.Errorf("terminated")
 	}
 }
 
@@ -674,7 +806,7 @@ func (pm *pathManager) SetStreamRegistry(sr pathManagerStreamRegistry) []string 
 	}
 }
 
-// APIPathsList is called by api.
+// APIPathsList implements defs.APIPathManager.
 func (pm *pathManager) APIPathsList() (*defs.APIPathList, error) {
 	req := pathAPIPathsListReq{
 		res: make(chan pathAPIPathsListRes),
@@ -706,7 +838,7 @@ func (pm *pathManager) APIPathsList() (*defs.APIPathList, error) {
 	}
 }
 
-// APIPathsGet is called by api.
+// APIPathsGet implements defs.APIPathManager.
 func (pm *pathManager) APIPathsGet(name string) (*defs.APIPath, error) {
 	req := pathAPIPathsGetReq{
 		name: name,
@@ -721,6 +853,73 @@ func (pm *pathManager) APIPathsGet(name string) (*defs.APIPath, error) {
 		}
 
 		data, err := res.path.APIPathsGet(req)
+		return data, err
+
+	case <-pm.ctx.Done():
+		return nil, fmt.Errorf("terminated")
+	}
+}
+
+// APIForwardDestsList implements defs.APIPathManager.
+func (pm *pathManager) APIForwardDestsList(name string) (*defs.APIForwardDestList, error) {
+	req := pathAPIForwardDestsListReq{
+		name: name,
+		res:  make(chan pathAPIForwardDestsListRes),
+	}
+
+	select {
+	case pm.chAPIForwardDestsList <- req:
+		res := <-req.res
+		if res.err != nil {
+			return nil, res.err
+		}
+
+		data := res.path.APIForwardDestsList()
+		return data, nil
+
+	case <-pm.ctx.Done():
+		return nil, fmt.Errorf("terminated")
+	}
+}
+
+// APIForwardDestsGet implements defs.APIPathManager.
+func (pm *pathManager) APIForwardDestsGet(name string, id uuid.UUID) (*defs.APIForwardDest, error) {
+	req := pathAPIForwardDestsGetReq{
+		name: name,
+		id:   id,
+		res:  make(chan pathAPIForwardDestsGetRes),
+	}
+
+	select {
+	case pm.chAPIForwardDestsGet <- req:
+		res := <-req.res
+		if res.err != nil {
+			return nil, res.err
+		}
+
+		data, err := res.path.APIForwardDestsGet(req.id)
+		return data, err
+
+	case <-pm.ctx.Done():
+		return nil, fmt.Errorf("terminated")
+	}
+}
+
+// APIStaticSourcesGet implements defs.APIPathManager.
+func (pm *pathManager) APIStaticSourcesGet(name string) (*defs.APIStaticSource, error) {
+	req := pathAPIStaticSourcesGetReq{
+		name: name,
+		res:  make(chan pathAPIStaticSourcesGetRes),
+	}
+
+	select {
+	case pm.chAPIStaticSourcesGet <- req:
+		res := <-req.res
+		if res.err != nil {
+			return nil, res.err
+		}
+
+		data, err := res.path.APIStaticSourcesGet(req)
 		return data, err
 
 	case <-pm.ctx.Done():

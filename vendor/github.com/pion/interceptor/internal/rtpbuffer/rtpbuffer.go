@@ -5,7 +5,7 @@
 package rtpbuffer
 
 import (
-	"fmt"
+	"github.com/pion/interceptor/internal/validation"
 )
 
 const (
@@ -26,19 +26,8 @@ type RTPBuffer struct {
 
 // NewRTPBuffer constructs a new RTPBuffer.
 func NewRTPBuffer(size uint16) (*RTPBuffer, error) {
-	allowedSizes := make([]uint16, 0)
-	correctSize := false
-	for i := 0; i < 16; i++ {
-		if size == 1<<i {
-			correctSize = true
-
-			break
-		}
-		allowedSizes = append(allowedSizes, 1<<i)
-	}
-
-	if !correctSize {
-		return nil, fmt.Errorf("%w: %d is not a valid size, allowed sizes: %v", ErrInvalidSize, size, allowedSizes)
+	if err := validation.IsPowerOfTwo(size); err != nil {
+		return nil, err
 	}
 
 	return &RTPBuffer{
@@ -79,6 +68,17 @@ func (r *RTPBuffer) Add(packet *RetainablePacket) {
 		prevPacket.Release()
 	}
 	r.packets[idx] = packet
+}
+
+// Clear releases all retained packets in the buffer.
+func (r *RTPBuffer) Clear() {
+	for i, pkt := range r.packets {
+		if pkt != nil {
+			pkt.Release()
+			r.packets[i] = nil
+		}
+	}
+	r.started = false
 }
 
 // Get returns the RetainablePacket for the requested sequence number.

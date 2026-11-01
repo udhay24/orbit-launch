@@ -1,25 +1,19 @@
 # Upstream Sync State
 
 ## Last Synced Commit
-- **Hash:** 03a6e91e (`bump hls.js to v1.6.17 (#6046)`)
-- **Date:** 2026-08-06
+- **Hash:** 168e1723
+- **Date:** 2026-11-01
 - **Upstream:** bluenviron/mediamtx (https://github.com/bluenviron/mediamtx)
-- **Merged into:** `sync/upstream-2026-08-06` (merge commit `1f837a82`, base `718d3b9d`)
-- **Report:** `.claude/sync-reports/2026-08-06-upstream-sync.md`
+- **Merged into:** `production` (local, not pushed)
+- **Report:** `.claude/sync-reports/2026-11-01-upstream-sync.md`
 
-`main` is a clean fast-forward mirror of upstream and sits at `03a6e91e`.
-
-## Branch state at time of sync
-- `production` — deployed, was 328 commits behind `upstream/main`. **Not yet promoted.**
-- `staging` — carried the earlier 195-commit upstream batch + fork work.
-- `test/pre-merge-suite` — `staging` + the pre-merge gate scripts (`718d3b9d`). Sync base.
-- `sync/upstream-2026-08-06` — this sync. Contains all 195 + 133 upstream commits + full fork delta.
+`main` is a clean fast-forward mirror of upstream and sits at `168e1723`.
 
 ## Our Patches (not in upstream)
 Preserve these during any merge — verified by `scripts/fork-delta-check.sh` (Layer 1 of the gate):
 
-1. **gortmplib-patched/** — local fork via `go.mod replace`, now based on **gortmplib v1.0.0**
-   (rebased from v0.4.0 on 2026-08-06). 5 patched files + fork-local `CLAUDE.md`:
+1. **gortmplib-patched/** — local fork via `go.mod replace`, now based on **gortmplib v1.0.5**
+   (rebased from v1.0.0 on 2026-11-01). 5 patched files + fork-local `CLAUDE.md`:
    - `pkg/handshake/c0s0.go` — accept non-standard RTMP versions
    - `pkg/handshake/handshake.go` — bundled S0+S1+S2, skip C2 validation
    - `pkg/rawmessage/reader.go` — lenient chunk types 1/2/3, extended chunk stream IDs
@@ -30,7 +24,9 @@ Preserve these during any merge — verified by `scripts/fork-delta-check.sh` (L
    config in `internal/conf/conf.go`, wiring in `core.go` / `path_manager.go` / `api.go`
 3. **Publisher limits** — `maxPublishers` / `publisherHysteresis`, counter in `path_manager.go`
 4. **Recorder enhancements** — `internal/recorder/recorder.go`
-5. **vendor/** — fork vendors dependencies (upstream does not). Run `go mod vendor` after every bump.
+5. **Publish allowlist** — `internal/publishallowlist`, hook in `path_manager.go` outside the run loop,
+   Redis password redaction in `internal/conf/redact.go`
+6. **vendor/** — fork vendors dependencies (upstream does not). Run `go mod vendor` after every bump.
 
 ## v0.4.0 -> v1.0.0 gortmplib rebase notes (2026-08-06)
 4 of the 5 patched files were **byte-identical** between v0.4.0 and v1.0.0; only `server_conn.go`
@@ -67,12 +63,11 @@ Verified by running the same tests on pristine upstream `main` with no fork code
 Consequence: `--full` (Layer 2b) cannot pass on macOS. Use Linux CI for the full upstream suite.
 
 ## Pending / deferred
-- **Not pushed, no PR opened.** `sync/upstream-2026-08-06` is local only.
-- **Promote to `production`** after combined testing.
+- **Not pushed.** `production` is local only.
 - `moq` is set to **false** in `mediamtx.yml`; upstream's sample defaults it to `true`.
   Enabling opens `:8892` (HTTP2/HTTP3) and `:8893` (QUIC).
-- `mediamtx.yml` still does not carry upstream's `authJWTIssuer` / `authJWTAudience` / `hlsCDNSecret`
-  keys; `TestSampleConfFile` remains skipped in the gate.
+- `TestDefaultConfFile` stays skipped in the gate: `mediamtx.yml` is a deployment config.
+- `internal/api` tests cannot compile on macOS (upstream inotify calls); the gate vets with `GOOS=linux`.
 - Evaluate upstream's native stream forwarding (#5558) against the Redis stream registry.
 - Verify `rtspTrustedProxies` and the new RTSP UDP port range 32768-60999 against firewall rules.
-- `streamRegistryPassword` is committed in plaintext in `mediamtx.yml`.
+- The old `streamRegistryPassword` is still in git history and past release assets: rotate it.

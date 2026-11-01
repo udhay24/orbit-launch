@@ -34,11 +34,13 @@ bash scripts/fork-delta-check.sh
 step "Layer 2 — build & vet"
 bash scripts/gen-embeds.sh   # VERSION + hls.min.js embeds, with retry on flaky download
 go build ./...
-go vet ./...
+# Vet for the production OS: upstream's internal/api tests use Linux-only inotify calls.
+GOOS=linux go vet ./...
 
 step "Layer 3 — custom-feature tests"
-go test -race ./internal/streamregistry/
-go test -race -run TestPathManagerPublisherLimit ./internal/core/
+go test -race ./internal/streamregistry/ ./internal/publishallowlist/
+go test -race -run 'TestPathManagerPublisherLimit|TestPathManagerPublishAllowlist' ./internal/core/
+go test -run TestRedactRedisPasswords ./internal/conf/
 
 if [ "$RUN_FULL" -eq 1 ]; then
   step "Layer 2b — full upstream test suite"

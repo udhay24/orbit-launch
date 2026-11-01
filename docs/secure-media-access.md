@@ -11,7 +11,7 @@ release asset. Templates: `orbit_play_state/scripts/systemd/`.
 | Watching needs a token | MediaMTX | `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS` (the orchestrator's `/load-balancer/api/media-access/jwks`, because media servers take one URL and several applications run at once), `MTX_AUTHJWTISSUER`, `MTX_AUTHJWTAUDIENCE` |
 | Issue tokens | Orbit-NestJS `POST /api/v1/media-access/view-tokens`, each application with its own key | `MEDIA_JWT_PRIVATE_KEY_BASE64`, `MEDIA_JWT_KEY_ID` (the database name), set by the orchestrator on deploy, `MEDIA_VIEW_TOKEN_TTL_SECONDS` (default 12h), `MEDIA_VIEW_TOKEN_MAX_TTL_SECONDS` (default 24h) |
 | Only registered cameras publish | MediaMTX reading Redis set `camera:stream_ids` | `MTX_PUBLISHALLOWLIST=yes`, `MTX_PUBLISHALLOWLISTADDRESS`, `MTX_PUBLISHALLOWLISTPASSWORD` |
-| Keep that set current | Orbit-NestJS | `ENABLE_REDIS_FILTER=true`, `CAMERA_ALLOWLIST_REDIS_URL` (the Redis the media servers read), `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
+| Keep that set current | Orbit-NestJS claims cameras from the orchestrator, which writes Redis | `ORCHESTRATOR_URL`, `ENABLE_REDIS_FILTER=true`, `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
 | Browsers play only from the web apps | MediaMTX reading Redis set `media:allowed_origins`, kept by the orchestrator | `MTX_DYNAMICALLOWORIGINS=yes`, plus `MTX_HLSALLOWORIGINS` and `MTX_WEBRTCALLOWORIGINS` set to the admin's address only, since the default allows everything |
 
 Tokens above the default lifetime need a CEO or ADMINCONFIG login. A session ends when
@@ -20,41 +20,45 @@ The web app renews tokens by itself; share links just stop.
 
 ## Rollout order
 
-1. Rotate the stream registry Redis password. The old one is in git history and past
-   release assets. Update Redis, the orchestrator's `STREAM_REGISTRY_PASSWORD` and the
-   registry dashboard.
-2. On each media server install `media.env` with the new password and the systemd
-   drop-in `orbit-play-secrets.conf`. Do this before the release: the new
-   `mediamtx.yml` has no password in it.
-3. Deploy Orbit-NestJS with a new signing key, set `REDIS_PASSWORD` if its Redis has
-   one, and check `GET /api/v1/media-access/jwks` and
-   `GET /api/v1/cameras/debug/redis-stream-id-count`.
-4. Deploy Orbit-FrontEnd. It plays with or without enforcement.
-5. Issue a Sentinel token with `node scripts/issue-media-service-token.js sentinel 30`
-   (from Orbit-NestJS, using the orchestrator's key and `MEDIA_JWT_KEY_ID=orchestrator`) and set `MEDIA_READ_TOKEN` and `MEDIA_TOKEN_HOST_SUFFIX`.
-6. Publish the release and let servers pull it.
-7. Deploy the orchestrator and Orbit-Play-FrontEnd together, since the old admin login
-   stops working. Set on the orchestrator: `ADMIN_USERS` (from
-   `scripts/hash_admin_password.py`), `ADMIN_SESSION_SECRET`, and the same
-   `MEDIA_JWT_PRIVATE_KEY_BASE64` for its own key, plus `MEDIA_KEY_ENCRYPTION_KEY`. Rotate `API_KEY` and update
-   `fetch-ssl-certs.sh` on the media servers at the same time.
-   Give the orchestrator's `ADMIN_API_TOKEN` a value that is also in api-admin's `API_KEYS`.
-8. Lock api-admin. Deploy Orbit-API-Admin, then give each caller its own key:
-   Orbit-NestJS, Sentinel and Orbit-API-Manager through `ADMIN_API_KEY`, the Lambda
-   through its `AdminApiKey` parameter. Put all of them in `API_KEYS` last: until then
-   nothing is enforced.
-   Lock api-router the same way. Deploy Orbit-API-Manager, set `ORBIT_API_KEY` on every
-   media server and deploy orbit-play-state, then set api-router's `API_KEYS`. In that
-   order: media servers ignore upload errors, so recording logs would stop silently.
-9. Ship the CIS app update. Older versions keep working.
-10. Check `GET /api/v1/cameras/debug/redis-stream-id-count` matches your camera count,
-   then turn on `MTX_PUBLISHALLOWLIST=yes` and `MTX_LOGLEVEL=warn` on one server. Watch
-   for `is not registered` against cameras you expect to be valid, publish a made-up
-   stream ID to confirm it is refused, and look for `allowing ... without a check`,
-   which means the list is missing or Redis is unreachable and nothing is being checked.
-11. Give every existing application its own key (see Signing keys), and check its cameras
-    are in `camera:stream_ids:owned:<db_name>`.
-12. Turn on `MTX_AUTHMETHOD=jwt`, `MTX_VIEWTOKENOWNERCHECK=yes` and the allowed origins on one server, then the rest.
+Do these in order. Nothing is enforced until steps 9 to 11.
+
+1. Rotate what is exposed: the Redis password, the orchestrator `API_KEY`, every secret
+   hardcoded in `services/api_server_service.py`, and the TLS certificate.
+2. Deploy the orchestrator and Orbit-Play-FrontEnd together, because the old admin login
+   stops working. Set `ADMIN_USERS` (from `scripts/hash_admin_password.py`),
+   `ADMIN_SESSION_SECRET`, `MEDIA_KEY_ENCRYPTION_KEY`, its own
+   `MEDIA_JWT_PRIVATE_KEY_BASE64`, `ORCHESTRATOR_PUBLIC_URL`, and
+   `MEDIA_SERVER_ENV_BASE64` so new media servers are protected. Update
+   `fetch-ssl-certs.sh` on media servers with the new `API_KEY`. Check
+   `/load-balancer/api/media-access/jwks` returns the orchestrator's key.
+3. On each media server install `media.env` with the new Redis password and `ORBIT_API_KEY`,
+   plus both systemd drop-ins, `orbit-play-secrets.conf` and
+   `orbit-play-state-secrets.conf`. Do this before the release: the new `mediamtx.yml` has
+   no password in it.
+4. For each existing application, run `scripts/issue_app_media_key.py <db_name>` on the
+   orchestrator. Set the printed lines, `ORCHESTRATOR_URL`, `ENABLE_REDIS_FILTER=true` and
+   `ADMIN_API_KEY` in its `.env`, make sure `RUN_CAMERA_STREAM_WATCHER=true` on one process,
+   and deploy Orbit-NestJS. Check its log for stream IDs refused as another application's:
+   each one is a camera two applications both claim.
+5. Deploy Orbit-FrontEnd. It plays with or without enforcement.
+6. Deploy Sentinel and sentinel-ai-pipeline with `MEDIA_READ_TOKEN` from
+   `scripts/issue_service_view_token.py sentinel <days>` on the orchestrator, plus
+   `MEDIA_TOKEN_HOST_SUFFIX` and `ADMIN_API_KEY`. Renew the token before it expires: nothing
+   does this automatically.
+7. Publish the release and let media servers pull it. Deploy orbit-play-state.
+8. Lock the two APIs. Deploy Orbit-API-Admin and Orbit-API-Manager, confirm every caller
+   sends its key, then set `API_KEYS` on each, last. Media servers ignore upload errors,
+   so a missing `ORBIT_API_KEY` would silently lose recording logs.
+9. On one media server turn on `MTX_PUBLISHALLOWLIST=yes` and `MTX_LOGLEVEL=warn`. Check
+   `camera:stream_ids` holds every application's cameras, publish a made-up stream ID to
+   confirm it is refused, and watch for `is not registered` against real cameras and for
+   `allowing ... without a check`. Then roll out.
+10. On one media server turn on `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS`, the issuer and
+    audience, `MTX_VIEWTOKENOWNERCHECK=yes`, `MTX_DYNAMICALLOWORIGINS=yes`, and set
+    `MTX_HLSALLOWORIGINS` and `MTX_WEBRTCALLOWORIGINS` to the admin's address. Check every
+    application plays, then roll out.
+11. Set `publishAllowlistFailOpen: no` once the allowlist has proven itself, if you prefer
+    refusing cameras during a Redis outage to letting unknown ones in.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.
 
@@ -68,7 +72,13 @@ in the orchestrator (`MEDIA_KEY_ENCRYPTION_KEY`). The JWKS at
 With `MTX_VIEWTOKENOWNERCHECK=yes`, a token is refused unless its signing key owns the
 camera, so a key stolen from one application cannot open another's. The orchestrator's own
 key may read any camera, so it never leaves the orchestrator. Sentinel needs a token made
-with that key, because it reads every application.
+with it, because it reads every application: see step 6.
+
+Camera ownership is written only by the orchestrator. Applications claim cameras with a
+request signed by their own key, and the first owner keeps a camera, so an application
+cannot take over another's even with its server fully compromised. Applications do not
+hold the shared Redis password. If Redis loses its data, the next sync of each application
+restores it within 10 minutes.
 
 Applications deployed before this: run `scripts/issue_app_media_key.py <db_name>` on the
 orchestrator and set the two printed lines in that application's `.env`. Add `--rotate` to
@@ -91,6 +101,13 @@ applications are added when the orchestrator starts.
 - There is no way to cancel a token before it expires.
 - A camera removed from the database keeps streaming until it reconnects.
 - `publishAllowlistFailOpen: yes` (default) lets cameras in when Redis is unreachable or
-  the set is missing, and logs a warning. Set it to `no` to reject them instead.
+  the set is missing, and logs an error. Set it to `no` to reject them instead.
+- View tokens never fail open. During a Redis outage only key and camera pairs seen in the
+  last day work.
+- A new media server is only protected if `MEDIA_SERVER_ENV_BASE64` is set.
+- Publishing is checked by stream ID only. Anyone who knows a registered ID can publish to
+  it, and `overridePublisher` lets them replace the camera.
+- Application signing keys and `ADMIN_API_KEY` reach API servers through cloud-init, so
+  anything that can read instance metadata can read them.
 - RTSP, RTMP and SRT reads need tokens too once `authMethod` is `jwt`.
 - The control API on port 9997 stays open by design for the orchestrator. Firewall it.

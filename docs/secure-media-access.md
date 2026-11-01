@@ -9,7 +9,7 @@ release asset. Templates: `orbit_play_state/scripts/systemd/`.
 | Goal | Where | Setting |
 |---|---|---|
 | Watching needs a token | MediaMTX | `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS` (the orchestrator's `/load-balancer/api/media-access/jwks`, because media servers take one URL and several applications run at once), `MTX_AUTHJWTISSUER`, `MTX_AUTHJWTAUDIENCE` |
-| Issue tokens | Orbit-NestJS `POST /api/v1/media-access/view-tokens` | `MEDIA_JWT_PRIVATE_KEY_BASE64`, `MEDIA_VIEW_TOKEN_TTL_SECONDS` (default 12h), `MEDIA_VIEW_TOKEN_MAX_TTL_SECONDS` (default 24h) |
+| Issue tokens | Orbit-NestJS `POST /api/v1/media-access/view-tokens`, each application with its own key | `MEDIA_JWT_PRIVATE_KEY_BASE64`, `MEDIA_JWT_KEY_ID` (the database name), set by the orchestrator on deploy, `MEDIA_VIEW_TOKEN_TTL_SECONDS` (default 12h), `MEDIA_VIEW_TOKEN_MAX_TTL_SECONDS` (default 24h) |
 | Only registered cameras publish | MediaMTX reading Redis set `camera:stream_ids` | `MTX_PUBLISHALLOWLIST=yes`, `MTX_PUBLISHALLOWLISTADDRESS`, `MTX_PUBLISHALLOWLISTPASSWORD` |
 | Keep that set current | Orbit-NestJS | `ENABLE_REDIS_FILTER=true`, `CAMERA_ALLOWLIST_REDIS_URL` (the Redis the media servers read), `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
 | Browsers play only from the web apps | MediaMTX reading Redis set `media:allowed_origins`, kept by the orchestrator | `MTX_DYNAMICALLOWORIGINS=yes`, plus `MTX_HLSALLOWORIGINS` and `MTX_WEBRTCALLOWORIGINS` set to the admin's address only, since the default allows everything |
@@ -31,12 +31,12 @@ The web app renews tokens by itself; share links just stop.
    `GET /api/v1/cameras/debug/redis-stream-id-count`.
 4. Deploy Orbit-FrontEnd. It plays with or without enforcement.
 5. Issue a Sentinel token with `node scripts/issue-media-service-token.js sentinel 30`
-   (from Orbit-NestJS) and set `MEDIA_READ_TOKEN` and `MEDIA_TOKEN_HOST_SUFFIX`.
+   (from Orbit-NestJS, using the orchestrator's key and `MEDIA_JWT_KEY_ID=orchestrator`) and set `MEDIA_READ_TOKEN` and `MEDIA_TOKEN_HOST_SUFFIX`.
 6. Publish the release and let servers pull it.
 7. Deploy the orchestrator and Orbit-Play-FrontEnd together, since the old admin login
    stops working. Set on the orchestrator: `ADMIN_USERS` (from
    `scripts/hash_admin_password.py`), `ADMIN_SESSION_SECRET`, and the same
-   `MEDIA_JWT_PRIVATE_KEY_BASE64` as Nest. Rotate `API_KEY` and update
+   `MEDIA_JWT_PRIVATE_KEY_BASE64` for its own key, plus `MEDIA_KEY_ENCRYPTION_KEY`. Rotate `API_KEY` and update
    `fetch-ssl-certs.sh` on the media servers at the same time.
    Give the orchestrator's `ADMIN_API_TOKEN` a value that is also in api-admin's `API_KEYS`.
 8. Lock api-admin. Deploy Orbit-API-Admin, then give each caller its own key:
@@ -52,9 +52,27 @@ The web app renews tokens by itself; share links just stop.
    for `is not registered` against cameras you expect to be valid, publish a made-up
    stream ID to confirm it is refused, and look for `allowing ... without a check`,
    which means the list is missing or Redis is unreachable and nothing is being checked.
-11. Turn on `MTX_AUTHMETHOD=jwt` and the allowed origins on one server, then the rest.
+11. Give every existing application its own key (see Signing keys), and check its cameras
+    are in `camera:stream_ids:owned:<db_name>`.
+12. Turn on `MTX_AUTHMETHOD=jwt`, `MTX_VIEWTOKENOWNERCHECK=yes` and the allowed origins on one server, then the rest.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.
+
+## Signing keys
+
+Each application signs with its own key, created when it is deployed and stored encrypted
+in the orchestrator (`MEDIA_KEY_ENCRYPTION_KEY`). The JWKS at
+`/load-balancer/api/media-access/jwks` lists them all, and media servers refresh it every
+60 seconds, keeping the last good copy if the orchestrator is down.
+
+With `MTX_VIEWTOKENOWNERCHECK=yes`, a token is refused unless its signing key owns the
+camera, so a key stolen from one application cannot open another's. The orchestrator's own
+key may read any camera, so it never leaves the orchestrator. Sentinel needs a token made
+with that key, because it reads every application.
+
+Applications deployed before this: run `scripts/issue_app_media_key.py <db_name>` on the
+orchestrator and set the two printed lines in that application's `.env`. Add `--rotate` to
+replace a key. Tokens signed with the old one stop working within a minute.
 
 ## Launching a new application
 

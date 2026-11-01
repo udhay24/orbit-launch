@@ -428,6 +428,10 @@ type Conf struct {
 	PublishAllowlistPathPrefix string `json:"publishAllowlistPathPrefix"`
 	PublishAllowlistFailOpen   bool   `json:"publishAllowlistFailOpen"`
 
+	// Dynamic allow origins, read from the Redis server of the publish allowlist
+	DynamicAllowOrigins    bool   `json:"dynamicAllowOrigins"`
+	DynamicAllowOriginsKey string `json:"dynamicAllowOriginsKey"`
+
 	// Publisher limits
 	MaxPublishers       int `json:"maxPublishers"`
 	PublisherHysteresis int `json:"publisherHysteresis"`
@@ -569,6 +573,7 @@ func (conf *Conf) setDefaults() {
 	conf.PublishAllowlistKey = "camera:stream_ids"
 	conf.PublishAllowlistPathPrefix = "live/"
 	conf.PublishAllowlistFailOpen = true
+	conf.DynamicAllowOriginsKey = "media:allowed_origins"
 
 	// Publisher limits
 	conf.MaxPublishers = 2000

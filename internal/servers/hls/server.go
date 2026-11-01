@@ -65,28 +65,29 @@ type serverParent interface {
 
 // Server is a HLS server.
 type Server struct {
-	Address         string
-	DumpPackets     bool
-	Encryption      bool
-	ServerKey       string
-	ServerCert      string
-	AllowOrigins    []string
-	TrustedProxies  conf.IPNetworks
-	AlwaysRemux     bool
-	Variant         conf.HLSVariant
-	SegmentCount    int
-	SegmentDuration conf.Duration
-	PartDuration    conf.Duration
-	SegmentMaxSize  conf.StringSize
-	Directory       string
-	CDNSecret       string
-	ReadTimeout     conf.Duration
-	WriteTimeout    conf.Duration
-	MuxerCloseAfter conf.Duration
-	ExternalCmdPool *externalcmd.Pool
-	Metrics         serverMetrics
-	PathManager     serverPathManager
-	Parent          serverParent
+	Address             string
+	DumpPackets         bool
+	Encryption          bool
+	ServerKey           string
+	ServerCert          string
+	AllowOrigins        []string
+	DynamicAllowOrigins func() []string
+	TrustedProxies      conf.IPNetworks
+	AlwaysRemux         bool
+	Variant             conf.HLSVariant
+	SegmentCount        int
+	SegmentDuration     conf.Duration
+	PartDuration        conf.Duration
+	SegmentMaxSize      conf.StringSize
+	Directory           string
+	CDNSecret           string
+	ReadTimeout         conf.Duration
+	WriteTimeout        conf.Duration
+	MuxerCloseAfter     conf.Duration
+	ExternalCmdPool     *externalcmd.Pool
+	Metrics             serverMetrics
+	PathManager         serverPathManager
+	Parent              serverParent
 
 	closed     atomic.Bool
 	wg         sync.WaitGroup
@@ -107,18 +108,19 @@ func (s *Server) Initialize() error {
 	s.cdnSessionsByPath = make(map[string]*session)
 
 	s.httpServer = &httpServer{
-		address:        s.Address,
-		dumpPackets:    s.DumpPackets,
-		encryption:     s.Encryption,
-		serverKey:      s.ServerKey,
-		serverCert:     s.ServerCert,
-		allowOrigins:   s.AllowOrigins,
-		trustedProxies: s.TrustedProxies,
-		readTimeout:    s.ReadTimeout,
-		writeTimeout:   s.WriteTimeout,
-		cdnSecret:      s.CDNSecret,
-		pathManager:    s.PathManager,
-		parent:         s,
+		address:             s.Address,
+		dumpPackets:         s.DumpPackets,
+		encryption:          s.Encryption,
+		serverKey:           s.ServerKey,
+		serverCert:          s.ServerCert,
+		allowOrigins:        s.AllowOrigins,
+		dynamicAllowOrigins: s.DynamicAllowOrigins,
+		trustedProxies:      s.TrustedProxies,
+		readTimeout:         s.ReadTimeout,
+		writeTimeout:        s.WriteTimeout,
+		cdnSecret:           s.CDNSecret,
+		pathManager:         s.PathManager,
+		parent:              s,
 	}
 	err := s.httpServer.initialize()
 	if err != nil {

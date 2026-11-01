@@ -70,14 +70,22 @@ func isOriginAllowed(origin string, allowOrigins []string) bool {
 // - add Access-Control-Allow-Origin header to both preflight requests and actual requests.
 // - in case of browser requests that do not use preflight (like POST from a form), check the Origin.
 type handlerOrigin struct {
-	h            http.Handler
-	allowOrigins []string
+	h                   http.Handler
+	allowOrigins        []string
+	dynamicAllowOrigins func() []string
+}
+
+func (h *handlerOrigin) isAllowed(origin string) bool {
+	if isOriginAllowed(origin, h.allowOrigins) {
+		return true
+	}
+	return h.dynamicAllowOrigins != nil && isOriginAllowed(origin, h.dynamicAllowOrigins())
 }
 
 func (h *handlerOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 
-	if origin != "" && isOriginAllowed(origin, h.allowOrigins) {
+	if origin != "" && h.isAllowed(origin) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
 	}
@@ -85,7 +93,7 @@ func (h *handlerOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		secFetchSite := r.Header.Get("Sec-Fetch-Site")
 		if secFetchSite == "same-site" || secFetchSite == "cross-site" {
-			if !isOriginAllowed(origin, h.allowOrigins) {
+			if !h.isAllowed(origin) {
 				w.WriteHeader(http.StatusForbidden)
 				return
 			}

@@ -64,6 +64,11 @@ exists   internal/publishallowlist/allowlist.go "publishallowlist package presen
 contains internal/core/path_manager.go "checkPublishAllowlist" "path_manager: publish allowlist hook"
 contains mediamtx.yml "publishAllowlist" "mediamtx.yml: publishAllowlist key"
 
+echo "== dynamic origins =="
+exists   internal/dynamicorigins/origins.go "dynamicorigins package present"
+contains internal/protocols/httpp/handler_origin.go "dynamicAllowOrigins" "httpp: dynamic origins hook"
+contains internal/core/core.go "dynamicOrigins" "core: dynamic origins wiring"
+
 echo "== chaos suite present =="
 exists .ai/chaos_test.py "chaos suite present"
 

@@ -195,6 +195,7 @@ type Server struct {
 	ServerKey                    string
 	ServerCert                   string
 	AllowOrigins                 []string
+	DynamicAllowOrigins          func() []string
 	TrustedProxies               conf.IPNetworks
 	ReadTimeout                  conf.Duration
 	WriteTimeout                 conf.Duration
@@ -259,17 +260,18 @@ func (s *Server) Initialize() error {
 	s.done = make(chan struct{})
 
 	s.httpServer = &httpServer{
-		address:        s.Address,
-		dumpPackets:    s.DumpPackets,
-		encryption:     s.Encryption,
-		serverKey:      s.ServerKey,
-		serverCert:     s.ServerCert,
-		allowOrigins:   s.AllowOrigins,
-		trustedProxies: s.TrustedProxies,
-		readTimeout:    s.ReadTimeout,
-		writeTimeout:   s.WriteTimeout,
-		pathManager:    s.PathManager,
-		parent:         s,
+		address:             s.Address,
+		dumpPackets:         s.DumpPackets,
+		encryption:          s.Encryption,
+		serverKey:           s.ServerKey,
+		serverCert:          s.ServerCert,
+		allowOrigins:        s.AllowOrigins,
+		dynamicAllowOrigins: s.DynamicAllowOrigins,
+		trustedProxies:      s.TrustedProxies,
+		readTimeout:         s.ReadTimeout,
+		writeTimeout:        s.WriteTimeout,
+		pathManager:         s.PathManager,
+		parent:              s,
 	}
 	err := s.httpServer.initialize()
 	if err != nil {

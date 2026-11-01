@@ -26,6 +26,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
+	"github.com/bluenviron/mediamtx/internal/dynamicorigins"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/metrics"
@@ -221,6 +222,7 @@ type Core struct {
 	srtServer        *srt.Server
 	streamRegistry   *streamregistry.Registry
 	publishAllowlist *publishallowlist.Allowlist
+	dynamicOrigins   *dynamicorigins.Origins
 	moqServer        *moq.Server
 	api              *api.API
 	confWatcher      *confwatcher.ConfWatcher
@@ -580,6 +582,13 @@ func (p *Core) OnFatalError(ctx context.Context, _ error) {
 	}
 }
 
+func (p *Core) dynamicAllowOrigins() func() []string {
+	if p.dynamicOrigins == nil {
+		return nil
+	}
+	return p.dynamicOrigins.Get
+}
+
 func (p *Core) createResources(initial bool) error {
 	var err error
 
@@ -716,6 +725,17 @@ func (p *Core) createResources(initial bool) error {
 			return err
 		}
 		p.playbackServer = i
+	}
+
+	if p.conf.DynamicAllowOrigins && p.dynamicOrigins == nil {
+		p.dynamicOrigins = &dynamicorigins.Origins{
+			RedisAddress:  p.conf.PublishAllowlistAddress,
+			RedisPassword: p.conf.PublishAllowlistPassword,
+			RedisDB:       p.conf.PublishAllowlistDB,
+			Key:           p.conf.DynamicAllowOriginsKey,
+			Parent:        p,
+		}
+		p.dynamicOrigins.Initialize()
 	}
 
 	if p.conf.PublishAllowlist && p.publishAllowlist == nil {
@@ -911,28 +931,29 @@ func (p *Core) createResources(initial bool) error {
 	if p.conf.HLS &&
 		p.hlsServer == nil {
 		i := &hls.Server{
-			Address:         p.conf.HLSAddress,
-			DumpPackets:     p.conf.DumpPackets,
-			Encryption:      p.conf.HLSEncryption,
-			ServerKey:       p.conf.HLSServerKey,
-			ServerCert:      p.conf.HLSServerCert,
-			AllowOrigins:    p.conf.HLSAllowOrigins,
-			TrustedProxies:  p.conf.HLSTrustedProxies,
-			AlwaysRemux:     p.conf.HLSAlwaysRemux,
-			Variant:         p.conf.HLSVariant,
-			SegmentCount:    p.conf.HLSSegmentCount,
-			SegmentDuration: p.conf.HLSSegmentDuration,
-			PartDuration:    p.conf.HLSPartDuration,
-			SegmentMaxSize:  p.conf.HLSSegmentMaxSize,
-			Directory:       p.conf.HLSDirectory,
-			CDNSecret:       p.conf.HLSCDNSecret,
-			ReadTimeout:     p.conf.ReadTimeout,
-			WriteTimeout:    p.conf.WriteTimeout,
-			MuxerCloseAfter: p.conf.HLSMuxerCloseAfter,
-			ExternalCmdPool: p.externalCmdPool,
-			Metrics:         p.metrics,
-			PathManager:     p.pathManager,
-			Parent:          p,
+			Address:             p.conf.HLSAddress,
+			DumpPackets:         p.conf.DumpPackets,
+			Encryption:          p.conf.HLSEncryption,
+			ServerKey:           p.conf.HLSServerKey,
+			ServerCert:          p.conf.HLSServerCert,
+			AllowOrigins:        p.conf.HLSAllowOrigins,
+			DynamicAllowOrigins: p.dynamicAllowOrigins(),
+			TrustedProxies:      p.conf.HLSTrustedProxies,
+			AlwaysRemux:         p.conf.HLSAlwaysRemux,
+			Variant:             p.conf.HLSVariant,
+			SegmentCount:        p.conf.HLSSegmentCount,
+			SegmentDuration:     p.conf.HLSSegmentDuration,
+			PartDuration:        p.conf.HLSPartDuration,
+			SegmentMaxSize:      p.conf.HLSSegmentMaxSize,
+			Directory:           p.conf.HLSDirectory,
+			CDNSecret:           p.conf.HLSCDNSecret,
+			ReadTimeout:         p.conf.ReadTimeout,
+			WriteTimeout:        p.conf.WriteTimeout,
+			MuxerCloseAfter:     p.conf.HLSMuxerCloseAfter,
+			ExternalCmdPool:     p.externalCmdPool,
+			Metrics:             p.metrics,
+			PathManager:         p.pathManager,
+			Parent:              p,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -950,6 +971,7 @@ func (p *Core) createResources(initial bool) error {
 			ServerKey:                    p.conf.WebRTCServerKey,
 			ServerCert:                   p.conf.WebRTCServerCert,
 			AllowOrigins:                 p.conf.WebRTCAllowOrigins,
+			DynamicAllowOrigins:          p.dynamicAllowOrigins(),
 			TrustedProxies:               p.conf.WebRTCTrustedProxies,
 			ReadTimeout:                  p.conf.ReadTimeout,
 			WriteTimeout:                 p.conf.WriteTimeout,
@@ -1178,6 +1200,13 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		p.playbackServer.ReloadPathConfs(newConf.Paths)
 	}
 
+	closeDynamicOrigins := newConf == nil ||
+		newConf.DynamicAllowOrigins != p.conf.DynamicAllowOrigins ||
+		newConf.DynamicAllowOriginsKey != p.conf.DynamicAllowOriginsKey ||
+		newConf.PublishAllowlistAddress != p.conf.PublishAllowlistAddress ||
+		newConf.PublishAllowlistPassword != p.conf.PublishAllowlistPassword ||
+		newConf.PublishAllowlistDB != p.conf.PublishAllowlistDB
+
 	closePublishAllowlist := newConf == nil ||
 		newConf.PublishAllowlist != p.conf.PublishAllowlist ||
 		newConf.PublishAllowlistAddress != p.conf.PublishAllowlistAddress ||
@@ -1289,6 +1318,7 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		newConf.HLSServerKey != p.conf.HLSServerKey ||
 		newConf.HLSServerCert != p.conf.HLSServerCert ||
 		!slices.Equal(newConf.HLSAllowOrigins, p.conf.HLSAllowOrigins) ||
+		closeDynamicOrigins ||
 		!reflect.DeepEqual(newConf.HLSTrustedProxies, p.conf.HLSTrustedProxies) ||
 		newConf.HLSAlwaysRemux != p.conf.HLSAlwaysRemux ||
 		newConf.HLSVariant != p.conf.HLSVariant ||
@@ -1312,6 +1342,7 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		newConf.WebRTCServerKey != p.conf.WebRTCServerKey ||
 		newConf.WebRTCServerCert != p.conf.WebRTCServerCert ||
 		!slices.Equal(newConf.WebRTCAllowOrigins, p.conf.WebRTCAllowOrigins) ||
+		closeDynamicOrigins ||
 		!reflect.DeepEqual(newConf.WebRTCTrustedProxies, p.conf.WebRTCTrustedProxies) ||
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
@@ -1451,6 +1482,11 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 	if closePathManager && p.pathManager != nil {
 		p.pathManager.close()
 		p.pathManager = nil
+	}
+
+	if closeDynamicOrigins && p.dynamicOrigins != nil {
+		p.dynamicOrigins.Close()
+		p.dynamicOrigins = nil
 	}
 
 	if closePublishAllowlist && p.publishAllowlist != nil {

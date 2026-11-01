@@ -36,20 +36,22 @@ func (nilWriter) Write(p []byte) (int, error) {
 // - server header
 // - filtering of invalid requests
 type Server struct {
-	Address           string
-	AllowOrigins      []string
-	DumpPackets       bool
-	DumpPacketsPrefix string
-	ReadTimeout       time.Duration
-	WriteTimeout      time.Duration
-	Encryption        bool
-	ServerCert        string
-	ServerKey         string
-	AllowAutoCert     bool
-	GetCertificate    func(*tls.ClientHelloInfo) (*tls.Certificate, error)
-	Handler           http.Handler
-	Parent            logger.Writer
-	OnListenError     func(context.Context, error)
+	Address      string
+	AllowOrigins []string
+	// DynamicAllowOrigins adds origins that can change while running.
+	DynamicAllowOrigins func() []string
+	DumpPackets         bool
+	DumpPacketsPrefix   string
+	ReadTimeout         time.Duration
+	WriteTimeout        time.Duration
+	Encryption          bool
+	ServerCert          string
+	ServerKey           string
+	AllowAutoCert       bool
+	GetCertificate      func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	Handler             http.Handler
+	Parent              logger.Writer
+	OnListenError       func(context.Context, error)
 
 	ctx       context.Context
 	ctxCancel context.CancelFunc
@@ -116,7 +118,7 @@ func (s *Server) Initialize() error {
 	}
 
 	h := s.Handler
-	h = &handlerOrigin{h, s.AllowOrigins}
+	h = &handlerOrigin{h, s.AllowOrigins, s.DynamicAllowOrigins}
 	h = &handlerServerHeader{h}
 	h = &handlerFilterRequests{h}
 	h = &handlerLogger{h, s.Parent}

@@ -71,17 +71,18 @@ func sessionLocation(publish bool, path string, rawQuery string, secret uuid.UUI
 }
 
 type httpServer struct {
-	address        string
-	dumpPackets    bool
-	encryption     bool
-	serverKey      string
-	serverCert     string
-	allowOrigins   []string
-	trustedProxies conf.IPNetworks
-	readTimeout    conf.Duration
-	writeTimeout   conf.Duration
-	pathManager    serverPathManager
-	parent         *Server
+	address             string
+	dumpPackets         bool
+	encryption          bool
+	serverKey           string
+	serverCert          string
+	allowOrigins        []string
+	dynamicAllowOrigins func() []string
+	trustedProxies      conf.IPNetworks
+	readTimeout         conf.Duration
+	writeTimeout        conf.Duration
+	pathManager         serverPathManager
+	parent              *Server
 
 	inner *httpp.Server
 }
@@ -100,18 +101,19 @@ func (s *httpServer) initialize() error {
 	}
 
 	s.inner = &httpp.Server{
-		Address:           s.address,
-		AllowOrigins:      s.allowOrigins,
-		DumpPackets:       s.dumpPackets,
-		DumpPacketsPrefix: proto + "_server_conn",
-		ReadTimeout:       time.Duration(s.readTimeout),
-		WriteTimeout:      time.Duration(s.writeTimeout),
-		Encryption:        s.encryption,
-		ServerCert:        s.serverCert,
-		ServerKey:         s.serverKey,
-		Handler:           router,
-		Parent:            s,
-		OnListenError:     s.parent.onListenError,
+		Address:             s.address,
+		AllowOrigins:        s.allowOrigins,
+		DynamicAllowOrigins: s.dynamicAllowOrigins,
+		DumpPackets:         s.dumpPackets,
+		DumpPacketsPrefix:   proto + "_server_conn",
+		ReadTimeout:         time.Duration(s.readTimeout),
+		WriteTimeout:        time.Duration(s.writeTimeout),
+		Encryption:          s.encryption,
+		ServerCert:          s.serverCert,
+		ServerKey:           s.serverKey,
+		Handler:             router,
+		Parent:              s,
+		OnListenError:       s.parent.onListenError,
 	}
 	err := s.inner.Initialize()
 	if err != nil {

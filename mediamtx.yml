@@ -485,6 +485,13 @@ publishAllowlistPathPrefix: live/
 # has not filled the set yet. "yes" lets publishers in and logs a warning, so a Redis
 # outage cannot block camera reconnections. "no" rejects them.
 publishAllowlistFailOpen: yes
+# Also allow browser requests from origins that applications register in Redis, using the
+# Redis server above. Each application has its own domain, so this avoids changing every
+# media server when one is launched. Applies to HLS and WebRTC, on top of hlsAllowOrigins
+# and webrtcAllowOrigins, so empty those lists or they will still allow everything.
+dynamicAllowOrigins: false
+# Redis set holding the registered origins.
+dynamicAllowOriginsKey: media:allowed_origins
 
 ###############################################
 # Global settings -> MoQ server

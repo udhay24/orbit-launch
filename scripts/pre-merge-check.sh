@@ -38,7 +38,7 @@ go build ./...
 GOOS=linux go vet ./...
 
 step "Layer 3 — custom-feature tests"
-go test -race ./internal/streamregistry/ ./internal/publishallowlist/
+go test -race ./internal/streamregistry/ ./internal/publishallowlist/ ./internal/dynamicorigins/
 go test -race -run 'TestPathManagerPublisherLimit|TestPathManagerPublishAllowlist' ./internal/core/
 go test -run TestRedactRedisPasswords ./internal/conf/
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -13,7 +14,10 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
 
-const lookupTimeout = 2 * time.Second
+const (
+	lookupTimeout = 2 * time.Second
+	ownedCacheTTL = 24 * time.Hour
+)
 
 // Allowlist checks stream IDs against a Redis set maintained by the backend.
 type Allowlist struct {
@@ -28,6 +32,7 @@ type Allowlist struct {
 	Parent     logger.Writer
 
 	client *redis.Client
+	owned  sync.Map
 }
 
 // Initialize creates the Redis client. Connections are established on first use,
@@ -95,14 +100,23 @@ func (a *Allowlist) CheckViewToken(keyID string, pathName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
 	defer cancel()
 
+	cacheKey := keyID + "/" + streamID
+
 	owned, err := a.client.SIsMember(ctx, a.Key+":owned:"+keyID, streamID).Result()
 	if err != nil {
-		return a.onUnavailable(pathName, err)
+		// Never FailOpen here: during an outage any application's key would open any
+		// camera. Pairs already seen keep working, so viewers survive a Redis outage.
+		if seenAt, ok := a.owned.Load(cacheKey); ok && time.Since(seenAt.(time.Time)) < ownedCacheTTL {
+			return nil
+		}
+		return fmt.Errorf("camera ownership unavailable: %w", err)
 	}
 	if !owned {
+		a.owned.Delete(cacheKey)
 		return fmt.Errorf("key '%s' does not own stream '%s'", keyID, streamID)
 	}
 
+	a.owned.Store(cacheKey, time.Now())
 	return nil
 }
 

@@ -27,6 +27,8 @@ const (
 	maxInboundBodySize = 128 * 1024
 	// applications add and remove their keys while running.
 	jwksRefreshPeriod = 60 * time.Second
+	jwksRetryPeriod   = 10 * time.Second
+	jwksFetchTimeout  = 3 * time.Second
 )
 
 func isHTTP(req *Request) bool {
@@ -65,26 +67,26 @@ func matchesPermission(perms []conf.AuthInternalUserPermission, req *Request) bo
 	return false
 }
 
-// TokenKeyID returns the key a request's token says it was signed with, or an empty
-// string. The token is not verified here: Authenticate() still does that, so a forged
-// key ID only gets the request rejected later.
-func TokenKeyID(req *Request, tokenInHTTPQuery bool) string {
+// TokenKeyID returns the key a request's token says it was signed with. hasToken is false
+// when the request carries no token at all. The token is not verified here:
+// Authenticate() still does that, so a forged key ID only gets the request rejected later.
+func TokenKeyID(req *Request, tokenInHTTPQuery bool) (keyID string, hasToken bool) {
 	if req.Credentials == nil {
-		return ""
+		return "", false
 	}
 
 	token := getToken(tokenInHTTPQuery, req)
 	if token == "" {
-		return ""
+		return "", false
 	}
 
 	parsed, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
 	if err != nil {
-		return ""
+		return "", true
 	}
 
-	keyID, _ := parsed.Header["kid"].(string)
-	return keyID
+	keyID, _ = parsed.Header["kid"].(string)
+	return keyID, true
 }
 
 func getToken(tokenInHTTPQuery bool, req *Request) string {
@@ -135,6 +137,7 @@ type Manager struct {
 	mutex           sync.RWMutex
 	jwksLastRefresh time.Time
 	jwksRefreshing  bool
+	jwksLastAttempt time.Time
 	jwtKeyFunc      keyfunc.Keyfunc
 }
 
@@ -357,6 +360,13 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 		return m.jwtKeyFunc.Keyfunc, nil
 	}
 
+	// with no keys yet this does block, so a JWKS server that is down at boot is only
+	// waited for once per retry period, not by every reader.
+	if time.Since(m.jwksLastAttempt) < jwksRetryPeriod {
+		return nil, fmt.Errorf("JWKS not available yet")
+	}
+	m.jwksLastAttempt = time.Now()
+
 	tmp, err := m.fetchJWKS()
 	if err != nil {
 		return nil, err
@@ -392,7 +402,7 @@ func (m *Manager) fetchJWKS() (keyfunc.Keyfunc, error) {
 	defer tr.CloseIdleConnections()
 
 	httpClient := &http.Client{
-		Timeout:   m.ReadTimeout,
+		Timeout:   jwksFetchTimeout,
 		Transport: m.wrapTransport(tr),
 	}
 
@@ -415,10 +425,22 @@ func (m *Manager) fetchJWKS() (keyfunc.Keyfunc, error) {
 	return keyfunc.NewJWKSetJSON(raw)
 }
 
-// RefreshJWTJWKS refreshes the JWT JWKS.
+// RefreshJWTJWKS refreshes the JWT JWKS. It is called by the control API, outside of the
+// path manager loop, so it can wait for the result. The last keys stay on failure.
 func (m *Manager) RefreshJWTJWKS() {
+	tmp, err := m.fetchJWKS()
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	m.jwtKeyFunc = nil
+	m.jwksLastAttempt = time.Time{}
+
+	if err != nil {
+		m.jwksLastRefresh = time.Time{}
+		m.Parent.Log(logger.Error, "unable to refresh JWKS, keeping the last keys: %v", err)
+		return
+	}
+
+	m.jwtKeyFunc = tmp
+	m.jwksLastRefresh = time.Now()
 }

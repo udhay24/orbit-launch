@@ -95,5 +95,12 @@ func (o *Origins) refresh() {
 	}
 
 	o.failing = false
+
+	// an empty set means Redis lost its data, not that every application was deleted.
+	if len(members) == 0 && len(*o.current.Load()) != 0 {
+		o.Parent.Log(logger.Error, "[dynamic origins] set is empty, keeping the last list")
+		return
+	}
+
 	o.current.Store(&members)
 }

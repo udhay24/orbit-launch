@@ -494,7 +494,9 @@ dynamicAllowOrigins: false
 dynamicAllowOriginsKey: media:allowed_origins
 # Refuse a view token when its signing key does not own the camera. Each application signs
 # with its own key, whose name matches the set <publishAllowlistKey>:owned:<key>, so a key
-# stolen from one application cannot open another's cameras. Needs publishAllowlist.
+# stolen from one application cannot open another's cameras. Needs publishAllowlist and
+# authMethod: jwt, and the playback server off. Lookups that fail are refused, whatever
+# publishAllowlistFailOpen says, except for key and camera pairs seen in the last 24 hours.
 viewTokenOwnerCheck: false
 # Keys that may read any camera.
 viewTokenOwnerExemptKeys: [orchestrator]

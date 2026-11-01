@@ -144,6 +144,15 @@ func TestPathManagerViewTokenOwner(t *testing.T) {
 		Credentials: &auth.Credentials{Token: signed("one")},
 	}))
 
+	// no key ID: the verifier would try every key, so it must never reach it.
+	check = &fakeOwnerCheck{allowed: true}
+	noKid, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{}).SignedString([]byte("key"))
+	require.NoError(t, err)
+	err = run(check, defs.PathAccessRequest{Name: "live/CAM1", Credentials: &auth.Credentials{Token: noKid}})
+	_, ok = errors.AsType[*auth.Error](err)
+	require.True(t, ok)
+	require.Empty(t, check.keys)
+
 	// a request without credentials must not crash the check.
 	require.NoError(t, run(&fakeOwnerCheck{}, defs.PathAccessRequest{Name: "live/CAM1"}))
 

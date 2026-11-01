@@ -673,12 +673,19 @@ func (pm *pathManager) checkViewTokenOwner(author logger.Writer, req *defs.PathA
 		return nil
 	}
 
-	keyID := auth.TokenKeyID(req.ToAuthRequest(), pm.jwtInHTTPQuery)
-	if keyID == "" {
+	keyID, hasToken := auth.TokenKeyID(req.ToAuthRequest(), pm.jwtInHTTPQuery)
+	if !hasToken {
 		return nil
 	}
 
-	err := pm.publishAllowlist.CheckViewToken(keyID, req.Name)
+	// without a key ID the verifier tries every published key, so a token signed with any
+	// application's key would pass and there would be no key to check ownership against.
+	var err error
+	if keyID == "" {
+		err = errors.New("token does not name its signing key")
+	} else {
+		err = pm.publishAllowlist.CheckViewToken(keyID, req.Name)
+	}
 	if err != nil {
 		terr := &auth.Error{Wrapped: err}
 		auth.LogAndDelayError(author, terr)

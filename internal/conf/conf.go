@@ -899,6 +899,18 @@ func (conf *Conf) validate(l logger.Writer) error {
 		}
 	}
 
+	if conf.ViewTokenOwnerCheck {
+		if !conf.PublishAllowlist {
+			return fmt.Errorf("'viewTokenOwnerCheck' requires 'publishAllowlist'")
+		}
+		if conf.AuthMethod != AuthMethodJWT {
+			return fmt.Errorf("'viewTokenOwnerCheck' requires 'authMethod' to be 'jwt'")
+		}
+		if conf.Playback {
+			return fmt.Errorf("'viewTokenOwnerCheck' does not cover the playback server, disable it")
+		}
+	}
+
 	if conf.HLSCDNSecret != "" {
 		if !rePlainCredential.MatchString(conf.HLSCDNSecret) {
 			return fmt.Errorf("'hlsCDNSecret' contains unsupported characters. Supported are: %s", plainCredentialSupportedChars)

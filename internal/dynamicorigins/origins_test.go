@@ -51,3 +51,15 @@ func TestPassword(t *testing.T) {
 	require.Empty(t, newOrigins(t, s.Addr(), "wrong").Get())
 	require.Len(t, newOrigins(t, s.Addr(), "secret").Get(), 1)
 }
+
+func TestKeepsLastListWhenSetDisappears(t *testing.T) {
+	s := miniredis.RunT(t)
+	_, err := s.SAdd("origins", "https://a.example.com")
+	require.NoError(t, err)
+
+	o := newOrigins(t, s.Addr(), "")
+	s.FlushAll()
+	o.refresh()
+
+	require.Equal(t, []string{"https://a.example.com"}, o.Get())
+}

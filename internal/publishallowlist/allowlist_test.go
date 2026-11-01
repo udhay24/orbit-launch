@@ -103,6 +103,10 @@ func TestCheckViewToken(t *testing.T) {
 	require.EqualError(t, a.CheckViewToken("unknown", "live/CAM1"), "key 'unknown' does not own stream 'CAM1'")
 	require.Error(t, a.CheckViewToken("one", "other/CAM1"))
 
+	// a Redis outage: pairs seen before keep working, nothing new does, even with FailOpen.
+	a.FailOpen = true
 	s.Close()
-	require.ErrorContains(t, a.CheckViewToken("one", "live/CAM1"), "unavailable")
+	require.NoError(t, a.CheckViewToken("one", "live/CAM1"))
+	require.ErrorContains(t, a.CheckViewToken("one", "live/CAM2"), "unavailable")
+	require.ErrorContains(t, a.CheckViewToken("two", "live/CAM1"), "unavailable")
 }

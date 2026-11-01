@@ -38,14 +38,23 @@ The web app renews tokens by itself; share links just stop.
    `scripts/hash_admin_password.py`), `ADMIN_SESSION_SECRET`, and the same
    `MEDIA_JWT_PRIVATE_KEY_BASE64` as Nest. Rotate `API_KEY` and update
    `fetch-ssl-certs.sh` on the media servers at the same time.
-8. Turn on `MTX_PUBLISHALLOWLIST=yes` on one server. Watch for
+   Give the orchestrator's `ADMIN_API_TOKEN` a value that is also in api-admin's `API_KEYS`.
+8. Lock api-admin. Deploy Orbit-API-Admin, then give each caller its own key:
+   Orbit-NestJS and Sentinel through `ADMIN_API_KEY`, the Lambda through its
+   `AdminApiKey` parameter, and Orbit-API-Manager, which still has to be changed to send
+   one. Put all of them in `API_KEYS` last: until then nothing is enforced.
+9. Ship the CIS app update. Older versions keep working.
+10. Turn on `MTX_PUBLISHALLOWLIST=yes` on one server. Watch for
    `is not registered` in the log against cameras you expect to be valid.
-9. Turn on `MTX_AUTHMETHOD=jwt` and the allowed origins on one server, then the rest.
+11. Turn on `MTX_AUTHMETHOD=jwt` and the allowed origins on one server, then the rest.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.
 
 ## Known limits
 
+- Installation: validating a stream ID in the CIS app adds it to the allowlist until the
+  next sync (10 minutes), because a device must be online before it can be installed.
+- The CIS app signs in with a supervisor ID and no password.
 - CORS binds browsers only. A copied token works in VLC or curl until it expires.
 - There is no way to cancel a token before it expires.
 - A camera removed from the database keeps streaming until it reconnects.

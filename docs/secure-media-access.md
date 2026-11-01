@@ -40,9 +40,12 @@ The web app renews tokens by itself; share links just stop.
    `fetch-ssl-certs.sh` on the media servers at the same time.
    Give the orchestrator's `ADMIN_API_TOKEN` a value that is also in api-admin's `API_KEYS`.
 8. Lock api-admin. Deploy Orbit-API-Admin, then give each caller its own key:
-   Orbit-NestJS and Sentinel through `ADMIN_API_KEY`, the Lambda through its
-   `AdminApiKey` parameter, and Orbit-API-Manager, which still has to be changed to send
-   one. Put all of them in `API_KEYS` last: until then nothing is enforced.
+   Orbit-NestJS, Sentinel and Orbit-API-Manager through `ADMIN_API_KEY`, the Lambda
+   through its `AdminApiKey` parameter. Put all of them in `API_KEYS` last: until then
+   nothing is enforced.
+   Lock api-router the same way. Deploy Orbit-API-Manager, set `ORBIT_API_KEY` on every
+   media server and deploy orbit-play-state, then set api-router's `API_KEYS`. In that
+   order: media servers ignore upload errors, so recording logs would stop silently.
 9. Ship the CIS app update. Older versions keep working.
 10. Check `GET /api/v1/cameras/debug/redis-stream-id-count` matches your camera count,
    then turn on `MTX_PUBLISHALLOWLIST=yes` and `MTX_LOGLEVEL=warn` on one server. Watch

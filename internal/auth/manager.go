@@ -133,12 +133,13 @@ type Manager struct {
 	ReadTimeout        time.Duration
 	Parent             logger.Writer
 
-	wrapTransport   func(http.RoundTripper) http.RoundTripper
-	mutex           sync.RWMutex
-	jwksLastRefresh time.Time
-	jwksRefreshing  bool
-	jwksLastAttempt time.Time
-	jwtKeyFunc      keyfunc.Keyfunc
+	wrapTransport    func(http.RoundTripper) http.RoundTripper
+	mutex            sync.RWMutex
+	jwksLastRefresh  time.Time
+	jwksRefreshing   bool
+	jwksLastAttempt  time.Time
+	jwksForceRefresh bool
+	jwtKeyFunc       keyfunc.Keyfunc
 }
 
 // Initialize initializes the manager.
@@ -353,6 +354,18 @@ func (m *Manager) pullJWTJWKS() (jwt.Keyfunc, error) {
 	defer m.mutex.Unlock()
 
 	if m.jwtKeyFunc != nil {
+		if m.jwksForceRefresh {
+			m.jwksForceRefresh = false
+			tmp, err := m.fetchJWKS()
+			if err != nil {
+				m.Parent.Log(logger.Error, "unable to refresh JWKS, keeping the last keys: %v", err)
+				return m.jwtKeyFunc.Keyfunc, nil
+			}
+			m.jwtKeyFunc = tmp
+			m.jwksLastRefresh = time.Now()
+			return m.jwtKeyFunc.Keyfunc, nil
+		}
+
 		if time.Since(m.jwksLastRefresh) >= jwksRefreshPeriod && !m.jwksRefreshing {
 			m.jwksRefreshing = true
 			go m.refreshJWKSInBackground()
@@ -425,22 +438,12 @@ func (m *Manager) fetchJWKS() (keyfunc.Keyfunc, error) {
 	return keyfunc.NewJWKSetJSON(raw)
 }
 
-// RefreshJWTJWKS refreshes the JWT JWKS. It is called by the control API, outside of the
-// path manager loop, so it can wait for the result. The last keys stay on failure.
+// RefreshJWTJWKS makes the next authentication fetch the JWKS. The last keys stay if that
+// fails.
 func (m *Manager) RefreshJWTJWKS() {
-	tmp, err := m.fetchJWKS()
-
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
+	m.jwksForceRefresh = true
 	m.jwksLastAttempt = time.Time{}
-
-	if err != nil {
-		m.jwksLastRefresh = time.Time{}
-		m.Parent.Log(logger.Error, "unable to refresh JWKS, keeping the last keys: %v", err)
-		return
-	}
-
-	m.jwtKeyFunc = tmp
-	m.jwksLastRefresh = time.Now()
 }

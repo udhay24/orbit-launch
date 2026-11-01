@@ -122,6 +122,33 @@ func isAnyPort(p int) bool {
 	return p == 0 || p == 1
 }
 
+func sourceToIP(
+	resolveIPAddr func(network, address string) (*net.IPAddr, error),
+	source *string,
+) (net.IP, error) {
+	if source != nil {
+		ip := net.ParseIP(*source)
+
+		if ip == nil {
+			addr, err := resolveIPAddr("ip", *source)
+			if err != nil {
+				return nil, fmt.Errorf("unable to solve source host: %w", err)
+			}
+
+			ip = addr.IP
+		}
+
+		if ip != nil &&
+			!ip.IsUnspecified() &&
+			!ip.IsMulticast() &&
+			!ip.Equal(net.IPv4bcast) {
+			return ip, nil
+		}
+	}
+
+	return nil, nil
+}
+
 func findBaseURL(sd *sdp.SessionDescription, res *base.Response, u *base.URL) (*base.URL, error) {
 	// use global control attribute
 	if control, ok := sd.Attribute("control"); ok && control != "*" {
@@ -781,6 +808,15 @@ func (c *Client) Wait() error {
 	return c.closeError
 }
 
+// NetConn returns the underlying net.Conn of the control connection.
+// It returns nil if the connection is not open (before the first request or after Close).
+func (c *Client) NetConn() net.Conn {
+	c.propsMutex.RLock()
+	defer c.propsMutex.RUnlock()
+
+	return c.nconn
+}
+
 func (c *Client) run() {
 	defer close(c.done)
 
@@ -972,11 +1008,19 @@ func (c *Client) doClose() {
 		c.nconn.Close()
 		c.reader.close()
 		c.reader = nil
+
+		c.propsMutex.Lock()
 		c.nconn = nil
+		c.propsMutex.Unlock()
+
 		c.conn = nil
 	} else if c.nconn != nil {
 		c.nconn.Close()
+
+		c.propsMutex.Lock()
 		c.nconn = nil
+		c.propsMutex.Unlock()
+
 		c.conn = nil
 	}
 
@@ -1221,7 +1265,10 @@ func (c *Client) connOpen(u *base.URL) error {
 		}
 	}
 
+	c.propsMutex.Lock()
 	c.nconn = nconn
+	c.propsMutex.Unlock()
+
 	bc := bytecounter.New(c.nconn, &c.bytesReceived, &c.bytesSent)
 	c.conn = conn.NewConn(bufio.NewReader(bc), bc)
 	c.reader = &clientReader{
@@ -1665,7 +1712,7 @@ func (c *Client) doSetup(
 
 	// when playing, omit mode, since it causes errors with some servers.
 	if c.state == clientStatePreRecord {
-		th.Mode = ptrOf(headers.TransportModeRecord)
+		th.Mode = new(headers.TransportModeRecord)
 	}
 
 	var protocol Protocol
@@ -1764,14 +1811,14 @@ func (c *Client) doSetup(
 				return nil, err
 			}
 
-			th.Delivery = ptrOf(headers.TransportDeliveryUnicast)
+			th.Delivery = new(headers.TransportDeliveryUnicast)
 			th.ClientPorts = &[2]int{udpRTPListener.port(), udpRTCPListener.port()}
 		} else {
-			th.Delivery = ptrOf(headers.TransportDeliveryMulticast)
+			th.Delivery = new(headers.TransportDeliveryMulticast)
 		}
 
 	case ProtocolTCP:
-		th.Delivery = ptrOf(headers.TransportDeliveryUnicast)
+		th.Delivery = new(headers.TransportDeliveryUnicast)
 		th.Protocol = headers.TransportProtocolTCP
 		ch := c.findFreeChannelPair()
 		th.InterleavedIDs = &[2]int{ch, ch + 1}
@@ -1931,18 +1978,12 @@ func (c *Client) doSetup(
 		}
 
 		var remoteIP net.IP
-		if thRes.Source2 != nil {
-			if ip := net.ParseIP(*thRes.Source2); ip != nil {
-				remoteIP = ip
-			} else {
-				var addr *net.IPAddr
-				addr, err = c.ResolveIPAddr("ip", *thRes.Source2)
-				if err != nil {
-					return nil, fmt.Errorf("unable to solve source host: %w", err)
-				}
-				remoteIP = addr.IP
-			}
-		} else {
+		remoteIP, err = sourceToIP(c.ResolveIPAddr, thRes.Source2)
+		if err != nil {
+			return nil, err
+		}
+
+		if remoteIP == nil {
 			remoteIP = c.nconn.RemoteAddr().(*net.TCPAddr).IP
 		}
 
@@ -1976,18 +2017,12 @@ func (c *Client) doSetup(
 		}
 
 		var remoteIP net.IP
-		if thRes.Source2 != nil {
-			if ip := net.ParseIP(*thRes.Source2); ip != nil {
-				remoteIP = ip
-			} else {
-				var addr *net.IPAddr
-				addr, err = c.ResolveIPAddr("ip", *thRes.Source2)
-				if err != nil {
-					return nil, fmt.Errorf("unable to solve source host: %w", err)
-				}
-				remoteIP = addr.IP
-			}
-		} else {
+		remoteIP, err = sourceToIP(c.ResolveIPAddr, thRes.Source2)
+		if err != nil {
+			return nil, err
+		}
+
+		if remoteIP == nil {
 			remoteIP = c.nconn.RemoteAddr().(*net.TCPAddr).IP
 		}
 
@@ -2071,8 +2106,38 @@ func (c *Client) doSetup(
 		return nil, fmt.Errorf("returned profile does not match requested profile")
 	}
 
-	if isSecure(th.Profile) {
-		if c.axisClientManagedKeys {
+	// Some servers (observed on UniFi Protect cameras) advertise SDES key
+	// material ("a=crypto") for a media while still labeling its "m=" line
+	// as plain (non-secure) AVP rather than SAVP, and consequently never
+	// negotiate a secure transport profile at all. Since inbound decryption
+	// is a purely client-side decision — the server sends SRTP-encrypted
+	// bytes over the wire regardless of which profile label was
+	// negotiated — key material being present at the SDP level is treated
+	// as sufficient reason to decrypt, independent of th.Profile.
+	//
+	// This only applies when playing (reading from a server): medi's
+	// KeyMgmtMikey/KeyMgmtSDES fields are always freshly parsed from that
+	// server's own DESCRIBE response in that case. When recording
+	// (c.state == clientStatePreRecord), medi is instead a caller-supplied,
+	// potentially reused Media — and prepareForAnnounce() sets
+	// KeyMgmtMikey on it as a side effect of describing our own outbound
+	// key, which says nothing about whether the *inbound* direction (e.g.
+	// backchannel) is actually secured. Fall back to th.Profile alone there.
+	inboundSecure := isSecure(th.Profile) ||
+		(c.state != clientStatePreRecord && (medi.KeyMgmtMikey != nil || medi.KeyMgmtSDES != nil))
+
+	if inboundSecure {
+		// extract key-mgmt from (in order of priority):
+		// - the Axis client-managed-keys fallback (only ever reachable together
+		//   with a genuinely negotiated secure profile, since it reuses the
+		//   outbound context built for that case)
+		// - response (MIKEY)
+		// - media SDP attributes (MIKEY)
+		// - media SDP attributes (SDES, RFC 4568 "a=crypto" — e.g. UniFi
+		//   Protect cameras)
+		// - session SDP attributes (MIKEY)
+		switch {
+		case c.axisClientManagedKeys && isSecure(th.Profile):
 			srtpInCtx = &wrappedSRTPContext{
 				key: srtpOutCtx.key,
 				mki: srtpOutCtx.mki,
@@ -2081,43 +2146,46 @@ func (c *Client) doSetup(
 			if err != nil {
 				return nil, err
 			}
-		} else {
-			var mikeyMsg *mikey.Message
 
-			// extract key-mgmt from (in order of priority):
-			// - response
-			// - media SDP attributes
-			// - session SDP attributes
-			switch {
-			case res.Header["KeyMgmt"] != nil:
-				var keyMgmt headers.KeyMgmt
-				err = keyMgmt.Unmarshal(res.Header["KeyMgmt"])
-				if err != nil {
-					return nil, err
-				}
-				mikeyMsg = keyMgmt.MikeyMessage
-
-			case medi.KeyMgmtMikey != nil:
-				mikeyMsg = medi.KeyMgmtMikey
-
-			case c.lastDescribeDesc.KeyMgmtMikey != nil:
-				mikeyMsg = c.lastDescribeDesc.KeyMgmtMikey
-
-			default:
-				return nil, fmt.Errorf("server did not provide key-mgmt data in any supported way")
-			}
-
-			srtpInCtx, err = mikeyToContext(mikeyMsg)
+		case res.Header["KeyMgmt"] != nil:
+			var keyMgmt headers.KeyMgmt
+			err = keyMgmt.Unmarshal(res.Header["KeyMgmt"])
 			if err != nil {
 				return nil, err
 			}
+
+			srtpInCtx, err = mikeyToContext(keyMgmt.MikeyMessage)
+			if err != nil {
+				return nil, err
+			}
+
+		case medi.KeyMgmtMikey != nil:
+			srtpInCtx, err = mikeyToContext(medi.KeyMgmtMikey)
+			if err != nil {
+				return nil, err
+			}
+
+		case medi.KeyMgmtSDES != nil:
+			srtpInCtx, err = sdesToContext(medi.KeyMgmtSDES)
+			if err != nil {
+				return nil, err
+			}
+
+		case c.lastDescribeDesc.KeyMgmtMikey != nil:
+			srtpInCtx, err = mikeyToContext(c.lastDescribeDesc.KeyMgmtMikey)
+			if err != nil {
+				return nil, err
+			}
+
+		default:
+			return nil, fmt.Errorf("server did not provide key-mgmt data in any supported way")
 		}
 	}
 
 	cm := &clientMedia{
 		c:               c,
 		media:           medi,
-		secure:          isSecure(th.Profile),
+		secure:          inboundSecure,
 		udpRTPListener:  udpRTPListener,
 		udpRTCPListener: udpRTCPListener,
 		tcpChannel:      tcpChannel,

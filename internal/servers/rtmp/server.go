@@ -65,12 +65,14 @@ type serverMetrics interface {
 }
 
 type serverPathManager interface {
+	FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error)
 	AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error)
 	AddReader(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error)
 }
 
 type serverParent interface {
 	logger.Writer
+	OnFatalError(context.Context, error)
 }
 
 // Server is a RTMP server.
@@ -101,7 +103,7 @@ type Server struct {
 
 	// in
 	chNewConn      chan net.Conn
-	chAcceptErr    chan error
+	chListenError  chan error
 	chCloseConn    chan *conn
 	chAPIConnsList chan serverAPIConnsListReq
 	chAPIConnsGet  chan serverAPIConnsGetReq
@@ -172,7 +174,7 @@ func (s *Server) Initialize() error {
 		}
 
 		net, addr := restrictnetwork.Restrict("tcp", s.Address)
-		s.ln, err = tlsListen(net, addr, &tls.Config{GetCertificate: s.loader.GetCertificate()})
+		s.ln, err = tlsListen(net, addr, &tls.Config{GetCertificate: s.loader.GetCertificate})
 		if err != nil {
 			return err
 		}
@@ -188,7 +190,7 @@ func (s *Server) Initialize() error {
 
 	s.conns = make(map[*conn]struct{})
 	s.chNewConn = make(chan net.Conn)
-	s.chAcceptErr = make(chan error)
+	s.chListenError = make(chan error)
 	s.chCloseConn = make(chan *conn)
 	s.chAPIConnsList = make(chan serverAPIConnsListReq)
 	s.chAPIConnsGet = make(chan serverAPIConnsGetReq)
@@ -238,7 +240,7 @@ func (s *Server) Log(level logger.Level, format string, args ...any) {
 func (s *Server) Close() {
 	s.Log(logger.Info, "closing")
 
-	if !interfaceIsEmpty((s.Metrics)) {
+	if !interfaceIsEmpty(s.Metrics) {
 		if s.Encryption {
 			s.Metrics.SetRTMPSServer(nil)
 		} else {
@@ -252,6 +254,8 @@ func (s *Server) Close() {
 	if s.loader != nil {
 		s.loader.Close()
 	}
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -260,8 +264,9 @@ func (s *Server) run() {
 outer:
 	for {
 		select {
-		case err := <-s.chAcceptErr:
+		case err := <-s.chListenError:
 			s.Log(logger.Error, "%s", err)
+			s.Parent.OnFatalError(s.ctx, err)
 			break outer
 
 		case nconn := <-s.chNewConn:
@@ -355,10 +360,10 @@ func (s *Server) newConn(conn net.Conn) {
 	}
 }
 
-// acceptError is called by rtmpListener.
-func (s *Server) acceptError(err error) {
+// listenError is called by rtmpListener.
+func (s *Server) listenError(err error) {
 	select {
-	case s.chAcceptErr <- err:
+	case s.chListenError <- err:
 	case <-s.ctx.Done():
 	}
 }

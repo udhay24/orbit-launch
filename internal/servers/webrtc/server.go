@@ -23,6 +23,7 @@ import (
 	"github.com/pion/logging"
 	pwebrtc "github.com/pion/webrtc/v4"
 
+	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
@@ -140,11 +141,13 @@ type newSessionRes struct {
 }
 
 type newSessionReq struct {
-	pathName    string
 	remoteAddr  string
+	pathName    string
+	query       string
+	userAgent   string
+	credentials *auth.Credentials
 	offer       []byte
 	publish     bool
-	httpRequest *http.Request
 	res         chan newSessionRes
 }
 
@@ -181,33 +184,36 @@ type serverPathManager interface {
 
 type serverParent interface {
 	logger.Writer
+	OnFatalError(context.Context, error)
 }
 
 // Server is a WebRTC server.
 type Server struct {
-	Address               string
-	DumpPackets           bool
-	Encryption            bool
-	ServerKey             string
-	ServerCert            string
-	AllowOrigins          []string
-	TrustedProxies        conf.IPNetworks
-	ReadTimeout           conf.Duration
-	WriteTimeout          conf.Duration
-	UDPReadBufferSize     uint
-	LocalUDPAddress       string
-	LocalTCPAddress       string
-	IPsFromInterfaces     bool
-	IPsFromInterfacesList []string
-	AdditionalHosts       []string
-	ICEServers            []conf.WebRTCICEServer
-	STUNGatherTimeout     conf.Duration
-	HandshakeTimeout      conf.Duration
-	TrackGatherTimeout    conf.Duration
-	ExternalCmdPool       *externalcmd.Pool
-	Metrics               serverMetrics
-	PathManager           serverPathManager
-	Parent                serverParent
+	Address                      string
+	DumpPackets                  bool
+	Encryption                   bool
+	ServerKey                    string
+	ServerCert                   string
+	AllowOrigins                 []string
+	TrustedProxies               conf.IPNetworks
+	ReadTimeout                  conf.Duration
+	WriteTimeout                 conf.Duration
+	UDPReadBufferSize            uint
+	LocalUDPAddress              string
+	LocalTCPAddress              string
+	SupportsIPv6                 bool
+	IPsFromInterfaces            bool
+	IPsFromInterfacesList        []string
+	IPsFromInterfacesExcludeList []string
+	AdditionalHosts              []string
+	ICEServers                   []conf.WebRTCICEServer
+	STUNGatherTimeout            conf.Duration
+	HandshakeTimeout             conf.Duration
+	TrackGatherTimeout           conf.Duration
+	ExternalCmdPool              *externalcmd.Pool
+	Metrics                      serverMetrics
+	PathManager                  serverPathManager
+	Parent                       serverParent
 
 	ctx              context.Context
 	ctxCancel        func()
@@ -221,6 +227,7 @@ type Server struct {
 	sessionsBySecret map[uuid.UUID]*session
 
 	// in
+	chListenError          chan error
 	chNewSession           chan newSessionReq
 	chCloseSession         chan *session
 	chAddSessionCandidates chan addSessionCandidatesReq
@@ -241,6 +248,7 @@ func (s *Server) Initialize() error {
 	s.ctxCancel = ctxCancel
 	s.sessions = make(map[*session]struct{})
 	s.sessionsBySecret = make(map[uuid.UUID]*session)
+	s.chListenError = make(chan error)
 	s.chNewSession = make(chan newSessionReq)
 	s.chCloseSession = make(chan *session)
 	s.chAddSessionCandidates = make(chan addSessionCandidatesReq)
@@ -351,6 +359,8 @@ func (s *Server) Close() {
 
 	s.ctxCancel()
 	<-s.done
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -361,27 +371,36 @@ func (s *Server) run() {
 outer:
 	for {
 		select {
+		case err := <-s.chListenError:
+			s.Log(logger.Error, "%s", err)
+			s.Parent.OnFatalError(s.ctx, err)
+			break outer
+
 		case req := <-s.chNewSession:
 			sx := &session{
-				net:                   s.net,
-				parentCtx:             s.ctx,
-				ipsFromInterfaces:     s.IPsFromInterfaces,
-				ipsFromInterfacesList: s.IPsFromInterfacesList,
-				additionalHosts:       s.AdditionalHosts,
-				iceUDPMux:             s.iceUDPMux,
-				iceTCPMux:             s.iceTCPMux,
-				stunGatherTimeout:     s.STUNGatherTimeout,
-				handshakeTimeout:      s.HandshakeTimeout,
-				trackGatherTimeout:    s.TrackGatherTimeout,
-				pathName:              req.pathName,
-				remoteAddr:            req.remoteAddr,
-				offer:                 req.offer,
-				publish:               req.publish,
-				httpRequest:           req.httpRequest,
-				wg:                    &wg,
-				externalCmdPool:       s.ExternalCmdPool,
-				pathManager:           s.PathManager,
-				parent:                s,
+				net:                          s.net,
+				parentCtx:                    s.ctx,
+				ipsFromInterfaces:            s.IPsFromInterfaces,
+				ipsFromInterfacesList:        s.IPsFromInterfacesList,
+				ipsFromInterfacesExcludeList: s.IPsFromInterfacesExcludeList,
+				additionalHosts:              s.AdditionalHosts,
+				iceUDPMux:                    s.iceUDPMux,
+				iceTCPMux:                    s.iceTCPMux,
+				supportsIPv6:                 s.SupportsIPv6,
+				stunGatherTimeout:            s.STUNGatherTimeout,
+				handshakeTimeout:             s.HandshakeTimeout,
+				trackGatherTimeout:           s.TrackGatherTimeout,
+				remoteAddr:                   req.remoteAddr,
+				pathName:                     req.pathName,
+				query:                        req.query,
+				userAgent:                    req.userAgent,
+				credentials:                  req.credentials,
+				offer:                        req.offer,
+				publish:                      req.publish,
+				wg:                           &wg,
+				externalCmdPool:              s.ExternalCmdPool,
+				pathManager:                  s.PathManager,
+				parent:                       s,
 			}
 			sx.initialize()
 			s.sessions[sx] = struct{}{}
@@ -468,6 +487,14 @@ outer:
 
 	if s.tcpMuxLn != nil {
 		s.tcpMuxLn.Close()
+	}
+}
+
+func (s *Server) onListenError(ctx context.Context, err error) {
+	select {
+	case s.chListenError <- err:
+	case <-ctx.Done():
+	case <-s.ctx.Done():
 	}
 }
 

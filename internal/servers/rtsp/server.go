@@ -86,6 +86,7 @@ type serverPathManager interface {
 
 type serverParent interface {
 	logger.Writer
+	OnFatalError(context.Context, error)
 }
 
 // Server is a RTSP server.
@@ -166,7 +167,7 @@ func (s *Server) Initialize() error {
 			return err
 		}
 
-		s.srv.TLSConfig = &tls.Config{GetCertificate: s.loader.GetCertificate()}
+		s.srv.TLSConfig = &tls.Config{GetCertificate: s.loader.GetCertificate}
 	}
 
 	s.srv.Listen = func(network, address string) (net.Listener, error) {
@@ -299,6 +300,8 @@ func (s *Server) Close() {
 	if s.loader != nil {
 		s.loader.Close()
 	}
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -312,12 +315,15 @@ func (s *Server) run() {
 outer:
 	select {
 	case err := <-serverErr:
-		s.Log(logger.Error, "%s", err)
+		if s.ctx.Err() == nil {
+			s.Log(logger.Error, "%s", err)
+			s.Parent.OnFatalError(s.ctx, err)
+		}
 		break outer
 
 	case <-s.ctx.Done():
 		s.srv.Close()
-		<-serverErr
+		<-serverErr //nolint:errcheck
 		break outer
 	}
 
@@ -581,16 +587,16 @@ func (s *Server) APISessionsKick(uuid uuid.UUID) error {
 	default:
 	}
 
-	s.mutex.RLock()
-	defer s.mutex.RUnlock()
-
+	s.mutex.Lock()
 	key, sx := s.findSessionByUUID(uuid)
 	if sx == nil {
+		s.mutex.Unlock()
 		return ErrSessionNotFound
 	}
+	delete(s.sessions, key)
+	s.mutex.Unlock()
 
 	sx.Close()
-	delete(s.sessions, key)
 	sx.onClose(liberrors.ErrServerTerminated{})
 	return nil
 }

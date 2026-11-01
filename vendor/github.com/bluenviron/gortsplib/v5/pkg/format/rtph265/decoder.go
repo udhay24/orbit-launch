@@ -33,24 +33,29 @@ func joinFragments(fragments [][]byte, size int) []byte {
 func splitNALUs(b []byte) [][]byte {
 	startCode := []byte{0x00, 0x00, 0x01}
 	nalus := make([][]byte, 0, 1)
+
 	for len(b) > 0 {
 		idx := bytes.Index(b, startCode)
 		if idx == -1 {
 			nalus = append(nalus, b)
 			break
 		}
+
 		sz := 3
 		if idx > 0 && b[idx-1] == 0x00 {
 			idx--
 			sz++
 		}
+
 		if idx == 0 {
 			b = b[sz:]
 			continue
 		}
+
 		nalus = append(nalus, b[:idx])
 		b = b[idx+sz:]
 	}
+
 	return nalus
 }
 
@@ -60,6 +65,17 @@ func auSize(au [][]byte) int {
 		s += len(nalu)
 	}
 	return s
+}
+
+func auIsOnlySEI(au [][]byte) bool {
+	for _, nalu := range au {
+		typ := h265.NALUType((nalu[0] >> 1) & 0b111111)
+		if typ != h265.NALUType_PREFIX_SEI_NUT && typ != h265.NALUType_SUFFIX_SEI_NUT {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Decoder is a RTP/H265 decoder.
@@ -74,9 +90,11 @@ type Decoder struct {
 	fragmentNextSeqNum  uint16
 
 	// for Decode()
-	frameBuffer     [][]byte
-	frameBufferLen  int
-	frameBufferSize int
+	frameBuffer         [][]byte
+	frameBufferLen      int
+	frameBufferSize     int
+	lastNonSEITimestamp uint32
+	lastNonSEIReceived  bool
 }
 
 // Init initializes the decoder.
@@ -196,10 +214,15 @@ func (d *Decoder) decodeNALUs(pkt *rtp.Packet) ([][]byte, error) {
 		nalus = [][]byte{pkt.Payload}
 	}
 
+	if len(nalus) == 0 {
+		return nil, fmt.Errorf("fragmented NALU doesn't contain any NALU")
+	}
+
 	return nalus, nil
 }
 
 // Decode decodes an access unit from a RTP packet.
+// On success, the access unit contains at least one NALU, each with at least one byte.
 func (d *Decoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 	nalus, err := d.decodeNALUs(pkt)
 	if err != nil {
@@ -241,6 +264,18 @@ func (d *Decoder) Decode(pkt *rtp.Packet) ([][]byte, error) {
 	d.frameBuffer = nil
 	d.frameBufferLen = 0
 	d.frameBufferSize = 0
+
+	// Drop trailing SEI-only access units, that in reality should be leading the previous access unit.
+	// These cause problems in downstream components (DTS extractor, recorder).
+	if auIsOnlySEI(ret) {
+		if d.lastNonSEIReceived && pkt.Timestamp == d.lastNonSEITimestamp {
+			return nil, ErrMorePacketsNeeded
+		}
+		d.lastNonSEIReceived = false
+	} else {
+		d.lastNonSEITimestamp = pkt.Timestamp
+		d.lastNonSEIReceived = true
+	}
 
 	return ret, nil
 }

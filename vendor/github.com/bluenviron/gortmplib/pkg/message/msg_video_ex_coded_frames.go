@@ -18,7 +18,7 @@ type VideoExCodedFrames struct {
 }
 
 func (m *VideoExCodedFrames) unmarshal(raw *rawmessage.Message) error {
-	if len(raw.Body) < 5 {
+	if len(raw.Body) < 6 {
 		return fmt.Errorf("not enough bytes")
 	}
 
@@ -29,10 +29,11 @@ func (m *VideoExCodedFrames) unmarshal(raw *rawmessage.Message) error {
 	m.FourCC = FourCC(raw.Body[1])<<24 | FourCC(raw.Body[2])<<16 | FourCC(raw.Body[3])<<8 | FourCC(raw.Body[4])
 	switch m.FourCC {
 	case FourCCAVC, FourCCHEVC:
-		if len(raw.Body) < 8 {
+		if len(raw.Body) < 9 {
 			return fmt.Errorf("not enough bytes")
 		}
-		m.PTSDelta = time.Duration(uint32(raw.Body[5])<<16|uint32(raw.Body[6])<<8|uint32(raw.Body[7])) * time.Millisecond
+		m.PTSDelta = time.Duration(int32(uint32(raw.Body[5])<<24|uint32(raw.Body[6])<<16|
+			uint32(raw.Body[7])<<8)>>8) * time.Millisecond
 		m.Payload = raw.Body[8:]
 
 	case FourCCAV1, FourCCVP9:

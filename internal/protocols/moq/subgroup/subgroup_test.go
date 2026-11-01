@@ -30,10 +30,10 @@ var cases = []struct {
 		},
 		dec: subgroup.SubGroup{
 			Header: subgroup.Header{
-				Properties:  false,
-				FirstObject: false,
-				TrackAlias:  1,
-				GroupID:     0,
+				HasProperties: false,
+				IsFirstObject: false,
+				TrackAlias:    1,
+				GroupID:       0,
 			},
 			Objects: []subgroup.Object{{
 				Payload: []byte("hello"),
@@ -59,10 +59,10 @@ var cases = []struct {
 		},
 		dec: subgroup.SubGroup{
 			Header: subgroup.Header{
-				Properties:  true,
-				FirstObject: false,
-				TrackAlias:  1,
-				GroupID:     0,
+				HasProperties: true,
+				IsFirstObject: false,
+				TrackAlias:    1,
+				GroupID:       0,
 			},
 			Objects: []subgroup.Object{{
 				Properties: property.Properties{
@@ -85,6 +85,24 @@ func TestUnmarshal(t *testing.T) {
 	}
 }
 
+func TestHeaderFlags(t *testing.T) {
+	for _, header := range [][]byte{
+		{0x14, 0x01, 0x00, 0x02, 0x80},
+		{0x12, 0x01, 0x00, 0x80},
+	} {
+		data := append(append([]byte{}, header...), 0x00, 0x01, 'a', 0x00, 0x00, 0x03)
+		var decoded subgroup.SubGroup
+		require.NoError(t, decoded.Read(bytes.NewReader(data)))
+		require.Equal(t, uint64(1), decoded.Header.TrackAlias)
+		require.Equal(t, []byte("a"), decoded.Objects[0].Payload)
+	}
+
+	for _, flags := range []byte{0x16, 0x90, 0x00, 0x80} {
+		var decoded subgroup.SubGroup
+		require.Error(t, decoded.Read(bytes.NewReader([]byte{flags, 0x01, 0x00})))
+	}
+}
+
 func TestMarshal(t *testing.T) {
 	for _, ca := range cases {
 		t.Run(ca.name, func(t *testing.T) {
@@ -98,11 +116,17 @@ func FuzzUnmarshal(f *testing.F) {
 		f.Add(ca.enc)
 	}
 
-	f.Fuzz(func(_ *testing.T, buf []byte) {
+	f.Fuzz(func(t *testing.T, buf []byte) {
 		var s subgroup.SubGroup
 		err := s.Read(bytes.NewReader(buf))
 		if err != nil {
 			return
+		}
+
+		require.NotEmpty(t, s.Objects)
+
+		for _, obj := range s.Objects {
+			require.NotEmpty(t, obj.Payload)
 		}
 
 		s.Marshal()

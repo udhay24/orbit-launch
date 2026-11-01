@@ -8,8 +8,10 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/bluenviron/gortsplib/v5/pkg/readbuffer"
 	srt "github.com/datarhei/gosrt"
 	"github.com/google/uuid"
 
@@ -70,6 +72,7 @@ type serverPathManager interface {
 
 type serverParent interface {
 	logger.Writer
+	OnFatalError(context.Context, error)
 }
 
 // Server is a SRT server.
@@ -79,6 +82,7 @@ type Server struct {
 	ReadTimeout         conf.Duration
 	WriteTimeout        conf.Duration
 	UDPMaxPayloadSize   int
+	UDPReadBufferSize   uint
 	RunOnConnect        string
 	RunOnConnectRestart bool
 	RunOnDisconnect     string
@@ -95,7 +99,7 @@ type Server struct {
 
 	// in
 	chNewConnRequest chan srt.ConnRequest
-	chAcceptErr      chan error
+	chListenError    chan error
 	chCloseConn      chan *conn
 	chAPIConnsList   chan serverAPIConnsListReq
 	chAPIConnsGet    chan serverAPIConnsGetReq
@@ -109,6 +113,13 @@ func (s *Server) Initialize() error {
 	conf.PeerIdleTimeout = time.Duration(s.ReadTimeout)
 	conf.PayloadSize = uint32(srtMaxPayloadSize(s.UDPMaxPayloadSize))
 
+	if s.UDPReadBufferSize > 0 {
+		bufSize := int(s.UDPReadBufferSize)
+		conf.ListenerControl = func(_, _ string, rawConn syscall.RawConn) error {
+			return readbuffer.SetReadBufferRaw(rawConn, bufSize)
+		}
+	}
+
 	var err error
 	s.ln, err = srt.Listen("srt", s.Address, conf)
 	if err != nil {
@@ -119,7 +130,7 @@ func (s *Server) Initialize() error {
 
 	s.conns = make(map[*conn]struct{})
 	s.chNewConnRequest = make(chan srt.ConnRequest)
-	s.chAcceptErr = make(chan error)
+	s.chListenError = make(chan error)
 	s.chCloseConn = make(chan *conn)
 	s.chAPIConnsList = make(chan serverAPIConnsListReq)
 	s.chAPIConnsGet = make(chan serverAPIConnsGetReq)
@@ -159,6 +170,8 @@ func (s *Server) Close() {
 
 	s.ctxCancel()
 	s.wg.Wait()
+
+	s.Log(logger.Debug, "closed")
 }
 
 func (s *Server) run() {
@@ -167,8 +180,9 @@ func (s *Server) run() {
 outer:
 	for {
 		select {
-		case err := <-s.chAcceptErr:
+		case err := <-s.chListenError:
 			s.Log(logger.Error, "%s", err)
+			s.Parent.OnFatalError(s.ctx, err)
 			break outer
 
 		case req := <-s.chNewConnRequest:
@@ -256,10 +270,10 @@ func (s *Server) newConnRequest(connReq srt.ConnRequest) {
 	}
 }
 
-// acceptError is called by srtListener.
-func (s *Server) acceptError(err error) {
+// listenError is called by srtListener.
+func (s *Server) listenError(err error) {
 	select {
-	case s.chAcceptErr <- err:
+	case s.chListenError <- err:
 	case <-s.ctx.Done():
 	}
 }

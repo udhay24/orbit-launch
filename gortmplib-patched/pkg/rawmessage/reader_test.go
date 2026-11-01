@@ -1,4 +1,4 @@
-package rawmessage
+package rawmessage_test
 
 import (
 	"bytes"
@@ -11,16 +11,17 @@ import (
 
 	"github.com/bluenviron/gortmplib/pkg/bytecounter"
 	"github.com/bluenviron/gortmplib/pkg/chunk"
+	"github.com/bluenviron/gortmplib/pkg/rawmessage"
 )
 
 var cases = []struct {
 	name     string
-	messages []*Message
+	messages []*rawmessage.Message
 	chunks   []chunk.Chunk
 }{
 	{
 		"(chunk0) + (chunk1)",
-		[]*Message{
+		[]*rawmessage.Message{
 			{
 				ChunkStreamID:   27,
 				Timestamp:       18576 * time.Millisecond,
@@ -56,7 +57,7 @@ var cases = []struct {
 	},
 	{
 		"(chunk0) + (chunk2) + (chunk3)",
-		[]*Message{
+		[]*rawmessage.Message{
 			{
 				ChunkStreamID:   27,
 				Timestamp:       18576 * time.Millisecond,
@@ -101,7 +102,7 @@ var cases = []struct {
 	},
 	{
 		"(chunk0 + chunk3) + (chunk1 + chunk3) + (chunk2 + chunk3) + (chunk3 + chunk3)",
-		[]*Message{
+		[]*rawmessage.Message{
 			{
 				ChunkStreamID:   27,
 				Timestamp:       18576 * time.Millisecond,
@@ -176,7 +177,7 @@ var cases = []struct {
 	},
 	{
 		"(chunk0 + chunk3 with extended timestamp)",
-		[]*Message{
+		[]*rawmessage.Message{
 			{
 				ChunkStreamID:   27,
 				Timestamp:       0xFF123456 * time.Millisecond,
@@ -202,7 +203,7 @@ var cases = []struct {
 	},
 	{
 		"decreasing timestamp",
-		[]*Message{
+		[]*rawmessage.Message{
 			{
 				ChunkStreamID:   27,
 				Timestamp:       16 * time.Second,
@@ -264,13 +265,18 @@ var cases = []struct {
 }
 
 func TestReader(t *testing.T) {
-	for _, ca := range cases {
+	for _, ca := range cases { //nolint:dupl
 		t.Run(ca.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			br := bytecounter.NewReader(&buf)
-			r := NewReader(br, br, func(_ uint32) error {
-				return nil
-			})
+			r := &rawmessage.Reader{
+				BR:  br,
+				BCR: br,
+				OnAckNeeded: func(_ uint32) error {
+					return nil
+				},
+			}
+			r.Initialize()
 
 			hasExtendedTimestamp := false
 
@@ -281,7 +287,7 @@ func TestReader(t *testing.T) {
 				hasExtendedTimestamp = chunkHasExtendedTimestamp(cach)
 			}
 
-			var msgs []*Message
+			var msgs []*rawmessage.Message
 
 			for {
 				msg, err := r.Read()
@@ -300,12 +306,12 @@ func TestReader(t *testing.T) {
 func TestReaderAdditional(t *testing.T) {
 	for _, ca := range []struct {
 		name     string
-		messages []*Message
+		messages []*rawmessage.Message
 		chunks   []chunk.Chunk
 	}{
 		{
 			"(chunk0) + (chunk3)",
-			[]*Message{
+			[]*rawmessage.Message{
 				{
 					ChunkStreamID:   27,
 					Timestamp:       4279383126000000,
@@ -336,13 +342,18 @@ func TestReaderAdditional(t *testing.T) {
 				},
 			},
 		},
-	} {
+	} { //nolint:dupl
 		t.Run(ca.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			br := bytecounter.NewReader(&buf)
-			r := NewReader(br, br, func(_ uint32) error {
-				return nil
-			})
+			r := &rawmessage.Reader{
+				BR:  br,
+				BCR: br,
+				OnAckNeeded: func(_ uint32) error {
+					return nil
+				},
+			}
+			r.Initialize()
 
 			hasExtendedTimestamp := false
 
@@ -353,7 +364,7 @@ func TestReaderAdditional(t *testing.T) {
 				hasExtendedTimestamp = chunkHasExtendedTimestamp(cach)
 			}
 
-			var msgs []*Message
+			var msgs []*rawmessage.Message
 
 			for {
 				msg, err := r.Read()
@@ -394,9 +405,14 @@ func TestReaderAbortChunkStream(t *testing.T) {
 		t.Run(ca.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			bc := bytecounter.NewReader(&buf)
-			r := NewReader(bc, bc, func(_ uint32) error {
-				return nil
-			})
+			r := &rawmessage.Reader{
+				BR:  bc,
+				BCR: bc,
+				OnAckNeeded: func(_ uint32) error {
+					return nil
+				},
+			}
+			r.Initialize()
 			_ = r.SetChunkSize(64)
 
 			chunks := []chunk.Chunk{
@@ -461,14 +477,19 @@ func TestReaderAcknowledge(t *testing.T) {
 
 			var buf bytes.Buffer
 			bc := bytecounter.NewReader(&buf)
-			r := NewReader(bc, bc, func(_ uint32) error {
-				close(onAckCalled)
-				return nil
-			})
+			r := &rawmessage.Reader{
+				BR:  bc,
+				BCR: bc,
+				OnAckNeeded: func(_ uint32) error {
+					close(onAckCalled)
+					return nil
+				},
+			}
+			r.Initialize()
 
 			if ca == "overflow" {
 				bc.SetCount(4294967096)
-				r.lastAckCount = 4294967096
+				r.LastAckCount = 4294967096
 			}
 
 			err := r.SetChunkSize(65536)
@@ -498,13 +519,23 @@ func TestReaderAcknowledge(t *testing.T) {
 func FuzzReader(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) {
 		bcr := bytecounter.NewReader(bytes.NewReader(b))
-		r := NewReader(bcr, bcr, func(_ uint32) error {
-			return nil
-		})
+		r := &rawmessage.Reader{
+			BR:  bcr,
+			BCR: bcr,
+			OnAckNeeded: func(_ uint32) error {
+				return nil
+			},
+		}
+		r.Initialize()
 
 		var buf bytes.Buffer
 		bcw := bytecounter.NewWriter(&buf)
-		w := NewWriter(bcw, bcw, true)
+		w := &rawmessage.Writer{
+			BW:               bcw,
+			BCW:              bcw,
+			CheckAcknowledge: true,
+		}
+		w.Initialize()
 
 		for {
 			msg, err := r.Read()

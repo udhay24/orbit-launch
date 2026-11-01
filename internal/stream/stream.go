@@ -171,6 +171,13 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 			})
 
 		case conf.CodecMPEG4Audio:
+			channelConfig := uint8(track.ChannelCount)
+
+			// channel configuration 7 stands for 8 channels
+			if track.ChannelCount == 8 {
+				channelConfig = 7
+			}
+
 			medias = append(medias, &description.Media{
 				Type: description.MediaTypeAudio,
 				Formats: []format.Format{&format.MPEG4Audio{
@@ -181,8 +188,8 @@ func mediasFromAlwaysAvailableTracks(alwaysAvailableTracks []conf.AlwaysAvailabl
 					Config: &mpeg4audio.AudioSpecificConfig{
 						Type:          mpeg4audio.ObjectTypeAACLC,
 						SampleRate:    track.SampleRate,
-						ChannelConfig: uint8(track.ChannelCount),
-						ChannelCount:  track.ChannelCount,
+						ChannelConfig: channelConfig,
+						ChannelCount:  track.ChannelCount, //nolint:staticcheck
 					},
 				}},
 			})
@@ -492,6 +499,9 @@ func (s *Stream) RTSPSStream(server *gortsplib.Server) (*gortsplib.ServerStream,
 // AddReader adds a reader.
 // Used by all protocols except RTSP.
 func (s *Stream) AddReader(r *Reader) {
+	r.queueSize = s.WriteQueueSize
+	r.start()
+
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
@@ -506,9 +516,6 @@ func (s *Stream) AddReader(r *Reader) {
 		}
 	}
 
-	r.queueSize = s.WriteQueueSize
-	r.start()
-
 	select {
 	case <-s.hasReaders:
 	default:
@@ -520,9 +527,6 @@ func (s *Stream) AddReader(r *Reader) {
 // Used by all protocols except RTSP.
 func (s *Stream) RemoveReader(r *Reader) {
 	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
-	r.stop()
 
 	for medi, formats := range r.onDatas {
 		sm := s.medias[medi]
@@ -534,6 +538,10 @@ func (s *Stream) RemoveReader(r *Reader) {
 	}
 
 	delete(s.readers, r)
+
+	s.mutex.Unlock()
+
+	r.stop()
 }
 
 // WaitForReaders waits for the stream to have at least one reader.

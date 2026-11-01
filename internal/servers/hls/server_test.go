@@ -1,6 +1,7 @@
 package hls
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
@@ -25,6 +27,45 @@ import (
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
 )
+
+func TestServerListenError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	expected := fmt.Errorf("listener failed")
+	received := make(chan error, 1)
+	s := &Server{
+		Parent: &test.ServerParent{
+			OnFatalErrorImpl: func(callbackCtx context.Context, err error) {
+				require.Equal(t, ctx, callbackCtx)
+				received <- err
+			},
+		},
+	}
+	s.onListenError(ctx, expected)
+	require.ErrorIs(t, <-received, expected)
+}
+
+func TestServerCloseWithoutListenError(t *testing.T) {
+	received := make(chan error, 1)
+	s := &Server{
+		Address:      "127.0.0.1:0",
+		ReadTimeout:  conf.Duration(time.Second),
+		WriteTimeout: conf.Duration(time.Second),
+		PathManager:  &dummyPathManager{},
+		Parent: &test.ServerParent{
+			OnFatalErrorImpl: func(_ context.Context, err error) {
+				received <- err
+			},
+		},
+	}
+	require.NoError(t, s.Initialize())
+	s.Close()
+	select {
+	case err := <-received:
+		t.Fatalf("normal shutdown reported a listener error: %v", err)
+	default:
+	}
+}
 
 type dummyPathManager struct {
 	setHLSServerImpl func() []defs.Path
@@ -87,6 +128,7 @@ func TestServerPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:8888", nil)
 	require.NoError(t, err)
 
+	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -98,7 +140,7 @@ func TestServerPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
+	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "OPTIONS, GET", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization, Range", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
@@ -184,7 +226,10 @@ func TestServerIndexRedirectNoXSS(t *testing.T) {
 		t.Run(ca.name, func(t *testing.T) {
 			pm := &dummyPathManager{
 				findPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
-					return &defs.PathFindPathConfRes{Conf: &conf.Path{}, User: req.AccessRequest.Credentials.User}, nil
+					return &defs.PathFindPathConfRes{
+						Conf:    &conf.Path{},
+						AuthRes: &auth.Result{User: req.AccessRequest.Credentials.User},
+					}, nil
 				},
 			}
 
@@ -230,7 +275,10 @@ func TestServerNotFound(t *testing.T) {
 			pm := &dummyPathManager{
 				findPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
 					require.Equal(t, "nonexisting", req.AccessRequest.Name)
-					return &defs.PathFindPathConfRes{Conf: &conf.Path{}, User: req.AccessRequest.Credentials.User}, nil
+					return &defs.PathFindPathConfRes{
+						Conf:    &conf.Path{},
+						AuthRes: &auth.Result{User: req.AccessRequest.Credentials.User},
+					}, nil
 				},
 				addReaderImpl: func(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
 					require.Equal(t, "nonexisting", req.AccessRequest.Name)
@@ -302,6 +350,145 @@ func (t *cdnRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(req)
 }
 
+func TestServerSessionSecretAfterMuxerClose(t *testing.T) {
+	desc := &description.Session{Medias: []*description.Media{test.MediaH264}}
+	strm := &stream.Stream{
+		OrigDesc:          desc,
+		WriteQueueSize:    512,
+		RTPMaxPayloadSize: 1450,
+		Parent:            test.NilLogger,
+	}
+	err := strm.Initialize()
+	require.NoError(t, err)
+
+	s := &Server{
+		Address:         "127.0.0.1:8888",
+		Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
+		SegmentCount:    7,
+		SegmentDuration: conf.Duration(1 * time.Second),
+		PartDuration:    conf.Duration(200 * time.Millisecond),
+		SegmentMaxSize:  50 * 1024 * 1024,
+		ReadTimeout:     conf.Duration(10 * time.Second),
+		WriteTimeout:    conf.Duration(10 * time.Second),
+		PathManager: &dummyPathManager{
+			addReaderImpl: func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
+				return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm, AuthRes: &auth.Result{}}, nil
+			},
+		},
+		Parent: test.NilLogger,
+	}
+	err = s.Initialize()
+	require.NoError(t, err)
+	defer s.Close()
+
+	sx := &session{
+		wg:              &s.wg,
+		remoteAddr:      "127.0.0.1:12345",
+		pathName:        "stream",
+		externalCmdPool: s.ExternalCmdPool,
+		pathManager:     s.PathManager,
+		server:          s,
+	}
+	sx.initialize()
+
+	s.sessionsMutex.Lock()
+	s.sessionsBySecret[sx.secret] = sx
+	s.sessionsMutex.Unlock()
+
+	<-sx.chReady
+
+	s.muxersMutex.RLock()
+	mx := s.muxers["stream"]
+	s.muxersMutex.RUnlock()
+	require.NotNil(t, mx)
+
+	mi := mx.getInstance()
+	require.NotNil(t, mi)
+	mx.Close()
+	<-mi.ctx.Done()
+	time.Sleep(100 * time.Millisecond)
+
+	s.sessionsMutex.RLock()
+	currentSession := s.sessionsBySecret[sx.secret]
+	s.sessionsMutex.RUnlock()
+	require.Same(t, sx, currentSession)
+
+	res, err := http.Get("http://127.0.0.1:8888/stream/stream.m3u8?session=" + sx.secret.String())
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, http.StatusNotFound, res.StatusCode)
+
+	res, err = http.Get("http://127.0.0.1:8888/stream/stream.m3u8?session=" + uuid.NewString())
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, res.StatusCode)
+}
+
+func TestServerSessionExpiration(t *testing.T) {
+	desc := &description.Session{Medias: []*description.Media{test.MediaH264}}
+	strm := &stream.Stream{
+		OrigDesc:          desc,
+		WriteQueueSize:    512,
+		RTPMaxPayloadSize: 1450,
+		Parent:            test.NilLogger,
+	}
+	require.NoError(t, strm.Initialize())
+
+	s := &Server{
+		Address:         "127.0.0.1:8888",
+		Variant:         conf.HLSVariant(gohlslib.MuxerVariantMPEGTS),
+		SegmentCount:    7,
+		SegmentDuration: conf.Duration(time.Second),
+		PartDuration:    conf.Duration(200 * time.Millisecond),
+		SegmentMaxSize:  50 * 1024 * 1024,
+		ReadTimeout:     conf.Duration(10 * time.Second),
+		WriteTimeout:    conf.Duration(10 * time.Second),
+		PathManager: &dummyPathManager{
+			addReaderImpl: func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
+				expiresAt := time.Now().Add(time.Second)
+				return &defs.PathAddReaderRes{
+					Path:   &dummyPath{},
+					Stream: strm,
+					AuthRes: &auth.Result{
+						User:      "somebody",
+						ExpiresAt: &expiresAt,
+					},
+				}, nil
+			},
+		},
+		Parent: test.NilLogger,
+	}
+	require.NoError(t, s.Initialize())
+	defer s.Close()
+
+	sx := &session{
+		wg:              &s.wg,
+		remoteAddr:      "127.0.0.1:12345",
+		pathName:        "stream",
+		externalCmdPool: s.ExternalCmdPool,
+		pathManager:     s.PathManager,
+		server:          s,
+	}
+	sx.initialize()
+	s.sessionsMutex.Lock()
+	s.sessionsBySecret[sx.secret] = sx
+	s.sessionsMutex.Unlock()
+
+	<-sx.chReady
+	require.NotNil(t, sx.apiItem().ExpiresAt)
+	select {
+	case <-sx.ctx.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("HLS session did not expire")
+	}
+	require.Eventually(t, func() bool {
+		s.sessionsMutex.RLock()
+		_, ok := s.sessionsBySecret[sx.secret]
+		s.sessionsMutex.RUnlock()
+		return !ok
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestServerRead(t *testing.T) {
 	for _, cdn := range []string{
 		"no cdn",
@@ -359,7 +546,7 @@ func TestServerRead(t *testing.T) {
 							t.Errorf("should not happen")
 						}
 
-						return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm}, nil
+						return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm, AuthRes: &auth.Result{}}, nil
 					},
 				}
 
@@ -397,7 +584,7 @@ func TestServerRead(t *testing.T) {
 								Codec: &codecs.MPEG4Audio{
 									Config: mpeg4audio.AudioSpecificConfig{
 										Type:          2,
-										ChannelCount:  2,
+										ChannelCount:  2, //nolint:staticcheck
 										ChannelConfig: 2,
 										SampleRate:    44100,
 									},
@@ -505,7 +692,7 @@ func TestServerDirectory(t *testing.T) {
 
 	pm := &dummyPathManager{
 		addReaderImpl: func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
-			return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm}, nil
+			return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm, AuthRes: &auth.Result{}}, nil
 		},
 	}
 
@@ -580,7 +767,7 @@ func TestServerDynamicAlwaysRemux(t *testing.T) {
 		},
 		addReaderImpl: func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
 			close(done)
-			return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm}, nil
+			return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm, AuthRes: &auth.Result{}}, nil
 		},
 	}
 
@@ -718,7 +905,7 @@ func TestServerNoSupportedCodecs(t *testing.T) {
 			pm := &dummyPathManager{
 				addReaderImpl: func(req defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
 					require.Equal(t, "teststream", req.AccessRequest.Name)
-					return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm}, nil
+					return &defs.PathAddReaderRes{Path: &dummyPath{}, Stream: strm, AuthRes: &auth.Result{}}, nil
 				},
 			}
 

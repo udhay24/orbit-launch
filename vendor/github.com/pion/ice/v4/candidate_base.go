@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -17,8 +18,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/pion/stun/v3"
+	"github.com/pion/stun/v4"
+	"github.com/pion/transport/v5/packetio"
 )
+
+type packetReader func([]byte, packetio.Attributes) (int, netip.AddrPort, packetio.Attributes, error)
 
 type candidateBase struct {
 	id            string
@@ -285,19 +289,17 @@ func (c *candidateBase) recvLoop(initializedCh <-chan struct{}) {
 	defer bufferPool.Put(bufPtr)
 	buf := *bufPtr
 
+	readPacket, err := newECNPacketReader(c.conn)
+	if err != nil {
+		agent.log.Debugf("Failed to enable ECN on candidate %s: %v", c, err)
+	}
+	if readPacket == nil {
+		readPacket = c.readPacket
+	}
+	var attrs packetio.Attributes
 	for {
-		var n int
-		var srcAddr netip.AddrPort
-		var err error
-		if c.addrPortConn != nil {
-			n, srcAddr, err = c.addrPortConn.ReadFromAddrPort(buf)
-		} else {
-			var netAddr net.Addr
-			n, netAddr, err = c.conn.ReadFrom(buf)
-			if err == nil {
-				srcAddr = netAddrToAddrPort(netAddr)
-			}
-		}
+		n, srcAddr, packetAttrs, err := readPacket(buf, attrs[:0])
+		attrs = packetAttrs
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				agent.log.Warnf("Failed to read from candidate %s: %v", c, err)
@@ -306,8 +308,23 @@ func (c *candidateBase) recvLoop(initializedCh <-chan struct{}) {
 			return
 		}
 
-		c.handleInboundPacket(buf[:n], srcAddr)
+		c.handleInboundPacket(buf[:n], attrs, srcAddr)
 	}
+}
+
+func (c *candidateBase) readPacket(buf []byte, attrs packetio.Attributes) (int, netip.AddrPort, packetio.Attributes, error) {
+	if c.addrPortConn != nil {
+		n, addr, err := c.addrPortConn.ReadFromAddrPort(buf)
+
+		return n, addr, attrs, err
+	}
+
+	n, addr, err := c.conn.ReadFrom(buf)
+	if err != nil {
+		return n, netip.AddrPort{}, attrs, err
+	}
+
+	return n, netAddrToAddrPort(addr), attrs, nil
 }
 
 func (c *candidateBase) validateSTUNTrafficCache(addr netip.AddrPort) bool {
@@ -343,7 +360,7 @@ func (c *candidateBase) replaceRemoteCandidateCacheValues(oldRemote, newRemote C
 	})
 }
 
-func (c *candidateBase) handleInboundPacket(buf []byte, srcAddr netip.AddrPort) {
+func (c *candidateBase) handleInboundPacket(buf []byte, attrs packetio.Attributes, srcAddr netip.AddrPort) {
 	agent := c.agent()
 
 	if stun.IsMessage(buf) {
@@ -355,7 +372,7 @@ func (c *candidateBase) handleInboundPacket(buf []byte, srcAddr netip.AddrPort) 
 	if !c.validateSTUNTrafficCache(srcAddr) {
 		remoteCandidate, valid := agent.validateNonSTUNTraffic(c, srcAddr) //nolint:contextcheck
 		if !valid {
-			agent.log.Warnf("Discarded message from %s, not a valid remote candidate", c.addr())
+			agent.log.Warnf("Discarded message from %s, not a valid remote candidate", srcAddr)
 
 			return
 		}
@@ -363,7 +380,7 @@ func (c *candidateBase) handleInboundPacket(buf []byte, srcAddr netip.AddrPort) 
 	}
 
 	// Note: This will return packetio.ErrFull if the buffer ever manages to fill up.
-	n, err := agent.buf.Write(buf)
+	n, err := agent.buf.Write(buf, attrs)
 	if err != nil {
 		agent.log.Warnf("Failed to write packet: %s", err)
 
@@ -479,7 +496,14 @@ func (c *candidateBase) writeTo(raw []byte, dst Candidate) (int, error) {
 
 // TypePreference returns the type preference for this candidate.
 func (c *candidateBase) TypePreference() uint16 {
-	pref := c.Type().Preference()
+	return c.typePreference(c.Type())
+}
+
+// typePreference returns the type preference a candidate of candidateType has on
+// this candidate's transport: the RFC 8445 Section 5.1.2.2 value, lowered by the
+// agent's TCP priority offset for TCP candidates.
+func (c *candidateBase) typePreference(candidateType CandidateType) uint16 {
+	pref := candidateType.Preference()
 	if pref == 0 {
 		return 0
 	}
@@ -513,6 +537,24 @@ func (c *candidateBase) Priority() uint32 {
 	return (1<<24)*uint32(c.TypePreference()) +
 		(1<<8)*uint32(c.LocalPreference()) +
 		(1<<0)*uint32(256-c.Component())
+}
+
+func (c *candidateBase) setPriority(priority uint32) {
+	c.priorityOverride = priority
+}
+
+// prflxPriority returns the value a Binding request sent from this candidate
+// carries in its PRIORITY attribute: the candidate's priority recomputed with
+// the type preference of a peer-reflexive candidate.
+// See: https://www.rfc-editor.org/rfc/rfc8445#section-7.1.1
+//
+// The remote agent assigns this priority to a peer-reflexive candidate it
+// discovers from the request (Section 7.3.1.3). Sending the candidate's own
+// type preference instead would let that peer-reflexive candidate rank equal
+// to the host candidate it was discovered through.
+func (c *candidateBase) prflxPriority() uint32 {
+	return (1<<24)*uint32(c.typePreference(CandidateTypePeerReflexive)) +
+		c.Priority()%(1<<24)
 }
 
 // transportAddressEqual checks if the transport address (IP, Port, NetworkType, TCPType) is equal to another
@@ -836,7 +878,7 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 	}
 
 	// component-id ( 1*5DIGIT )
-	component, pos, err := readCandidateDigitToken(raw, pos, 5)
+	component, pos, err := readCandidateComponent(raw, pos)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v in %s", errParseComponent, err, raw) //nolint:errorlint // we wrap the error
 	}
@@ -853,7 +895,7 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 	}
 
 	// priority ( 1*10DIGIT ) SP
-	priority, pos, err := readCandidateDigitToken(raw, pos, 10)
+	priority, pos, err := readCandidatePriority(raw, pos)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v in %s", errParsePriority, err, raw) //nolint:errorlint // we wrap the error
 	}
@@ -923,8 +965,8 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 			protocol,
 			address,
 			port,
-			uint16(component), //nolint:gosec // G115 no overflow we read 5 digits
-			uint32(priority),  //nolint:gosec // G115 no overflow we read 5 digits
+			component,
+			priority,
 			foundation,
 			tcpType,
 			false,
@@ -942,8 +984,8 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 			protocol,
 			address,
 			port,
-			uint16(component), //nolint:gosec // G115 no overflow we read 5 digits
-			uint32(priority),  //nolint:gosec // G115 no overflow we read 5 digits
+			component,
+			priority,
 			foundation,
 			raddr,
 			rport,
@@ -961,8 +1003,8 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 			protocol,
 			address,
 			port,
-			uint16(component), //nolint:gosec // G115 no overflow we read 5 digits
-			uint32(priority),  //nolint:gosec // G115 no overflow we read 5 digits
+			component,
+			priority,
 			foundation,
 			raddr,
 			rport,
@@ -980,8 +1022,8 @@ func UnmarshalCandidate(raw string) (Candidate, error) { //nolint:cyclop
 			protocol,
 			address,
 			port,
-			uint16(component), //nolint:gosec // G115 no overflow we read 5 digits
-			uint32(priority),  //nolint:gosec // G115 no overflow we read 5 digits
+			component,
+			priority,
 			foundation,
 			raddr,
 			rport,
@@ -1039,8 +1081,10 @@ func readCandidateStringToken(raw string, start int) (string, int) {
 
 // Read a digit token from the raw string
 // stop reading when a space is encountered or the end of the string.
-func readCandidateDigitToken(raw string, start, limit int) (int, int, error) {
-	var val int
+// The value accumulates in a uint64 so a 10 digit token cannot overflow on
+// 32 bit platforms; callers range check the returned value.
+func readCandidateDigitToken(raw string, start, limit int) (uint64, int, error) {
+	var val uint64
 	for i, char := range raw[start:] {
 		if char == 0x20 { // SP
 			return val, start + i + 1, nil
@@ -1055,7 +1099,7 @@ func readCandidateDigitToken(raw string, start, limit int) (int, int, error) {
 			return 0, 0, fmt.Errorf("invalid digit token: %c", char) //nolint: err113 // handled by caller
 		}
 
-		val = val*10 + int(char-'0')
+		val = val*10 + uint64(char-'0')
 	}
 
 	return val, len(raw), nil
@@ -1072,7 +1116,37 @@ func readCandidatePort(raw string, start int) (int, int, error) {
 		return 0, 0, fmt.Errorf("invalid RFC 4566 port %d", port) //nolint: err113 // handled by caller
 	}
 
-	return port, pos, nil
+	return int(port), pos, nil
+}
+
+// readCandidateComponent reads a RFC 8445 component-id ( 1*5DIGIT ).
+func readCandidateComponent(raw string, start int) (uint16, int, error) {
+	component, pos, err := readCandidateDigitToken(raw, start, 5)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if component > math.MaxUint16 {
+		//nolint: err113 // handled by caller
+		return 0, 0, fmt.Errorf("invalid RFC 8445 component-id %d", component)
+	}
+
+	return uint16(component), pos, nil
+}
+
+// readCandidatePriority reads a RFC 8445 priority ( 1*10DIGIT ).
+func readCandidatePriority(raw string, start int) (uint32, int, error) {
+	priority, pos, err := readCandidateDigitToken(raw, start, 10)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if priority > math.MaxUint32 {
+		//nolint: err113 // handled by caller
+		return 0, 0, fmt.Errorf("invalid RFC 8445 priority %d", priority)
+	}
+
+	return uint32(priority), pos, nil
 }
 
 // Read a byte-string token from the raw string

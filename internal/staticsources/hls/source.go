@@ -16,6 +16,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
+	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 	ptls "github.com/bluenviron/mediamtx/internal/protocols/tls"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
@@ -36,6 +37,11 @@ type Source struct {
 // Log implements logger.Writer.
 func (s *Source) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[HLS source] "+format, args...)
+}
+
+// Info returns runtime information.
+func (*Source) Info() defs.StaticSourceInfo {
+	return defs.StaticSourceInfo{}
 }
 
 // Run implements StaticSource.
@@ -93,7 +99,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 		URI: params.ResolvedSource,
 		HTTPClient: &http.Client{
 			Timeout:   time.Duration(s.ReadTimeout),
-			Transport: tr,
+			Transport: &httpp.LoggerTransport{Transport: tr, Log: s},
 			Jar:       jar,
 		},
 		OnDownloadPrimaryPlaylist: func(u string) {
@@ -152,7 +158,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 		case <-params.Context.Done():
 			c.Close()
-			<-waitErr
+			<-waitErr //nolint:errcheck
 			return nil
 		}
 	}

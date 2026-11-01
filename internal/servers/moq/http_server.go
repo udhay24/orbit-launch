@@ -1,6 +1,7 @@
 package moq
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	_ "embed"
@@ -22,6 +23,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp3"
+	"github.com/bluenviron/mediamtx/internal/protocols/moq/version"
 )
 
 //go:embed publish_index.html
@@ -41,19 +43,11 @@ const (
 	wtAvailableProtocolsHeader = "WT-Available-Protocols"
 )
 
-// ordered from most preferred to least preferred
-var supportedMoqtVersions = []defs.APIMoQVersion{
-	defs.APIMoQVersionDraft19,
-	defs.APIMoQVersionDraft18,
-	defs.APIMoQVersionDraft17,
-	defs.APIMoQVersionDraft16,
-}
-
 type ginUnwrapper interface {
 	Unwrap() http.ResponseWriter
 }
 
-func selectMoqtVersion(header string) defs.APIMoQVersion {
+func selectMoqtVersion(header string) (version.Version, bool) {
 	available := make(map[string]struct{})
 
 	for item := range strings.SplitSeq(header, ",") {
@@ -67,13 +61,13 @@ func selectMoqtVersion(header string) defs.APIMoQVersion {
 		}
 	}
 
-	for _, version := range supportedMoqtVersions {
-		if _, ok := available[string(version)]; ok {
-			return version
+	for i, versio := range version.ListAsString {
+		if _, ok := available[versio]; ok {
+			return version.List[i], true
 		}
 	}
 
-	return ""
+	return 0, false
 }
 
 func trailingSlashLocation(rawPath string, rawQuery string) string {
@@ -97,6 +91,7 @@ func certFingerprint(cert *tls.Certificate) (string, error) {
 }
 
 type httpServerParent interface {
+	onListenError(context.Context, error)
 	newSession(req newSessionReq) newSessionRes
 	logger.Writer
 }
@@ -104,8 +99,7 @@ type httpServerParent interface {
 type httpServer struct {
 	http2Address      string
 	http3Address      string
-	serverCert        string
-	serverKey         string
+	getCertificate    func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	allowOrigins      []string
 	trustedProxies    conf.IPNetworks
 	udpReadBufferSize uint
@@ -125,16 +119,15 @@ func (s *httpServer) initialize() error {
 	routerHTTP2.Use(s.onRequestHTTPS2)
 
 	s.innerHTTP2 = &httpp.Server{
-		Address:       s.http2Address,
-		AllowOrigins:  s.allowOrigins,
-		ReadTimeout:   time.Duration(s.readTimeout),
-		WriteTimeout:  time.Duration(s.writeTimeout),
-		Encryption:    true,
-		ServerKey:     s.serverKey,
-		ServerCert:    s.serverCert,
-		AllowAutoCert: true,
-		Handler:       routerHTTP2,
-		Parent:        s,
+		Address:        s.http2Address,
+		AllowOrigins:   s.allowOrigins,
+		ReadTimeout:    time.Duration(s.readTimeout),
+		WriteTimeout:   time.Duration(s.writeTimeout),
+		Encryption:     true,
+		GetCertificate: s.getCertificate,
+		Handler:        routerHTTP2,
+		Parent:         s,
+		OnListenError:  s.parent.onListenError,
 	}
 	err := s.innerHTTP2.Initialize()
 	if err != nil {
@@ -150,6 +143,7 @@ func (s *httpServer) initialize() error {
 		EnableWebTransport: true,
 		Handler:            routerHTTP3,
 		Parent:             s,
+		OnListenError:      s.parent.onListenError,
 	}
 	err = s.innerHTTP3.Initialize()
 	if err != nil {
@@ -187,6 +181,9 @@ func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 }
 
 func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, publish bool) bool {
+	creds := &auth.Credentials{}
+	creds.FromHTTP(ctx.Request)
+
 	_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		Author: &logger.InlineWriter{
 			Parent: s,
@@ -197,7 +194,7 @@ func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, 
 			Query:                ctx.Request.URL.RawQuery,
 			Publish:              publish,
 			Proto:                auth.ProtocolMoQ,
-			Credentials:          httpp.Credentials(ctx.Request),
+			Credentials:          creds,
 			IP:                   net.ParseIP(ctx.ClientIP()),
 			EnableAskCredentials: true,
 		},
@@ -313,14 +310,18 @@ func (s *httpServer) onRequestHTTPS2(ctx *gin.Context) {
 }
 
 func (s *httpServer) onRequestHTTPS3(ctx *gin.Context) {
-	if ctx.Request.Method != http.MethodConnect ||
-		!strings.HasSuffix(ctx.Request.URL.Path, "/moq") ||
-		len(ctx.Request.URL.Path) <= len("/moq") {
+	if ctx.Request.Method != http.MethodConnect {
 		return
 	}
 
-	pathName := ctx.Request.URL.Path[1 : len(ctx.Request.URL.Path)-len("/moq")]
-	if len(pathName) == 0 {
+	pathName := ctx.Request.URL.Path[1:]
+
+	// support legacy /moq suffix
+	if strings.HasSuffix(pathName, "/moq") && len(pathName) > len("/moq") {
+		pathName = strings.TrimSuffix(pathName, "/moq")
+	}
+
+	if pathName == "" {
 		return
 	}
 
@@ -331,15 +332,15 @@ func (s *httpServer) onRequestHTTPS3(ctx *gin.Context) {
 		return
 	}
 
-	version := selectMoqtVersion(offered)
-	if version == "" {
+	version, ok := selectMoqtVersion(offered)
+	if !ok {
 		s.writeErrorNoLog(ctx, http.StatusBadRequest,
 			fmt.Errorf("no supported MoQ version in %s", wtAvailableProtocolsHeader))
 		return
 	}
 
 	w := ctx.Writer.(ginUnwrapper).Unwrap()
-	w.Header().Set(wtProtocolHeader, `"`+string(version)+`"`)
+	w.Header().Set(wtProtocolHeader, `"`+version.String()+`"`)
 
 	wt, err := s.innerHTTP3.Upgrade(w, ctx.Request)
 	if err != nil {
@@ -352,7 +353,7 @@ func (s *httpServer) onRequestHTTPS3(ctx *gin.Context) {
 		query:     ctx.Request.URL.RawQuery,
 		userAgent: ctx.Request.Header.Get("User-Agent"),
 		version:   version,
-		conn:      &connWebTransport{session: wt},
+		wtSession: wt,
 	})
 	if res.err != nil {
 		wt.CloseWithError(0, res.err.Error()) //nolint:errcheck

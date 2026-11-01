@@ -34,6 +34,7 @@ func TestPreflightRequest(t *testing.T) {
 	req, err := http.NewRequest(http.MethodOptions, "http://localhost:9999", nil)
 	require.NoError(t, err)
 
+	req.Header.Add("Origin", "http://example.com")
 	req.Header.Add("Access-Control-Request-Method", "GET")
 
 	res, err := hc.Do(req)
@@ -45,7 +46,7 @@ func TestPreflightRequest(t *testing.T) {
 	byts, err := io.ReadAll(res.Body)
 	require.NoError(t, err)
 
-	require.Equal(t, "*", res.Header.Get("Access-Control-Allow-Origin"))
+	require.Equal(t, "http://example.com", res.Header.Get("Access-Control-Allow-Origin"))
 	require.Equal(t, "OPTIONS, GET", res.Header.Get("Access-Control-Allow-Methods"))
 	require.Equal(t, "Authorization", res.Header.Get("Access-Control-Allow-Headers"))
 	require.Equal(t, byts, []byte{})
@@ -60,12 +61,12 @@ func TestPprof(t *testing.T) {
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) (string, *auth.Error) {
+			AuthenticateImpl: func(req *auth.Request) (*auth.Result, *auth.Error) {
 				require.Equal(t, conf.AuthActionPprof, req.Action)
 				require.Equal(t, "myuser", req.Credentials.User)
 				require.Equal(t, "mypass", req.Credentials.Pass)
 				checked = true
-				return req.Credentials.User, nil
+				return &auth.Result{User: req.Credentials.User}, nil
 			},
 		},
 		Parent: test.NilLogger,
@@ -101,11 +102,11 @@ func TestAuthError(t *testing.T) {
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) (string, *auth.Error) {
+			AuthenticateImpl: func(req *auth.Request) (*auth.Result, *auth.Error) {
 				if req.Credentials.User == "" {
-					return "", &auth.Error{AskCredentials: true, Wrapped: fmt.Errorf("auth error")}
+					return nil, &auth.Error{AskCredentials: true, Wrapped: fmt.Errorf("auth error")}
 				}
-				return "", &auth.Error{Wrapped: fmt.Errorf("auth error")}
+				return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
 			},
 		},
 		Parent: test.NilLogger,

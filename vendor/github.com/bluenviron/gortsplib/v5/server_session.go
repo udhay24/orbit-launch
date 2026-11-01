@@ -621,7 +621,7 @@ func (ss *ServerSession) runInner() error {
 
 					res.Header["Session"] = headers.Session{
 						Session: ss.secretID,
-						Timeout: ptrOf(uint(timeout)),
+						Timeout: new(uint(timeout)),
 					}.Marshal()
 				}
 
@@ -793,9 +793,12 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 
 		for _, media := range desc.Medias {
 			if hasH264PacketizationMode0(media.Formats) {
-				return &base.Response{
-					StatusCode: base.StatusBadRequest,
-				}, liberrors.ErrServerH264PacketizationMode0{}
+				// reject only if UDP/multicast is available
+				if ss.s.UDPRTPAddress != "" || ss.s.MulticastIPRange != "" {
+					return &base.Response{
+						StatusCode: base.StatusBadRequest,
+					}, liberrors.ErrServerH264PacketizationMode0{}
+				}
 			}
 		}
 
@@ -1155,13 +1158,13 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 						Port: udpRTCPReadPort,
 					}
 
-					th.Delivery = ptrOf(headers.TransportDeliveryUnicast)
+					th.Delivery = new(headers.TransportDeliveryUnicast)
 					th.ClientPorts = inTH.ClientPorts
 					th.ServerPorts = &[2]int{sc.s.udpRTPListener.port(), sc.s.udpRTCPListener.port()}
 				} else {
-					th.Delivery = ptrOf(headers.TransportDeliveryMulticast)
-					th.TTL = ptrOf(uint(127))
-					th.Destination2 = ptrOf(stream.medias[medi].multicastWriter.ip.String())
+					th.Delivery = new(headers.TransportDeliveryMulticast)
+					th.TTL = new(uint(127))
+					th.Destination2 = new(stream.medias[medi].multicastWriter.ip.String())
 					th.Ports = &[2]int{stream.medias[medi].multicastWriter.rtpPort, stream.medias[medi].multicastWriter.rtcpPort}
 				}
 
@@ -1174,7 +1177,7 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 					tcpChannel = ss.findFreeChannelPair()
 				}
 
-				th.Delivery = ptrOf(headers.TransportDeliveryUnicast)
+				th.Delivery = new(headers.TransportDeliveryUnicast)
 				th.InterleavedIDs = &[2]int{tcpChannel, tcpChannel + 1}
 			}
 
@@ -1214,7 +1217,7 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 		return res, err
 
 	case base.Play:
-		// play can be sent twice, allow calling it even if we're already playing
+		// play can be sent twice, allow calling it even when we're already playing.
 		err := ss.checkState(map[ServerSessionState]struct{}{
 			ServerSessionStatePrePlay: {},
 			ServerSessionStatePlay:    {},
@@ -1313,7 +1316,7 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 		})
 		if err != nil {
 			return &base.Response{
-				StatusCode: base.StatusBadRequest,
+				StatusCode: base.StatusMethodNotAllowed,
 			}, err
 		}
 
@@ -1340,7 +1343,9 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 		})
 
 		if res.StatusCode == base.StatusOK {
+			ss.propsMutex.Lock()
 			ss.state = ServerSessionStateRecord
+			ss.propsMutex.Unlock()
 
 			ss.udpLastPacketTime.Store(ss.s.timeNow().Unix())
 
@@ -1379,6 +1384,7 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 		return res, err
 
 	case base.Pause:
+		// some devices require support for double PAUSE requests.
 		err := ss.checkState(map[ServerSessionState]struct{}{
 			ServerSessionStatePrePlay:   {},
 			ServerSessionStatePlay:      {},
@@ -1387,7 +1393,7 @@ func (ss *ServerSession) handleRequestInner(sc *ServerConn, req *base.Request) (
 		})
 		if err != nil {
 			return &base.Response{
-				StatusCode: base.StatusBadRequest,
+				StatusCode: base.StatusMethodNotValidInThisState,
 			}, err
 		}
 

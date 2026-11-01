@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gortmplib/pkg/bytecounter"
@@ -22,8 +23,8 @@ type writerChunkStream struct {
 
 func (wc *writerChunkStream) writeChunk(c chunk.Chunk, hasExtendedTimestamp bool) error {
 	// check if we received an acknowledge
-	if wc.mw.checkAcknowledge && wc.mw.ackWindowSize != 0 {
-		diff := uint32(wc.mw.bcw.Count()) - wc.mw.ackValue
+	if wc.mw.CheckAcknowledge && wc.mw.ackWindowSize != 0 {
+		diff := uint32(wc.mw.BCW.Count()) - wc.mw.AckValue
 
 		if diff > (wc.mw.ackWindowSize * 3 / 2) {
 			return fmt.Errorf("no acknowledge received within window")
@@ -35,7 +36,7 @@ func (wc *writerChunkStream) writeChunk(c chunk.Chunk, hasExtendedTimestamp bool
 		return err
 	}
 
-	_, err = wc.mw.bw.Write(buf)
+	_, err = wc.mw.bufw.Write(buf)
 	if err != nil {
 		return err
 	}
@@ -76,7 +77,7 @@ func (wc *writerChunkStream) writeMessage(msg *Message) error {
 					Timestamp:       ts,
 					Type:            msg.Type,
 					MessageStreamID: msg.MessageStreamID,
-					BodyLen:         (bodyLen),
+					BodyLen:         bodyLen,
 					Body:            msg.Body[pos : pos+chunkBodyLen],
 				}, false)
 				if err != nil {
@@ -90,7 +91,7 @@ func (wc *writerChunkStream) writeMessage(msg *Message) error {
 					ChunkStreamID:  msg.ChunkStreamID,
 					TimestampDelta: ts,
 					Type:           msg.Type,
-					BodyLen:        (bodyLen),
+					BodyLen:        bodyLen,
 					Body:           msg.Body[pos : pos+chunkBodyLen],
 				}, false)
 				if err != nil {
@@ -146,52 +147,76 @@ func (wc *writerChunkStream) writeMessage(msg *Message) error {
 	wc.lastTimestamp = &v4
 	wc.lastTimestampDelta = timestampDelta
 
-	return wc.mw.bw.Flush()
+	return wc.mw.bufw.Flush()
 }
 
 // Writer is a raw message writer.
 type Writer struct {
-	bcw              *bytecounter.Writer
-	bw               *bufio.Writer
-	checkAcknowledge bool
-	chunkSize        uint32
-	ackWindowSize    uint32
-	ackValue         uint32
-	chunkStreams     map[byte]*writerChunkStream
+	BW               io.Writer
+	BCW              *bytecounter.Writer
+	CheckAcknowledge bool
+	AckValue         uint32
+
+	mutex         sync.Mutex
+	bufw          *bufio.Writer
+	chunkSize     uint32
+	ackWindowSize uint32
+	chunkStreams  map[byte]*writerChunkStream
+}
+
+// Initialize initializes the Writer.
+func (w *Writer) Initialize() {
+	w.bufw = bufio.NewWriter(w.BW)
+	w.chunkSize = 128
+	w.chunkStreams = make(map[byte]*writerChunkStream)
 }
 
 // NewWriter allocates a Writer.
+//
+// Deprecated: use Initialize() instead.
 func NewWriter(
-	w io.Writer,
+	bw io.Writer,
 	bcw *bytecounter.Writer,
 	checkAcknowledge bool,
 ) *Writer {
-	return &Writer{
-		bcw:              bcw,
-		bw:               bufio.NewWriter(w),
-		checkAcknowledge: checkAcknowledge,
-		chunkSize:        128,
-		chunkStreams:     make(map[byte]*writerChunkStream),
+	w := &Writer{
+		BW:               bw,
+		BCW:              bcw,
+		CheckAcknowledge: checkAcknowledge,
 	}
+	w.Initialize()
+	return w
 }
 
 // SetChunkSize sets the maximum chunk size.
 func (w *Writer) SetChunkSize(v uint32) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
 	w.chunkSize = v
 }
 
 // SetWindowAckSize sets the window acknowledgement size.
 func (w *Writer) SetWindowAckSize(v uint32) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
 	w.ackWindowSize = v
 }
 
 // SetAcknowledgeValue sets the acknowledge sequence number.
 func (w *Writer) SetAcknowledgeValue(v uint32) {
-	w.ackValue = v
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	w.AckValue = v
 }
 
-// Write writes a Message.
+// Write writes a Message. It is safe to call it concurrently.
 func (w *Writer) Write(msg *Message) error {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
 	wc, ok := w.chunkStreams[msg.ChunkStreamID]
 	if !ok {
 		wc = &writerChunkStream{mw: w}

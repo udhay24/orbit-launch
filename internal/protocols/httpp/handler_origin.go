@@ -5,81 +5,91 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"slices"
 	"strings"
 )
 
-func isOriginAllowed(origin string, allowOrigins []string) (string, bool) {
+func isOriginAllowed(origin string, allowOrigins []string) bool {
 	if len(allowOrigins) == 0 {
-		return "", false
+		return false
 	}
 
-	if origin != "" {
-		originURL, err := url.Parse(origin)
-		if err != nil || originURL.Scheme == "" {
-			return "", false
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Scheme == "" {
+		return false
+	}
+
+	if originURL.Port() == "" && originURL.Scheme != "" {
+		switch originURL.Scheme {
+		case "http":
+			originURL.Host = net.JoinHostPort(originURL.Host, "80")
+		case "https":
+			originURL.Host = net.JoinHostPort(originURL.Host, "443")
+		}
+	}
+
+	for _, o := range allowOrigins {
+		if o == "*" {
+			return true
 		}
 
-		if originURL.Port() == "" && originURL.Scheme != "" {
-			switch originURL.Scheme {
+		allowedURL, errAllowed := url.Parse(o)
+		if errAllowed != nil {
+			continue
+		}
+
+		if allowedURL.Port() == "" {
+			switch allowedURL.Scheme {
 			case "http":
-				originURL.Host = net.JoinHostPort(originURL.Host, "80")
+				allowedURL.Host = net.JoinHostPort(allowedURL.Host, "80")
 			case "https":
-				originURL.Host = net.JoinHostPort(originURL.Host, "443")
+				allowedURL.Host = net.JoinHostPort(allowedURL.Host, "443")
 			}
 		}
 
-		for _, o := range allowOrigins {
-			allowedURL, errAllowed := url.Parse(o)
-			if errAllowed != nil {
-				continue
-			}
+		if allowedURL.Scheme == originURL.Scheme &&
+			allowedURL.Host == originURL.Host {
+			return true
+		}
 
-			if allowedURL.Port() == "" {
-				switch allowedURL.Scheme {
-				case "http":
-					allowedURL.Host = net.JoinHostPort(allowedURL.Host, "80")
-				case "https":
-					allowedURL.Host = net.JoinHostPort(allowedURL.Host, "443")
-				}
-			}
-
-			if allowedURL.Scheme == originURL.Scheme &&
-				allowedURL.Host == originURL.Host &&
-				allowedURL.Port() == originURL.Port() {
-				return origin, true
-			}
-
-			if strings.Contains(allowedURL.Host, "*") {
-				pattern := strings.ReplaceAll(allowedURL.Host, "*.", "(.*\\.)?")
-				pattern = strings.ReplaceAll(pattern, "*", ".*")
-				matched, errMatched := regexp.MatchString("^"+pattern+"$", originURL.Host)
-				if errMatched == nil && matched {
-					return origin, true
-				}
+		if allowedURL.Scheme == originURL.Scheme &&
+			strings.Contains(allowedURL.Host, "*") {
+			pattern := regexp.QuoteMeta(allowedURL.Host)
+			pattern = strings.ReplaceAll(pattern, `\*\.`, `(.*\.)?`)
+			pattern = strings.ReplaceAll(pattern, `\*`, `.*`)
+			matched, errMatched := regexp.MatchString("^"+pattern+"$", originURL.Host)
+			if errMatched == nil && matched {
+				return true
 			}
 		}
 	}
 
-	// return wildcard as last resort only
-	// because it blocks cross-origin requests with cookies
-	if slices.Contains(allowOrigins, "*") {
-		return "*", true
-	}
-
-	return "", false
+	return false
 }
 
-// add Access-Control-Allow-Origin header.
+// Protect from unauthorized cross-origin requests:
+// - add Access-Control-Allow-Origin header to both preflight requests and actual requests.
+// - in case of browser requests that do not use preflight (like POST from a form), check the Origin.
 type handlerOrigin struct {
 	h            http.Handler
 	allowOrigins []string
 }
 
 func (h *handlerOrigin) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	origin, ok := isOriginAllowed(r.Header.Get("Origin"), h.allowOrigins)
-	if ok {
+	origin := r.Header.Get("Origin")
+
+	if origin != "" && isOriginAllowed(origin, h.allowOrigins) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+	}
+
+	if r.Method == http.MethodPost {
+		secFetchSite := r.Header.Get("Sec-Fetch-Site")
+		if secFetchSite == "same-site" || secFetchSite == "cross-site" {
+			if !isOriginAllowed(origin, h.allowOrigins) {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		}
 	}
 
 	h.h.ServeHTTP(w, r)

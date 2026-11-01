@@ -26,10 +26,6 @@ const (
 	mpegtsAACPTSDriftTolerance = 500 * time.Millisecond
 )
 
-func ptrOf[T any](v T) *T {
-	return &v
-}
-
 func parseMSNPart(msn string, part string) (uint64, uint64, error) {
 	var msnint uint64
 	if msn != "" {
@@ -709,6 +705,7 @@ func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Reques
 
 		for {
 			if m.closed {
+				w.WriteHeader(http.StatusNotFound)
 				return nil
 			}
 
@@ -721,6 +718,7 @@ func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Reques
 
 		buf, err := m.generateMultivariantPlaylist(r.URL.RawQuery)
 		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
 			return nil
 		}
 
@@ -728,7 +726,6 @@ func (m *Muxer) handleMultivariantPlaylist(w http.ResponseWriter, r *http.Reques
 	}()
 
 	if buf == nil {
-		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 

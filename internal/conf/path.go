@@ -94,11 +94,18 @@ func validateURL(source string) (*url.URL, error) {
 	}
 
 	if u.User != nil {
-		pass, _ := u.User.Password()
+		// An explicitly empty password ("user:@host") is valid and is required
+		// by some legacy devices, whose password cannot be set (#395).
+		// A missing password ("user@host") or a missing username (":pass@host")
+		// is most probably a typo and is rejected.
+		pass, passSet := u.User.Password()
 		user := u.User.Username()
-		if user != "" && pass == "" ||
-			user == "" && pass != "" {
-			return nil, fmt.Errorf("username and password must be both provided")
+		switch {
+		case user != "" && !passSet:
+			return nil, fmt.Errorf("username was provided but password is missing; " +
+				"if the password is intentionally empty, use 'user:@host'")
+		case user == "" && pass != "":
+			return nil, fmt.Errorf("password was provided but username is missing")
 		}
 	}
 
@@ -223,9 +230,10 @@ type Path struct {
 	UseAbsoluteTimestamp       bool     `json:"useAbsoluteTimestamp"`
 
 	// Always available
-	AlwaysAvailable       bool                   `json:"alwaysAvailable"`
-	AlwaysAvailableTracks []AlwaysAvailableTrack `json:"alwaysAvailableTracks"`
-	AlwaysAvailableFile   string                 `json:"alwaysAvailableFile"`
+	AlwaysAvailable         bool                   `json:"alwaysAvailable"`
+	AlwaysAvailableTracks   []AlwaysAvailableTrack `json:"alwaysAvailableTracks"`
+	AlwaysAvailableFile     string                 `json:"alwaysAvailableFile"`
+	AlwaysAvailableRecorded bool                   `json:"alwaysAvailableRecorded"`
 
 	// Forward
 	Forward Forward `json:"forward"`
@@ -271,6 +279,9 @@ type Path struct {
 	// RTP source
 	RTPSDP               string `json:"rtpSDP"`
 	RTPUDPReadBufferSize *uint  `json:"rtpUDPReadBufferSize,omitempty" deprecated:"true"`
+
+	// MoQ source
+	MoQTransport MoQTransport `json:"moqTransport"`
 
 	// WHEP source
 	WHEPBearerToken        string   `json:"whepBearerToken"`
@@ -367,8 +378,11 @@ func (pconf *Path) setDefaults() {
 	pconf.SourceOnDemandStartTimeout = 10 * Duration(time.Second)
 	pconf.SourceOnDemandCloseAfter = 10 * Duration(time.Second)
 
+	// Always available
+	pconf.AlwaysAvailableRecorded = true
+
 	// Record
-	pconf.RecordPath = "./recordings/%path/%Y-%m-%d_%H-%M-%S-%f"
+	pconf.RecordPath = "./recordings/%path/%Y-%m-%d_%H-%M-%S-%f_%z"
 	pconf.RecordFormat = RecordFormatFMP4
 	pconf.RecordPartDuration = Duration(1 * time.Second)
 	pconf.RecordMaxPartSize = 50 * 1024 * 1024
@@ -380,6 +394,9 @@ func (pconf *Path) setDefaults() {
 
 	// RTSP source
 	pconf.RTSPUDPSourcePortRange = []uint{32768, 60999}
+
+	// MoQ source
+	pconf.MoQTransport = MoQTransportQUIC
 
 	// WHEP source
 	pconf.WHEPSTUNGatherTimeout = Duration(5 * time.Second)
@@ -430,7 +447,6 @@ func (pconf Path) Clone() *Path {
 func (pconf *Path) validate(
 	conf *Conf,
 	name string,
-	deprecatedCredentialsMode bool,
 	l logger.Writer,
 ) error {
 	pconf.Name = name
@@ -567,6 +583,12 @@ func (pconf *Path) validate(
 			return err
 		}
 
+	case strings.HasPrefix(pconf.Source, "moqt://"):
+		_, err := validateURL(pconf.Source)
+		if err != nil {
+			return err
+		}
+
 	case strings.HasPrefix(pconf.Source, "whep://") ||
 		strings.HasPrefix(pconf.Source, "wheps://"):
 		_, err := validateURL(pconf.Source)
@@ -585,13 +607,23 @@ func (pconf *Path) validate(
 		}
 
 	case pconf.Source == "rpiCamera":
-
 		if pconf.RPICameraWidth == 0 {
 			return fmt.Errorf("invalid 'rpiCameraWidth' value")
 		}
 
 		if pconf.RPICameraHeight == 0 {
 			return fmt.Errorf("invalid 'rpiCameraHeight' value")
+		}
+
+		if pconf.RPICameraCodec == "mjpeg" ||
+			(pconf.RPICameraSecondary && pconf.RPICameraCodec == "auto") {
+			if pconf.RPICameraWidth >= 2048 || (pconf.RPICameraWidth%8) != 0 {
+				return fmt.Errorf("'rpiCameraWidth' must be a multiple of 8 and less than 2048 when using MJPEG")
+			}
+
+			if pconf.RPICameraHeight >= 2048 || (pconf.RPICameraHeight%8) != 0 {
+				return fmt.Errorf("'rpiCameraHeight' must be a multiple of 8 and less than 2048 when using MJPEG")
+			}
 		}
 
 		switch pconf.RPICameraExposure {
@@ -859,6 +891,13 @@ func (pconf *Path) validate(
 		return fmt.Errorf("'recordPath' must contain %%f")
 	}
 
+	if pconf.Record &&
+		!strings.Contains(pconf.RecordPath, "%z") &&
+		!strings.Contains(pconf.RecordPath, "%s") {
+		l.Log(logger.Warn, "path '%s': recordPath without '%%z' causes segments to be overwritten "+
+			"or placed at wrong time during daylight saving time switches", name)
+	}
+
 	if pconf.RecordSegmentDuration > Duration(24*time.Hour) { // avoid overflowing DurationV0 of mvhd
 		return fmt.Errorf("maximum segment duration is 1 day")
 	}
@@ -869,7 +908,7 @@ func (pconf *Path) validate(
 
 	// Authentication (deprecated)
 
-	if deprecatedCredentialsMode {
+	if conf.HasDeprecatedCredentials {
 		func() {
 			var user Credential = "any"
 			if pconf.PublishUser != nil && *pconf.PublishUser != "" {
@@ -891,7 +930,7 @@ func (pconf *Path) validate(
 				pathName = "~^.*$"
 			}
 
-			conf.AuthInternalUsers = append(conf.AuthInternalUsers, AuthInternalUser{
+			conf.AuthInternalUsersComputed = append(conf.AuthInternalUsersComputed, AuthInternalUser{
 				User: user,
 				Pass: pass,
 				IPs:  ips,
@@ -923,14 +962,20 @@ func (pconf *Path) validate(
 				pathName = "~^.*$"
 			}
 
-			conf.AuthInternalUsers = append(conf.AuthInternalUsers, AuthInternalUser{
+			conf.AuthInternalUsersComputed = append(conf.AuthInternalUsersComputed, AuthInternalUser{
 				User: user,
 				Pass: pass,
 				IPs:  ips,
-				Permissions: []AuthInternalUserPermission{{
-					Action: AuthActionRead,
-					Path:   pathName,
-				}},
+				Permissions: []AuthInternalUserPermission{
+					{
+						Action: AuthActionRead,
+						Path:   pathName,
+					},
+					{
+						Action: AuthActionPlayback,
+						Path:   pathName,
+					},
+				},
 			})
 		}()
 	}

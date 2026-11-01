@@ -15,24 +15,28 @@ import (
 )
 
 func TestConfigGlobalGet(t *testing.T) {
-	cnf := tempConf(t, "api: yes\n")
+	cnf := tempConf(t, "api: yes\n"+
+		"authInternalUsers:\n"+
+		"  - user: myuser\n"+
+		"    pass: mypass\n"+
+		"    permissions:\n"+
+		"      - action: api\n")
 	checked := false
 
 	api := API{
 		Address:      "localhost:9997",
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
-		Conf:         cnf,
 		AuthManager: &test.AuthManager{
-			AuthenticateImpl: func(req *auth.Request) (string, *auth.Error) {
+			AuthenticateImpl: func(req *auth.Request) (*auth.Result, *auth.Error) {
 				require.Equal(t, conf.AuthActionAPI, req.Action)
 				require.Equal(t, "myuser", req.Credentials.User)
 				require.Equal(t, "mypass", req.Credentials.Pass)
 				checked = true
-				return req.Credentials.User, nil
+				return &auth.Result{User: req.Credentials.User}, nil
 			},
 		},
-		Parent: &testParent{},
+		Parent: &testParent{conf: cnf},
 	}
 	err := api.Initialize()
 	require.NoError(t, err)
@@ -46,6 +50,10 @@ func TestConfigGlobalGet(t *testing.T) {
 	httpRequest(t, hc, http.MethodGet, "http://myuser:mypass@localhost:9997/v3/config/global/get", nil, &out)
 	require.Equal(t, true, out["api"])
 
+	authInternalUsers := out["authInternalUsers"].([]any)
+	require.Len(t, authInternalUsers, 1)
+	require.Equal(t, "<redacted>", authInternalUsers[0].(map[string]any)["pass"])
+
 	require.True(t, checked)
 }
 
@@ -56,9 +64,8 @@ func TestConfigGlobalPatch(t *testing.T) {
 		Address:      "localhost:9997",
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
-		Conf:         cnf,
 		AuthManager:  test.NilAuthManager,
-		Parent:       &testParent{},
+		Parent:       &testParent{conf: cnf},
 	}
 	err := api.Initialize()
 	require.NoError(t, err)
@@ -86,6 +93,71 @@ func TestConfigGlobalPatch(t *testing.T) {
 	require.Equal(t, float64(4096), out["readBufferCount"])
 }
 
+func TestConfigGlobalPatchRedactedPasswords(t *testing.T) {
+	cnf := tempConf(t, "api: yes\n"+
+		"authInternalUsers:\n"+
+		"  - user: alice\n"+
+		"    pass: alicepass\n"+
+		"    permissions:\n"+
+		"      - action: api\n"+
+		"  - user: bob\n"+
+		"    pass: bobpass\n"+
+		"    permissions:\n"+
+		"      - action: api\n")
+
+	parent := &testParent{conf: cnf}
+	api := API{
+		Address:      "localhost:9997",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		AuthManager:  test.NilAuthManager,
+		Parent:       parent,
+	}
+	err := api.Initialize()
+	require.NoError(t, err)
+	defer api.Close()
+
+	tr := &http.Transport{}
+	defer tr.CloseIdleConnections()
+	hc := &http.Client{Transport: tr}
+
+	var out map[string]any
+	httpRequest(t, hc, http.MethodGet, "http://localhost:9997/v3/config/global/get", nil, &out)
+	users := out["authInternalUsers"].([]any)
+	require.Equal(t, "<redacted>", users[0].(map[string]any)["pass"])
+	require.Equal(t, "<redacted>", users[1].(map[string]any)["pass"])
+
+	users[0], users[1] = users[1], users[0]
+	users[0].(map[string]any)["pass"] = "newbobpass"
+	out["readTimeout"] = "7s"
+	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/global/patch", out, nil)
+
+	require.Equal(t, conf.Credential("newbobpass"), parent.conf.AuthInternalUsers[0].Pass)
+	require.Equal(t, conf.Credential("alicepass"), parent.conf.AuthInternalUsers[1].Pass)
+	require.Equal(t, conf.Duration(7*time.Second), parent.conf.ReadTimeout)
+
+	users[1].(map[string]any)["user"] = "charlie"
+	byts, err := json.Marshal(out)
+	require.NoError(t, err)
+	req, err := http.NewRequest(http.MethodPatch, "http://localhost:9997/v3/config/global/patch", bytes.NewReader(byts))
+	require.NoError(t, err)
+	res, err := hc.Do(req)
+	require.NoError(t, err)
+	defer res.Body.Close()
+	require.Equal(t, http.StatusBadRequest, res.StatusCode)
+	checkError(t, res.Body, "cannot keep redacted password for user \"charlie\": user not found")
+	require.Equal(t, conf.Credential("alicepass"), parent.conf.AuthInternalUsers[1].Pass)
+
+	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/global/patch",
+		map[string]any{"readTimeout": "8s"}, nil)
+	require.Equal(t, conf.Credential("alicepass"), parent.conf.AuthInternalUsers[1].Pass)
+
+	users[1].(map[string]any)["user"] = "charlie"
+	users[1].(map[string]any)["pass"] = "charliepass"
+	httpRequest(t, hc, http.MethodPatch, "http://localhost:9997/v3/config/global/patch", out, nil)
+	require.Equal(t, conf.Credential("charliepass"), parent.conf.AuthInternalUsers[1].Pass)
+}
+
 func TestConfigGlobalPatchUnknownField(t *testing.T) { //nolint:dupl
 	cnf := tempConf(t, "api: yes\n")
 
@@ -93,9 +165,8 @@ func TestConfigGlobalPatchUnknownField(t *testing.T) { //nolint:dupl
 		Address:      "localhost:9997",
 		ReadTimeout:  conf.Duration(10 * time.Second),
 		WriteTimeout: conf.Duration(10 * time.Second),
-		Conf:         cnf,
 		AuthManager:  test.NilAuthManager,
-		Parent:       &testParent{},
+		Parent:       &testParent{conf: cnf},
 	}
 	err := api.Initialize()
 	require.NoError(t, err)

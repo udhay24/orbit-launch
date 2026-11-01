@@ -1,189 +1,263 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Generator: Adobe Illustrator 26.4.1, SVG Export Plug-In . SVG Version: 6.00 Build 0)  -->
-<svg version="1.1" id="Layer_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px"
-	 viewBox="0 0 663.9 856.8" style="enable-background:new 0 0 663.9 856.8;" xml:space="preserve">
-<style type="text/css">
-	.st0{fill:#1C1C1C;stroke:#1A65B7;stroke-width:3;stroke-miterlimit:10;}
-	.st1{fill:#1A65B7;}
-	.st2{fill:#064375;}
-	.st3{fill:#FFFFFF;}
-	.st4{font-family:'ArialMT';}
-	.st5{font-size:11.0826px;}
-	.st6{font-size:10px;}
-	.st7{fill:#1C94B5;}
-	.st8{fill:none;stroke:#BCBCBC;stroke-miterlimit:10;}
-	.st9{font-family:'Arial-BoldMT';}
-	.st10{font-size:10.9186px;}
-	.st11{fill:#BCBCBC;}
-</style>
-<g id="Layer_2_00000080900547900737573010000013098920555182204041_">
-	<rect y="0" width="663.9" height="856.8"/>
-</g>
-<g id="Layer_3">
-	<path class="st0" d="M189.3,762.1V23.3c0-5.3,4.3-9.6,9.6-9.6h392.4c5.3,0,9.6,4.3,9.6,9.6v738.8c0,5.3-4.3,9.6-9.6,9.6H198.9
-		C193.6,771.7,189.3,767.4,189.3,762.1z"/>
-</g>
-<path class="st1" d="M215.3,199.7h73.8c3.3,0,6.1,2.7,6.1,6.1V258c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,202.4,211.9,199.7,215.3,199.7z"/>
-<path class="st1" d="M215.3,339.7h73.8c3.3,0,6.1,2.7,6.1,6.1V398c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,342.4,211.9,339.7,215.3,339.7z"/>
-<path class="st1" d="M215.3,269.7h73.8c3.3,0,6.1,2.7,6.1,6.1V328c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,272.4,211.9,269.7,215.3,269.7z"/>
-<path class="st1" d="M215.3,409.6h73.8c3.3,0,6.1,2.7,6.1,6.1v52.2c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,412.3,211.9,409.6,215.3,409.6z"/>
-<path class="st1" d="M215.3,479.6h73.8c3.3,0,6.1,2.7,6.1,6.1v52.2c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,482.3,211.9,479.6,215.3,479.6z"/>
-<path class="st1" d="M215.3,549.5h73.8c3.3,0,6.1,2.7,6.1,6.1v52.2c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,552.2,211.9,549.5,215.3,549.5z"/>
-<path class="st1" d="M215.3,619.5h73.8c3.3,0,6.1,2.7,6.1,6.1v52.2c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,622.2,211.9,619.5,215.3,619.5z"/>
-<path class="st1" d="M215.3,689.4h73.8c3.3,0,6.1,2.7,6.1,6.1v52.2c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,692.2,211.9,689.4,215.3,689.4z"/>
-<path class="st1" d="M215.3,129.8h73.8c3.3,0,6.1,2.7,6.1,6.1v52.2c0,3.3-2.7,6.1-6.1,6.1h-73.8c-3.3,0-6.1-2.7-6.1-6.1v-52.2
-	C209.2,132.5,211.9,129.8,215.3,129.8z"/>
-<path class="st2" d="M380.9,753.7H315c-3.3,0-6.1-2.7-6.1-6.1V135.8c0-3.3,2.7-6.1,6.1-6.1h65.9c3.3,0,6.1,2.7,6.1,6.1v611.9
-	C387,751,384.2,753.7,380.9,753.7z"/>
-<g>
-	<text transform="matrix(1.0386 0 0 1 237.5269 159.2057)" class="st3 st4 st5">RTSP</text>
-	<text transform="matrix(1.0386 0 0 1 236.8862 172.4626)" class="st3 st4 st5">server</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 236.6245 228.1013)" class="st3 st4 st5">RTMP</text>
-	<text transform="matrix(1.0386 0 0 1 236.9395 241.3581)" class="st3 st4 st5">server</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 229.2949 300.4719)" class="st3 st4 st5">WebRTC</text>
-	<text transform="matrix(1.0386 0 0 1 236.9668 313.7277)" class="st3 st4 st5">server</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 241.3657 367.4904)" class="st3 st4 st5">SRT</text>
-	<text transform="matrix(1.0386 0 0 1 236.8862 380.7473)" class="st3 st4 st5">server</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 241.6802 442.7697)" class="st3 st4 st5">HLS</text>
-	<text transform="matrix(1.0386 0 0 1 236.8862 456.0275)" class="st3 st4 st5">server</text>
-</g>
-<text transform="matrix(1.0386 0 0 1 58.7236 49.6476)" class="st3 st4 st6">External sources </text>
-<text transform="matrix(1.0386 0 0 1 54.1538 61.6476)" class="st3 st4 st6">(cameras, servers)</text>
-<ellipse class="st7" cx="131.6" cy="443.9" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="103.5" cy="392.6" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="131.6" cy="358" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="100.4" cy="322.5" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="131.6" cy="291" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="100.4" cy="251" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="131.6" cy="219.4" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="100.4" cy="181.8" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="131.6" cy="146" rx="10.3" ry="9.9"/>
-<ellipse class="st7" cx="98.4" cy="80.6" rx="10.3" ry="9.9"/>
-<path class="st2" d="M504.3,43.4h70.6c3.3,0,6.1,2.7,6.1,6.1v698.3c0,3.3-2.7,6.1-6.1,6.1h-70.6c-3.3,0-6.1-2.7-6.1-6.1V49.5
-	C498.2,46.1,500.9,43.4,504.3,43.4z"/>
-<g>
-	<text transform="matrix(1.0386 0 0 1 518.0283 409.8185)" class="st3 st4 st5">recorder</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 230.2417 508.8752)" class="st3 st4 st5">playback</text>
-	<text transform="matrix(1.0386 0 0 1 236.9663 522.5275)" class="st3 st4 st5">server</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 235.6821 718.2033)" class="st3 st4 st5">control</text>
-	<text transform="matrix(1.0386 0 0 1 243.6797 733.7326)" class="st3 st4 st5">API</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 234.4121 581.1994)" class="st3 st4 st5">metrics</text>
-	<text transform="matrix(1.0386 0 0 1 236.9668 591.9826)" class="st3 st4 st5">server</text>
-</g>
-<g>
-	<text transform="matrix(1.0386 0 0 1 239.7583 647.9416)" class="st3 st4 st5">pprof</text>
-	<text transform="matrix(1.0386 0 0 1 236.8862 660.9016)" class="st3 st4 st5">server</text>
-</g>
-<text transform="matrix(1.0386 0 0 1 335.3965 402.0666)" class="st3 st4 st5">path</text>
-<text transform="matrix(1.0386 0 0 1 323.8682 415.3664)" class="st3 st4 st5">manager</text>
-<line class="st8" x1="146.1" y1="442.9" x2="209.2" y2="442.9"/>
-<line class="st8" x1="118.1" y1="392.6" x2="209.2" y2="392.6"/>
-<line class="st8" x1="145.4" y1="358" x2="209.2" y2="358"/>
-<line class="st8" x1="114.9" y1="320.9" x2="209.2" y2="320.9"/>
-<line class="st8" x1="145.9" y1="292" x2="209.2" y2="292"/>
-<line class="st8" x1="115.9" y1="249.1" x2="209.2" y2="249.1"/>
-<line class="st8" x1="146.9" y1="220.4" x2="209.2" y2="220.4"/>
-<line class="st8" x1="115.5" y1="179.8" x2="209.2" y2="179.8"/>
-<line class="st8" x1="146.4" y1="145.2" x2="209.2" y2="145.2"/>
-<text transform="matrix(1.0386 0 0 1 206.1455 38.6506)" class="st3 st9 st10">MediaMTX</text>
-<text transform="matrix(1.0386 0 0 1 85.7798 441.7463)" class="st3 st4 st6">HLS</text>
-<text transform="matrix(1.0386 0 0 1 78.3018 453.7463)" class="st3 st4 st6">readers</text>
-<text transform="matrix(1.0386 0 0 1 53.9102 390.3244)" class="st3 st4 st6">SRT</text>
-<text transform="matrix(1.0386 0 0 1 40.6162 402.3244)" class="st3 st4 st6">publishers</text>
-<text transform="matrix(1.0386 0 0 1 83.4956 357.2287)" class="st3 st4 st6">SRT</text>
-<text transform="matrix(1.0386 0 0 1 76.2251 369.2287)" class="st3 st4 st6">readers</text>
-<text transform="matrix(1.0386 0 0 1 38.6572 320.4504)" class="st3 st4 st6">WebRTC</text>
-<text transform="matrix(1.0386 0 0 1 36.3726 332.4504)" class="st3 st4 st6">publishers</text>
-<text transform="matrix(1.0386 0 0 1 72.8184 289.5768)" class="st3 st4 st6">WebRTC</text>
-<text transform="matrix(1.0386 0 0 1 76.5576 301.5764)" class="st3 st4 st6">readers</text>
-<text transform="matrix(1.0386 0 0 1 42.1167 251.0334)" class="st3 st4 st6">RTMP</text>
-<text transform="matrix(1.0386 0 0 1 33.1846 263.0329)" class="st3 st4 st6">publishers</text>
-<text transform="matrix(1.0386 0 0 1 79.1699 214.2062)" class="st3 st4 st6">RTMP</text>
-<text transform="matrix(1.0386 0 0 1 76.2617 226.2062)" class="st3 st4 st6">readers</text>
-<text transform="matrix(1.0386 0 0 1 48.084 179.7834)" class="st3 st4 st6">RTSP</text>
-<text transform="matrix(1.0386 0 0 1 38.2173 191.7834)" class="st3 st4 st6">publishers</text>
-<text transform="matrix(1.0386 0 0 1 80.0322 145.0705)" class="st3 st4 st6">RTSP</text>
-<text transform="matrix(1.0386 0 0 1 76.293 157.0705)" class="st3 st4 st6">readers</text>
-<line class="st8" x1="114.9" y1="80.6" x2="402.8" y2="80.6"/>
-<path class="st1" d="M475.7,753.7h-65.9c-3.3,0-6.1-2.7-6.1-6.1V49.4c0-3.3,2.7-6.1,6.1-6.1h65.9c3.3,0,6.1,2.7,6.1,6.1v698.3
-	C481.8,751,479.1,753.7,475.7,753.7z"/>
-<g>
-	<text transform="matrix(1.0386 0 0 1 424.9258 408.7775)" class="st3 st4 st5">paths</text>
-</g>
-<ellipse class="st7" cx="131.6" cy="517.1" rx="10.3" ry="9.9"/>
-<line class="st8" x1="146.3" y1="516.7" x2="209.2" y2="516.7"/>
-<text transform="matrix(1.0386 0 0 1 73.2041 511.7053)" class="st3 st4 st6">playback</text>
-<text transform="matrix(1.0386 0 0 1 80.9937 523.7053)" class="st3 st4 st6">users</text>
-<ellipse class="st7" cx="103.5" cy="583.1" rx="10.3" ry="9.9"/>
-<line class="st8" x1="118.1" y1="583.1" x2="209.2" y2="583.1"/>
-<text transform="matrix(1.0386 0 0 1 14.5703 585.1994)" class="st3 st4 st6">administrators</text>
-<polyline class="st8" points="209.2,656.8 107.5,656.8 107.5,596.5 "/>
-<polyline class="st8" points="209.2,724.7 100.4,724.7 100.4,596.5 "/>
-<ellipse class="st7" cx="636.6" cy="404.6" rx="10.3" ry="9.9"/>
-<g>
-	<text transform="matrix(1.0386 0 0 1 628.3184 386.2141)" class="st3 st4 st6">disk</text>
-</g>
-<line class="st8" x1="621.9" y1="404.6" x2="580.9" y2="404.6"/>
-<line class="st8" x1="296" y1="233.1" x2="309" y2="233.1"/>
-<line class="st8" x1="296" y1="163.7" x2="309" y2="163.7"/>
-<line class="st8" x1="296" y1="304.5" x2="309" y2="304.5"/>
-<line class="st8" x1="296" y1="372.8" x2="309" y2="372.8"/>
-<line class="st8" x1="296" y1="444.4" x2="309" y2="444.4"/>
-<line class="st8" x1="296" y1="512.6" x2="309" y2="512.6"/>
-<line class="st8" x1="296" y1="586.4" x2="309" y2="586.4"/>
-<line class="st8" x1="296" y1="653.6" x2="309" y2="653.6"/>
-<line class="st8" x1="296" y1="721.2" x2="309" y2="721.2"/>
-<ellipse class="st7" cx="456.8" cy="812.1" rx="10.3" ry="9.9"/>
-<g>
-	<text transform="matrix(1.0386 0 0 1 423.0469 835.4055)" class="st3 st4 st6">identity server </text>
-	<text transform="matrix(1.0386 0 0 1 424.7988 844.8039)" class="st3 st4 st6">(HTTP / JWT)</text>
-</g>
-<line class="st8" x1="456.8" y1="774.7" x2="456.8" y2="801.6"/>
-<line class="st8" x1="388.4" y1="405.9" x2="403.8" y2="405.9"/>
-<line class="st8" x1="481.8" y1="405.9" x2="498.2" y2="405.9"/>
-<ellipse class="st7" cx="313.9" cy="811.7" rx="10.3" ry="9.9"/>
-<g>
-	<text transform="matrix(1.0386 0 0 1 284.165 835.4055)" class="st3 st4 st6">configuration </text>
-	<text transform="matrix(1.0386 0 0 1 267.7549 847.4055)" class="st3 st4 st6">(file or environment)</text>
-</g>
-<line class="st8" x1="313.9" y1="774.7" x2="313.9" y2="801.2"/>
-<polygon class="st11" points="122.4,84.9 122.4,76.3 114.6,80.6 "/>
-<polygon class="st11" points="201.4,175.5 201.4,184.1 209.2,179.8 "/>
-<polygon class="st11" points="201.4,140.8 201.4,149.3 209.2,145.1 "/>
-<polygon class="st11" points="201.4,216.4 201.4,224.9 209.2,220.7 "/>
-<polygon class="st11" points="201.4,244.8 201.4,253.4 209.2,249.1 "/>
-<polygon class="st11" points="201.4,287.7 201.4,296.3 209.2,292 "/>
-<polygon class="st11" points="201.4,353.7 201.4,362.3 209.2,358 "/>
-<polygon class="st11" points="201.4,316.6 201.4,325.2 209.2,320.9 "/>
-<polygon class="st11" points="201.4,388.4 201.4,397 209.2,392.7 "/>
-<polygon class="st11" points="200.9,438.5 200.9,447 208.7,442.8 "/>
-<polygon class="st11" points="202.2,512.4 202.2,520.9 210,516.7 "/>
-<polygon class="st11" points="202.2,578.8 202.2,587.4 210,583.1 "/>
-<polygon class="st11" points="200.9,652.5 200.9,661.1 208.7,656.8 "/>
-<polygon class="st11" points="202.2,720.4 202.2,729 210,724.7 "/>
-<polygon class="st11" points="615.1,399.8 615.1,408.4 622.9,404.1 "/>
-<polygon class="st11" points="309.6,781.7 318.2,781.7 313.9,773.8 "/>
-<polygon class="st11" points="461.1,795.4 452.5,795.4 456.8,803.2 "/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 663.9 891.07">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #064375;
+      }
+
+      .cls-2 {
+        font-size: 11.08px;
+      }
+
+      .cls-2, .cls-3, .cls-4, .cls-5 {
+        fill: #fff;
+      }
+
+      .cls-2, .cls-3, .cls-4, .cls-5, .cls-6 {
+        isolation: isolate;
+      }
+
+      .cls-2, .cls-3, .cls-5, .cls-6 {
+        font-family: ArialMT, Arial;
+      }
+
+      .cls-3 {
+        font-size: 11px;
+      }
+
+      .cls-4 {
+        font-family: Arial-BoldMT, Arial;
+        font-size: 10.92px;
+      }
+
+      .cls-7 {
+        fill: none;
+        stroke: #bcbcbc;
+      }
+
+      .cls-7, .cls-8 {
+        stroke-miterlimit: 10;
+      }
+
+      .cls-9 {
+        letter-spacing: 0em;
+      }
+
+      .cls-5, .cls-6 {
+        font-size: 10px;
+      }
+
+      .cls-10 {
+        letter-spacing: -.02em;
+      }
+
+      .cls-11 {
+        letter-spacing: 0em;
+      }
+
+      .cls-12 {
+        letter-spacing: -.02em;
+      }
+
+      .cls-13 {
+        fill: #1c94b5;
+      }
+
+      .cls-6, .cls-14 {
+        fill: #bcbcbc;
+      }
+
+      .cls-8 {
+        fill: #1c1c1c;
+        stroke: #1a65b7;
+        stroke-width: 3px;
+      }
+
+      .cls-15 {
+        letter-spacing: -.02em;
+      }
+
+      .cls-16 {
+        fill: #1a65b7;
+      }
+    </style>
+  </defs>
+  <g id="back">
+    <g id="Layer_2" data-name="Layer 2">
+      <rect width="663.9" height="891.07"/>
+    </g>
+  </g>
+  <g id="container">
+    <g id="Layer_3" data-name="Layer 3">
+      <path class="cls-8" d="M183.45,796.99V37.91c0-5.45,3.86-9.86,8.63-9.86h352.56c4.76,0,8.63,4.42,8.63,9.86V796.99c0,5.45-3.86,9.86-8.63,9.86H192.08c-4.76,0-8.63-4.42-8.63-9.86Z"/>
+    </g>
+  </g>
+  <g id="Layer_1" data-name="Layer 1">
+    <rect class="cls-1" x="208.11" y="572.09" width="315.24" height="62.32" rx="8.58" ry="8.58"/>
+    <rect class="cls-1" x="208.11" y="641.49" width="315.24" height="62.32" rx="8.58" ry="8.58"/>
+    <rect class="cls-1" x="208.11" y="710.39" width="315.24" height="62.32" rx="8.58" ry="8.58"/>
+    <rect class="cls-16" x="438.67" y="363.77" width="93.51" height="130.38" rx="9.73" ry="9.73"/>
+    <rect class="cls-16" x="438.67" y="78.45" width="93.51" height="130.38" rx="9.73" ry="9.73"/>
+    <rect class="cls-16" x="438.67" y="221.11" width="93.51" height="130.38" rx="9.73" ry="9.73"/>
+    <path class="cls-16" d="M214.64,219.85h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <path class="cls-16" d="M214.64,359.85h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <path class="cls-16" d="M214.64,289.85h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <path class="cls-16" d="M214.64,429.75h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <path class="cls-16" d="M214.02,500.75h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <path class="cls-16" d="M214.64,149.95h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <g>
+      <text class="cls-2" transform="translate(244.11 167.72) scale(1.04 1)"><tspan class="cls-15" x="0" y="0">R</tspan><tspan x="7.8" y="0">TS</tspan><tspan class="cls-15" x="21.97" y="0">P</tspan></text>
+      <text class="cls-2" transform="translate(242.62 180.98) scale(1.04 1)"><tspan x="0" y="0">server</tspan></text>
+    </g>
+    <g>
+      <text class="cls-2" transform="translate(242.41 241.25) scale(1.04 1)"><tspan class="cls-15" x="0" y="0">R</tspan><tspan x="7.8" y="0">TM</tspan><tspan class="cls-15" x="23.8" y="0">P</tspan></text>
+      <text class="cls-2" transform="translate(242.84 254.51) scale(1.04 1)"><tspan x="0" y="0">server</tspan></text>
+    </g>
+    <text class="cls-2" transform="translate(235.4 311.99) scale(1.04 1)"><tspan class="cls-15" x="0" y="0">W</tspan><tspan x="10.26" y="0">eb</tspan><tspan class="cls-15" x="22.59" y="0">R</tspan><tspan class="cls-9" x="30.39" y="0">TC</tspan><tspan x="7.19" y="13.3">server</tspan></text>
+    <text class="cls-2" transform="translate(247.13 382.64) scale(1.04 1)"><tspan x="0" y="0">S</tspan><tspan class="cls-15" x="7.39" y="0">RT</tspan><tspan x="-4.51" y="13.3">server</tspan></text>
+    <text class="cls-2" transform="translate(247.24 453.02) scale(1.04 1)"><tspan x="0" y="0">HLS</tspan><tspan x="-4.62" y="13.3">server</tspan></text>
+    <text class="cls-5" transform="translate(575.65 116.21) scale(1.04 1)"><tspan x="0" y="0">External sources </tspan></text>
+    <text class="cls-5" transform="translate(571.08 128.21) scale(1.04 1)"><tspan x="0" y="0">(cameras, servers)</tspan></text>
+    <ellipse class="cls-13" cx="131.6" cy="464.05" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="103.5" cy="412.75" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="131.6" cy="378.15" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="100.4" cy="342.65" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="131.6" cy="311.15" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="100.4" cy="271.15" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="131.6" cy="239.55" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="100.4" cy="201.95" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="131.6" cy="166.15" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="603.46" cy="150.5" rx="10.3" ry="9.9"/>
+    <text class="cls-2" transform="translate(464.23 435.65) scale(1.04 1)"><tspan x="0" y="0">recorder</tspan></text>
+    <text class="cls-2" transform="translate(235.62 522.03) scale(1.04 1)"><tspan x="0" y="0">playback</tspan><tspan x="6.47" y="13.3">server</tspan></text>
+    <g>
+      <text class="cls-2" transform="translate(346.06 591.65) scale(1.04 1)"><tspan x="0" y="0">control</tspan></text>
+      <text class="cls-2" transform="translate(354.06 607.18) scale(1.04 1)"><tspan x="0" y="0">API</tspan></text>
+    </g>
+    <g>
+      <text class="cls-2" transform="translate(344.29 662.82) scale(1.04 1)"><tspan x="0" y="0">metrics</tspan></text>
+      <text class="cls-2" transform="translate(346.84 673.6) scale(1.04 1)"><tspan x="0" y="0">server</tspan></text>
+    </g>
+    <g>
+      <text class="cls-2" transform="translate(350.07 730.27) scale(1.04 1)"><tspan x="0" y="0">pprof</tspan></text>
+      <text class="cls-2" transform="translate(347.2 743.23) scale(1.04 1)"><tspan x="0" y="0">server</tspan></text>
+    </g>
+    <line class="cls-7" x1="146.1" y1="463.05" x2="208.2" y2="463.05"/>
+    <line class="cls-7" x1="118.1" y1="412.75" x2="208.2" y2="412.75"/>
+    <line class="cls-7" x1="145.4" y1="378.15" x2="208.2" y2="378.15"/>
+    <line class="cls-7" x1="114.9" y1="341.05" x2="208.2" y2="341.05"/>
+    <line class="cls-7" x1="145.9" y1="312.15" x2="208.2" y2="312.15"/>
+    <line class="cls-7" x1="115.9" y1="269.25" x2="208.2" y2="269.25"/>
+    <line class="cls-7" x1="146.9" y1="240.55" x2="208.2" y2="240.55"/>
+    <line class="cls-7" x1="115.5" y1="199.95" x2="208.2" y2="199.95"/>
+    <line class="cls-7" x1="146.4" y1="165.35" x2="208.2" y2="165.35"/>
+    <text class="cls-4" transform="translate(210.81 47.33) scale(1.04 1)"><tspan x="0" y="0">MediaMTX</tspan></text>
+    <text class="cls-5" transform="translate(85.78 461.9) scale(1.04 1)"><tspan x="0" y="0">HLS</tspan></text>
+    <text class="cls-5" transform="translate(78.3 473.9) scale(1.04 1)"><tspan x="0" y="0">readers</tspan></text>
+    <text class="cls-5" transform="translate(53.91 410.47) scale(1.04 1)"><tspan x="0" y="0">S</tspan><tspan class="cls-12" x="6.67" y="0">RT</tspan></text>
+    <text class="cls-5" transform="translate(40.62 422.47) scale(1.04 1)"><tspan x="0" y="0">publishers</tspan></text>
+    <text class="cls-5" transform="translate(83.5 377.38) scale(1.04 1)"><tspan x="0" y="0">S</tspan><tspan class="cls-12" x="6.67" y="0">RT</tspan></text>
+    <text class="cls-5" transform="translate(76.23 389.38) scale(1.04 1)"><tspan x="0" y="0">readers</tspan></text>
+    <text class="cls-5" transform="translate(38.66 340.6) scale(1.04 1)"><tspan class="cls-12" x="0" y="0">W</tspan><tspan x="9.26" y="0">eb</tspan><tspan class="cls-12" x="20.38" y="0">R</tspan><tspan x="27.42" y="0">TC</tspan></text>
+    <text class="cls-5" transform="translate(36.37 352.6) scale(1.04 1)"><tspan x="0" y="0">publishers</tspan></text>
+    <text class="cls-5" transform="translate(72.82 309.73) scale(1.04 1)"><tspan class="cls-12" x="0" y="0">W</tspan><tspan x="9.26" y="0">eb</tspan><tspan class="cls-12" x="20.38" y="0">R</tspan><tspan x="27.42" y="0">TC</tspan></text>
+    <text class="cls-5" transform="translate(76.56 321.73) scale(1.04 1)"><tspan x="0" y="0">readers</tspan></text>
+    <text class="cls-5" transform="translate(42.12 271.18) scale(1.04 1)"><tspan class="cls-12" x="0" y="0">R</tspan><tspan class="cls-11" x="7.04" y="0">TM</tspan><tspan class="cls-12" x="21.48" y="0">P</tspan></text>
+    <text class="cls-5" transform="translate(33.18 283.18) scale(1.04 1)"><tspan x="0" y="0">publishers</tspan></text>
+    <text class="cls-5" transform="translate(79.17 234.36) scale(1.04 1)"><tspan class="cls-12" x="0" y="0">R</tspan><tspan class="cls-11" x="7.04" y="0">TM</tspan><tspan class="cls-12" x="21.48" y="0">P</tspan></text>
+    <text class="cls-5" transform="translate(76.26 246.36) scale(1.04 1)"><tspan x="0" y="0">readers</tspan></text>
+    <text class="cls-5" transform="translate(48.08 199.93) scale(1.04 1)"><tspan class="cls-12" x="0" y="0">R</tspan><tspan class="cls-11" x="7.04" y="0">TS</tspan><tspan class="cls-12" x="19.82" y="0">P</tspan></text>
+    <text class="cls-5" transform="translate(38.22 211.93) scale(1.04 1)"><tspan x="0" y="0">publishers</tspan></text>
+    <text class="cls-5" transform="translate(80.03 165.22) scale(1.04 1)"><tspan class="cls-12" x="0" y="0">R</tspan><tspan class="cls-11" x="7.04" y="0">TS</tspan><tspan class="cls-12" x="19.82" y="0">P</tspan></text>
+    <text class="cls-5" transform="translate(76.29 177.22) scale(1.04 1)"><tspan x="0" y="0">readers</tspan></text>
+    <line class="cls-7" x1="532.17" y1="149.95" x2="591.96" y2="149.95"/>
+    <ellipse class="cls-13" cx="131.01" cy="537.25" rx="10.3" ry="9.9"/>
+    <line class="cls-7" x1="145.71" y1="536.85" x2="207.61" y2="536.85"/>
+    <text class="cls-5" transform="translate(72.62 531.86) scale(1.04 1)"><tspan x="0" y="0">playback</tspan></text>
+    <text class="cls-5" transform="translate(80.41 543.86) scale(1.04 1)"><tspan x="0" y="0">users</tspan></text>
+    <ellipse class="cls-13" cx="102.91" cy="603.25" rx="10.3" ry="9.9"/>
+    <line class="cls-7" x1="117.51" y1="603.25" x2="208.61" y2="603.25"/>
+    <text class="cls-5" transform="translate(16.99 605.35) scale(1.04 1)"><tspan x="0" y="0">administrators</tspan></text>
+    <polyline class="cls-7" points="208.61 676.95 106.91 676.95 106.91 616.65"/>
+    <polyline class="cls-7" points="208.61 744.85 99.81 744.85 99.81 616.65"/>
+    <ellipse class="cls-13" cx="602.26" cy="431.85" rx="10.3" ry="9.9"/>
+    <text class="cls-5" transform="translate(593.98 413.47) scale(1.04 1)"><tspan x="0" y="0">disk</tspan></text>
+    <line class="cls-7" x1="587.56" y1="431.85" x2="532.17" y2="431.85"/>
+    <line class="cls-7" x1="308.61" y1="252.25" x2="336" y2="252.25"/>
+    <line class="cls-7" x1="309.2" y1="183.85" x2="336.9" y2="183.85"/>
+    <line class="cls-7" x1="308.61" y1="324.65" x2="336.9" y2="324.65"/>
+    <line class="cls-7" x1="308.61" y1="392.95" x2="336" y2="392.95"/>
+    <line class="cls-7" x1="310" y1="464.55" x2="336.9" y2="464.55"/>
+    <polyline class="cls-7" points="307.61 535.96 542.97 535.96 542.97 431.85"/>
+    <ellipse class="cls-13" cx="456.8" cy="846.25" rx="10.3" ry="9.9"/>
+    <text class="cls-5" transform="translate(424.48 870.19) scale(1.04 1)"><tspan x="0" y="0">identity server</tspan><tspan x=".39" y="12">(HTT</tspan><tspan class="cls-10" x="23.16" y="12">P</tspan><tspan x="29.65" y="12" xml:space="preserve"> / JWT)</tspan></text>
+    <line class="cls-7" x1="456.8" y1="808.85" x2="456.8" y2="835.75"/>
+    <ellipse class="cls-13" cx="313.9" cy="845.85" rx="10.3" ry="9.9"/>
+    <text class="cls-5" transform="translate(283.45 870.25) scale(1.04 1)"><tspan x="0" y="0">configuration</tspan><tspan x="-15.83" y="12">(file or environment)</tspan></text>
+    <line class="cls-7" x1="313.9" y1="808.85" x2="313.9" y2="835.35"/>
+    <polygon class="cls-14" points="584.66 145.65 584.66 154.25 592.46 149.95 584.66 145.65"/>
+    <polygon class="cls-14" points="200.4 195.65 200.4 204.25 208.2 199.95 200.4 195.65"/>
+    <polygon class="cls-14" points="200.4 160.95 200.4 169.45 208.2 165.25 200.4 160.95"/>
+    <polygon class="cls-14" points="200.4 236.55 200.4 245.05 208.2 240.85 200.4 236.55"/>
+    <polygon class="cls-14" points="200.4 264.95 200.4 273.55 208.2 269.25 200.4 264.95"/>
+    <polygon class="cls-14" points="200.4 307.85 200.4 316.45 208.2 312.15 200.4 307.85"/>
+    <polygon class="cls-14" points="200.4 373.85 200.4 382.45 208.2 378.15 200.4 373.85"/>
+    <polygon class="cls-14" points="200.4 336.75 200.4 345.35 208.2 341.05 200.4 336.75"/>
+    <polygon class="cls-14" points="200.4 408.55 200.4 417.15 208.2 412.85 200.4 408.55"/>
+    <polygon class="cls-14" points="199.9 458.65 199.9 467.15 207.7 462.95 199.9 458.65"/>
+    <polygon class="cls-14" points="200.61 531.55 200.61 540.05 208.41 535.85 200.61 531.55"/>
+    <polygon class="cls-14" points="201.61 598.95 201.61 607.55 209.41 603.25 201.61 598.95"/>
+    <polygon class="cls-14" points="200.31 672.65 200.31 681.25 208.11 676.95 200.31 672.65"/>
+    <polygon class="cls-14" points="201.61 740.55 201.61 749.15 209.41 744.85 201.61 740.55"/>
+    <polygon class="cls-14" points="580.76 427.05 580.76 435.65 588.56 431.35 580.76 427.05"/>
+    <polygon class="cls-14" points="309.6 815.85 318.2 815.85 313.9 807.95 309.6 815.85"/>
+    <polygon class="cls-14" points="461.1 829.55 452.5 829.55 456.8 837.35 461.1 829.55"/>
+    <path class="cls-16" d="M214.64,78.45h86.57c3.47,0,6.41,2.7,6.41,6.1v52.2c0,3.3-2.84,6.1-6.41,6.1h-86.57c-3.47,0-6.41-2.7-6.41-6.1v-52.2c0-3.4,2.84-6.1,6.41-6.1Z"/>
+    <text class="cls-3" transform="translate(216.55 101.4) scale(.97 1)"><tspan x="0" y="0">Media-over-QUIC</tspan><tspan x="27.81" y="13.2">server</tspan></text>
+    <ellipse class="cls-13" cx="101.09" cy="129.51" rx="10.3" ry="9.9"/>
+    <ellipse class="cls-13" cx="132.29" cy="93.71" rx="10.3" ry="9.9"/>
+    <line class="cls-7" x1="115.19" y1="127.51" x2="207.89" y2="127.51"/>
+    <line class="cls-7" x1="146.09" y1="92.91" x2="207.89" y2="92.91"/>
+    <text class="cls-5" transform="translate(5.18 127.49) scale(1.04 1)"><tspan x="0" y="0">Media-over-QUIC</tspan><tspan x="16.38" y="12">publishers</tspan></text>
+    <text class="cls-5" transform="translate(34.49 92.78) scale(1.04 1)"><tspan x="0" y="0">Media-over-QUIC</tspan><tspan x="22.22" y="12">readers</tspan></text>
+    <polygon class="cls-14" points="200.09 123.21 200.09 131.81 207.89 127.51 200.09 123.21"/>
+    <polygon class="cls-14" points="200.09 88.51 200.09 97.01 207.89 92.81 200.09 88.51"/>
+    <ellipse class="cls-13" cx="603.46" cy="285.03" rx="10.3" ry="9.9"/>
+    <text class="cls-5" transform="translate(562.55 265.07) scale(1.04 1)"><tspan x="0" y="0">External destinations</tspan></text>
+    <line class="cls-7" x1="588.76" y1="285.03" x2="532.17" y2="285.03"/>
+    <polygon class="cls-14" points="581.96 280.23 581.96 288.83 589.76 284.53 581.96 280.23"/>
+    <text class="cls-2" transform="translate(469.82 277.79) scale(.93 1)"><tspan x="0" y="0">forward</tspan><tspan x="-11.1" y="13.3">destinations</tspan></text>
+    <rect class="cls-1" x="332" y="78.45" width="86.32" height="415.7" rx="9.73" ry="9.73"/>
+    <text class="cls-2" transform="translate(368.72 280.99) scale(1.04 1)"><tspan x="0" y="0">live</tspan><tspan x="-11.39" y="13.3">streams</tspan></text>
+    <line class="cls-7" x1="308.61" y1="114.45" x2="336.9" y2="114.45"/>
+    <line class="cls-7" x1="419.38" y1="285.22" x2="438.67" y2="285.22"/>
+    <line class="cls-7" x1="419.38" y1="432.73" x2="438.67" y2="432.73"/>
+    <text class="cls-2" transform="translate(470.36 142.95) scale(1.04 1)"><tspan x="0" y="0">static</tspan><tspan x="-6.47" y="13.3">sources</tspan></text>
+    <line class="cls-7" x1="419.38" y1="149.95" x2="438.67" y2="149.95"/>
+    <polygon class="cls-14" points="315.41 118.63 315.41 110.03 307.61 114.33 315.41 118.63"/>
+    <polygon class="cls-14" points="315.41 188.15 315.41 179.55 307.61 183.85 315.41 188.15"/>
+    <polygon class="cls-14" points="315.41 256.95 315.41 248.35 307.61 252.65 315.41 256.95"/>
+    <polygon class="cls-14" points="315.41 329.25 315.41 320.65 307.61 324.95 315.41 329.25"/>
+    <polygon class="cls-14" points="315.41 396.8 315.41 388.2 307.61 392.5 315.41 396.8"/>
+    <polygon class="cls-14" points="315.41 468.6 315.41 460 307.61 464.3 315.41 468.6"/>
+    <polygon class="cls-14" points="325.1 110.03 325.1 118.63 332.9 114.33 325.1 110.03"/>
+    <polygon class="cls-14" points="325.1 179.55 325.1 188.15 332.9 183.85 325.1 179.55"/>
+    <polygon class="cls-14" points="325.1 248.35 325.1 256.95 332.9 252.65 325.1 248.35"/>
+    <polygon class="cls-14" points="325.1 320.65 325.1 329.25 332.9 324.95 325.1 320.65"/>
+    <polygon class="cls-14" points="325.1 388.2 325.1 396.8 332.9 392.5 325.1 388.2"/>
+    <text class="cls-6" transform="translate(215.22 131.56)"><tspan x="0" y="0">8892/tcp, 8893/udp</tspan></text>
+    <text class="cls-6" transform="translate(215.22 196.65)"><tspan x="0" y="0">8554/tcp, 8000/udp </tspan><tspan x="23.35" y="12">8001/udp</tspan></text>
+    <text class="cls-6" transform="translate(238.52 270.15)"><tspan x="0" y="0">1935/tcp</tspan></text>
+    <text class="cls-6" transform="translate(215.22 341.41)"><tspan x="0" y="0">8889/tcp, 8189/udp</tspan></text>
+    <text class="cls-6" transform="translate(237.18 412.58)"><tspan x="0" y="0">8890/udp</tspan></text>
+    <text class="cls-6" transform="translate(237.18 483.65)"><tspan x="0" y="0">8888/udp</tspan></text>
+    <text class="cls-6" transform="translate(238.85 551.2)"><tspan x="0" y="0">9996/tcp</tspan></text>
+    <text class="cls-6" transform="translate(345.12 689.19) scale(.97 1)"><tspan x="0" y="0">9998/tcp</tspan></text>
+    <text class="cls-6" transform="translate(345.89 759.43) scale(.97 1)"><tspan x="0" y="0">9999/tcp</tspan></text>
+    <text class="cls-6" transform="translate(345.37 622.77) scale(.97 1)"><tspan x="0" y="0">9997/tcp</tspan></text>
+    <polygon class="cls-14" points="425.12 154.25 425.12 145.65 417.32 149.95 425.12 154.25"/>
+    <polygon class="cls-14" points="432.05 280.73 432.05 289.33 439.85 285.03 432.05 280.73"/>
+    <polygon class="cls-14" points="432.05 427.55 432.05 436.15 439.85 431.85 432.05 427.55"/>
+  </g>
 </svg>

@@ -111,6 +111,7 @@ func (s *httpServer) initialize() error {
 		ServerKey:         s.serverKey,
 		Handler:           router,
 		Parent:            s,
+		OnListenError:     s.parent.onListenError,
 	}
 	err := s.inner.Initialize()
 	if err != nil {
@@ -137,6 +138,9 @@ func (s *httpServer) writeErrorNoLog(ctx *gin.Context, status int, err error) {
 }
 
 func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, publish bool) bool {
+	creds := &auth.Credentials{}
+	creds.FromHTTP(ctx.Request)
+
 	_, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		Author: &logger.InlineWriter{
 			Parent: s,
@@ -148,7 +152,7 @@ func (s *httpServer) checkAuthOutsideSession(ctx *gin.Context, pathName string, 
 			Publish:              publish,
 			UserAgent:            ctx.Request.Header.Get("User-Agent"),
 			Proto:                auth.ProtocolWebRTC,
-			Credentials:          httpp.Credentials(ctx.Request),
+			Credentials:          creds,
 			IP:                   net.ParseIP(ctx.ClientIP()),
 			EnableAskCredentials: true,
 		},
@@ -187,7 +191,7 @@ func (s *httpServer) onWHIPOptions(ctx *gin.Context, pathName string, publish bo
 	ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match")
 	ctx.Header("Access-Control-Expose-Headers", "Accept-Post, Link")
 	ctx.Header("Accept-Post", "application/sdp")
-	ctx.Writer.Header()["Link"] = whip.LinkHeaderMarshal(servers)
+	ctx.Writer.Header()["Link"] = whip.LinkHeader(servers).Marshal()
 	ctx.Writer.WriteHeader(http.StatusNoContent)
 }
 
@@ -203,12 +207,17 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 		return
 	}
 
+	creds := &auth.Credentials{}
+	creds.FromHTTP(ctx.Request)
+
 	res := s.parent.newSession(newSessionReq{
-		pathName:    pathName,
 		remoteAddr:  httpp.RemoteAddr(ctx),
+		pathName:    pathName,
+		query:       ctx.Request.URL.RawQuery,
+		userAgent:   ctx.Request.UserAgent(),
+		credentials: creds,
 		publish:     publish,
 		offer:       offer,
-		httpRequest: ctx.Request,
 	})
 	if res.err != nil {
 		s.writeErrorNoLog(ctx, res.errStatusCode, res.err)
@@ -247,7 +256,7 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 	// but is kept here for compatibility reasons.
 	ctx.Header("Accept-Patch", "application/trickle-ice-sdpfrag")
 
-	ctx.Writer.Header()["Link"] = whip.LinkHeaderMarshal(servers)
+	ctx.Writer.Header()["Link"] = whip.LinkHeader(servers).Marshal()
 	ctx.Header("Location", sessionLocation(publish, pathName, ctx.Request.URL.RawQuery, res.sx.secret))
 	ctx.Writer.WriteHeader(http.StatusCreated)
 	ctx.Writer.Write(res2.answer)

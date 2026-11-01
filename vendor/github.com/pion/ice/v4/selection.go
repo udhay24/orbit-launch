@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/pion/logging"
-	"github.com/pion/stun/v3"
+	"github.com/pion/stun/v4"
 )
 
 type pairCandidateSelector interface {
@@ -96,7 +96,7 @@ func (s *controllingSelector) nominatePair(pair *CandidatePair) {
 		stun.NewUsername(s.agent.remoteUfrag + ":" + s.agent.localUfrag),
 		UseCandidate(),
 		AttrControlling(s.agent.tieBreaker),
-		PriorityAttr(pair.Local.Priority()),
+		PriorityAttr(pair.Local.prflxPriority()),
 	}
 	attributes = append(attributes,
 		stun.NewShortTermIntegrity(s.agent.remotePwd),
@@ -221,7 +221,7 @@ func (s *controllingSelector) PingCandidate(local, remote Candidate) {
 		stun.TransactionID,
 		stun.NewUsername(s.agent.remoteUfrag + ":" + s.agent.localUfrag),
 		AttrControlling(s.agent.tieBreaker),
-		PriorityAttr(local.Priority()),
+		PriorityAttr(local.prflxPriority()),
 	}
 	attributes = append(attributes,
 		stun.NewShortTermIntegrity(s.agent.remotePwd),
@@ -373,7 +373,7 @@ func (s *controlledSelector) PingCandidate(local, remote Candidate) {
 		stun.TransactionID,
 		stun.NewUsername(s.agent.remoteUfrag + ":" + s.agent.localUfrag),
 		AttrControlled(s.agent.tieBreaker),
-		PriorityAttr(local.Priority()),
+		PriorityAttr(local.prflxPriority()),
 	}
 	attributes = append(attributes,
 		stun.NewShortTermIntegrity(s.agent.remotePwd),
@@ -519,17 +519,34 @@ func (s *controlledSelector) HandleBindingRequest(message *stun.Message, local, 
 
 type liteSelector struct {
 	pairCandidateSelector
+	agent *Agent
 }
 
-// A lite selector should not contact candidates.
 func (s *liteSelector) ContactCandidates() {
-	if _, ok := s.pairCandidateSelector.(*controllingSelector); ok {
-		//nolint:godox
-		// https://github.com/pion/ice/issues/96
-		// TODO: implement lite controlling agent. For now falling back to full agent.
-		// This only happens if both peers are lite. See RFC 8445 S6.1.1 and S6.2
-		s.pairCandidateSelector.ContactCandidates()
-	} else if v, ok := s.pairCandidateSelector.(*controlledSelector); ok {
-		v.agent.validateSelectedPair()
+	if !s.agent.remoteLite {
+		s.agent.validateSelectedPair()
+
+		return
 	}
+	selectedPair := s.agent.getSelectedPair()
+	if selectedPair != nil {
+		s.agent.validateSelectedPair()
+		selectedPair = s.agent.getSelectedPair()
+	}
+
+	pair := s.agent.getBestAvailableCandidatePair()
+	if pair == nil || selectedPair == pair {
+		return
+	}
+
+	pair.state = CandidatePairStateSucceeded
+	// lite candidates pair becomes valid without a connectivity check. so we need to
+	// start its liveness window now so a later candidate update does not immediately
+	// fail a pair whose LastReceived timestamp is still zero.
+	pair.Remote.seen(false)
+	s.agent.setSelectedPair(pair)
 }
+
+func (s *liteSelector) PingCandidate(_, _ Candidate) {}
+
+func (s *liteSelector) HandleSuccessResponse(*stun.Message, Candidate, Candidate, netip.AddrPort) {}

@@ -1,4 +1,4 @@
-package rtmp
+package rtmp_test
 
 import (
 	"context"
@@ -19,6 +19,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
+	"github.com/bluenviron/mediamtx/internal/servers/rtmp"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -44,6 +45,56 @@ func (p *dummyPath) RemovePublisher(_ defs.PathRemovePublisherReq) {
 func (p *dummyPath) RemoveReader(_ defs.PathRemoveReaderReq) {
 }
 
+func TestServerReadExpiration(t *testing.T) {
+	desc := &description.Session{Medias: []*description.Media{test.MediaH264}}
+	strm := &stream.Stream{
+		OrigDesc:          desc,
+		WriteQueueSize:    512,
+		RTPMaxPayloadSize: 1450,
+		Parent:            test.NilLogger,
+	}
+	require.NoError(t, strm.Initialize())
+
+	pathManager := &test.PathManager{
+		AddReaderImpl: func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
+			expiresAt := time.Now().Add(time.Second)
+			return &defs.PathAddReaderRes{
+				Path:    &dummyPath{},
+				Stream:  strm,
+				AuthRes: &auth.Result{ExpiresAt: &expiresAt},
+			}, nil
+		},
+	}
+	s := &rtmp.Server{
+		Address:      "127.0.0.1:1939",
+		ReadTimeout:  conf.Duration(10 * time.Second),
+		WriteTimeout: conf.Duration(10 * time.Second),
+		PathManager:  pathManager,
+		Parent:       test.NilLogger,
+	}
+	require.NoError(t, s.Initialize())
+	defer s.Close()
+
+	u, err := url.Parse("rtmp://127.0.0.1:1939/teststream")
+	require.NoError(t, err)
+	client := &gortmplib.Client{URL: u}
+	require.NoError(t, client.Initialize(context.Background()))
+	defer client.Close()
+
+	require.Eventually(t, func() bool {
+		list, listErr := s.APIConnsList()
+		return listErr == nil && len(list.Items) == 1 && list.Items[0].State == defs.APIRTMPConnStateRead
+	}, time.Second, 10*time.Millisecond)
+	list, err := s.APIConnsList()
+	require.NoError(t, err)
+	require.NotNil(t, list.Items[0].ExpiresAt)
+
+	require.Eventually(t, func() bool {
+		list, err = s.APIConnsList()
+		return err == nil && len(list.Items) == 0
+	}, 3*time.Second, 20*time.Millisecond)
+}
+
 func TestAuthError(t *testing.T) {
 	for _, ca := range []struct {
 		name    string
@@ -58,21 +109,28 @@ func TestAuthError(t *testing.T) {
 				"rtmp://127.0.0.1:1939/teststream?user=myuser&pass=mypass",
 			} {
 				func() {
-					called := make(chan struct{})
 					pathManager := &test.PathManager{}
+
 					if ca.publish {
-						pathManager.AddPublisherImpl = func(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
-							close(called)
+						pathManager.FindPathConfImpl = func(_ defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
 							return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
+						}
+						pathManager.AddPublisherImpl = func(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+							return nil, fmt.Errorf("should not be called")
 						}
 					} else {
 						pathManager.AddReaderImpl = func(_ defs.PathAddReaderReq) (*defs.PathAddReaderRes, error) {
-							close(called)
 							return nil, &auth.Error{Wrapped: fmt.Errorf("auth error")}
+						}
+						pathManager.FindPathConfImpl = func(_ defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
+							return nil, fmt.Errorf("should not be called")
+						}
+						pathManager.AddPublisherImpl = func(_ defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+							return nil, fmt.Errorf("should not be called")
 						}
 					}
 
-					s := &Server{
+					s := &rtmp.Server{
 						Address:             "127.0.0.1:1939",
 						ReadTimeout:         conf.Duration(10 * time.Second),
 						WriteTimeout:        conf.Duration(10 * time.Second),
@@ -96,32 +154,12 @@ func TestAuthError(t *testing.T) {
 						Publish: ca.publish,
 					}
 					err = conn.Initialize(context.Background())
-					require.NoError(t, err)
-					defer conn.Close()
-
-					if ca.publish {
-						track := &gortmplib.Track{Codec: &codecs.H264{
-							SPS: test.FormatH264.SPS,
-							PPS: test.FormatH264.PPS,
-						}}
-						w := &gortmplib.Writer{
-							Conn:   conn,
-							Tracks: []*gortmplib.Track{track},
-						}
-						err = w.Initialize()
-						require.NoError(t, err)
-						_ = w.WriteH264(track, 2*time.Second, 2*time.Second, [][]byte{{5, 2, 3, 4}})
-					} else {
-						r := &gortmplib.Reader{Conn: conn}
-						err = r.Initialize()
-						require.Error(t, err)
+					if !ca.publish {
+						require.ErrorContains(t, err, "NetStream.Play.Failed")
+						return
 					}
 
-					select {
-					case <-called:
-					case <-time.After(2 * time.Second):
-						t.Fatal("auth callback not reached")
-					}
+					require.ErrorContains(t, err, "NetStream.Publish.Unauthorized")
 				}()
 			}
 		})
@@ -159,11 +197,20 @@ func TestServerPublish(t *testing.T) {
 				n := 0
 
 				pathManager := &test.PathManager{
-					AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+					FindPathConfImpl: func(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
 						require.Equal(t, "teststream", req.AccessRequest.Name)
 						require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
 						require.Equal(t, "myuser", req.AccessRequest.Credentials.User)
 						require.Equal(t, "mypass", req.AccessRequest.Credentials.Pass)
+
+						return &defs.PathFindPathConfRes{
+							AuthRes: &auth.Result{User: req.AccessRequest.Credentials.User},
+						}, nil
+					},
+					AddPublisherImpl: func(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
+						require.Equal(t, "teststream", req.AccessRequest.Name)
+						require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
+						require.True(t, req.AccessRequest.SkipAuth)
 
 						strm = &stream.Stream{
 							OrigDesc:          req.Desc,
@@ -210,13 +257,12 @@ func TestServerPublish(t *testing.T) {
 
 						return &defs.PathAddPublisherRes{
 							Path:      &dummyPath{},
-							User:      req.AccessRequest.Credentials.User,
 							SubStream: subStream,
 						}, nil
 					},
 				}
 
-				s := &Server{
+				s := &rtmp.Server{
 					Address:             "127.0.0.1:1939",
 					ReadTimeout:         conf.Duration(10 * time.Second),
 					WriteTimeout:        conf.Duration(10 * time.Second),
@@ -368,11 +414,15 @@ func TestServerRead(t *testing.T) {
 					require.Equal(t, "user=myuser&pass=mypass&param=value", req.AccessRequest.Query)
 					require.Equal(t, "myuser", req.AccessRequest.Credentials.User)
 					require.Equal(t, "mypass", req.AccessRequest.Credentials.Pass)
-					return &defs.PathAddReaderRes{Path: &dummyPath{}, User: req.AccessRequest.Credentials.User, Stream: strm}, nil
+					return &defs.PathAddReaderRes{
+						Path:    &dummyPath{},
+						AuthRes: &auth.Result{User: req.AccessRequest.Credentials.User},
+						Stream:  strm,
+					}, nil
 				},
 			}
 
-			s := &Server{
+			s := &rtmp.Server{
 				Address:             "127.0.0.1:1939",
 				ReadTimeout:         conf.Duration(10 * time.Second),
 				WriteTimeout:        conf.Duration(10 * time.Second),
@@ -483,6 +533,12 @@ func TestServerRead(t *testing.T) {
 					},
 				},
 			}, list)
+
+			conn.Close()
+			require.Eventually(t, func() bool {
+				list2, listErr2 := s.APIConnsList()
+				return listErr2 == nil && len(list2.Items) == 0
+			}, 5*time.Second, 10*time.Millisecond)
 		})
 	}
 }

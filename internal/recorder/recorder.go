@@ -39,6 +39,7 @@ type Recorder struct {
 	Parent            logger.Writer
 
 	restartPause time.Duration
+	location     *time.Location
 
 	currentInstance *recorderInstance
 
@@ -59,6 +60,9 @@ func (r *Recorder) Initialize() {
 	if r.restartPause == 0 {
 		r.restartPause = 2 * time.Second
 	}
+	if r.location == nil {
+		r.location = time.Local
+	}
 
 	r.terminate = make(chan struct{})
 	r.done = make(chan struct{})
@@ -73,6 +77,7 @@ func (r *Recorder) Initialize() {
 		stream:            r.Stream,
 		onSegmentCreate:   r.OnSegmentCreate,
 		onSegmentComplete: r.OnSegmentComplete,
+		location:          r.location,
 		parent:            r,
 	}
 	r.currentInstance.initialize()
@@ -143,6 +148,7 @@ func (r *Recorder) run() {
 			stream:            r.Stream,
 			onSegmentCreate:   r.OnSegmentCreate,
 			onSegmentComplete: r.OnSegmentComplete,
+			location:          r.location,
 			parent:            r,
 		}
 		r.currentInstance.initialize()

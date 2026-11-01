@@ -54,6 +54,7 @@ type APIRTSPSession struct {
 	Path                           string              `json:"path"`
 	Query                          string              `json:"query"`
 	User                           string              `json:"user"`
+	ExpiresAt                      *time.Time          `json:"expiresAt"`
 	UserAgent                      string              `json:"userAgent"`
 	Transport                      *string             `json:"transport"`
 	Profile                        *string             `json:"profile"`
@@ -70,6 +71,7 @@ type APIRTSPSession struct {
 	OutboundRTPPacketsReportedLost uint64              `json:"outboundRTPPacketsReportedLost"`
 	OutboundRTPPacketsDiscarded    uint64              `json:"outboundRTPPacketsDiscarded"`
 	OutboundRTCPPackets            uint64              `json:"outboundRTCPPackets"`
+
 	// deprecated
 	BytesReceived       uint64  `json:"bytesReceived" deprecated:"true"`
 	BytesSent           uint64  `json:"bytesSent" deprecated:"true"`

@@ -2,7 +2,6 @@ package rtpmpegts
 
 import (
 	"crypto/rand"
-	"fmt"
 
 	"github.com/pion/rtp"
 )
@@ -12,10 +11,6 @@ const (
 	defaultPayloadMaxSize = 1316 // (7 x 188)
 	payloadType           = 33
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func randUint32() (uint32, error) {
 	var b [4]byte
@@ -58,7 +53,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -69,13 +64,9 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes MPEG-TS packets into RTP packets.
+// tsPackets must contain at least 1 element, each element must contain exactly 188 bytes.
+// The method might panic otherwise.
 func (e *Encoder) Encode(tsPackets [][]byte) ([]*rtp.Packet, error) {
-	for _, pkt := range tsPackets {
-		if len(pkt) != mpegtsPacketSize {
-			return nil, fmt.Errorf("invalid MPEG-TS packet size: %d", len(pkt))
-		}
-	}
-
 	tsPacketCount := len(tsPackets)
 	maxTSPacketsPerRTPPacket := e.PayloadMaxSize / mpegtsPacketSize
 	rtpPacketCount := tsPacketCount / maxTSPacketsPerRTPPacket

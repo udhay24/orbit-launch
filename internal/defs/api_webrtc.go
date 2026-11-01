@@ -34,6 +34,7 @@ type APIWebRTCSession struct {
 	Path                      string                `json:"path"`
 	Query                     string                `json:"query"`
 	User                      string                `json:"user"`
+	ExpiresAt                 *time.Time            `json:"expiresAt"`
 	UserAgent                 string                `json:"userAgent"`
 	InboundBytes              uint64                `json:"inboundBytes"`
 	InboundRTPPackets         uint64                `json:"inboundRTPPackets"`
@@ -44,6 +45,7 @@ type APIWebRTCSession struct {
 	OutboundRTPPackets        uint64                `json:"outboundRTPPackets"`
 	OutboundRTCPPackets       uint64                `json:"outboundRTCPPackets"`
 	OutboundFramesDiscarded   uint64                `json:"outboundFramesDiscarded"`
+
 	// deprecated
 	BytesReceived       uint64  `json:"bytesReceived" deprecated:"true"`
 	BytesSent           uint64  `json:"bytesSent" deprecated:"true"`

@@ -65,11 +65,13 @@ type CertLoader struct {
 	cert                    *tls.Certificate
 	certMu                  sync.RWMutex
 
-	done chan struct{}
+	terminate chan struct{}
+	done      chan struct{}
 }
 
 // Initialize initializes a CertLoader.
 func (cl *CertLoader) Initialize() error {
+	cl.terminate = make(chan struct{})
 	cl.done = make(chan struct{})
 
 	if cl.AllowAuto && cl.KeyPath == autoKeyName && cl.CertPath == autoCertName {
@@ -78,6 +80,7 @@ func (cl *CertLoader) Initialize() error {
 			return err
 		}
 		if !watch {
+			close(cl.done)
 			return nil
 		}
 	} else {
@@ -147,28 +150,31 @@ func (cl *CertLoader) initializeAuto() (bool, error) {
 
 // Close closes a CertLoader and releases any underlying resources.
 func (cl *CertLoader) Close() {
-	close(cl.done)
+	close(cl.terminate)
+	<-cl.done
+
 	if cl.certWatcher != nil {
 		cl.certWatcher.Close() //nolint:errcheck
 	}
 	if cl.keyWatcher != nil {
 		cl.keyWatcher.Close() //nolint:errcheck
 	}
+
 	cl.certMu.Lock()
 	defer cl.certMu.Unlock()
 	cl.cert = nil
 }
 
-// GetCertificate returns a function that returns the certificate for use in a tls.Config.
-func (cl *CertLoader) GetCertificate() func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	return func(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
-		cl.certMu.RLock()
-		defer cl.certMu.RUnlock()
-		return cl.cert, nil
-	}
+// GetCertificate returns the certificate for use in a tls.Config.
+func (cl *CertLoader) GetCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	cl.certMu.RLock()
+	defer cl.certMu.RUnlock()
+	return cl.cert, nil
 }
 
 func (cl *CertLoader) watch() {
+	defer close(cl.done)
+
 	for {
 		select {
 		case <-cl.certWatcher.Watch():
@@ -197,7 +203,7 @@ func (cl *CertLoader) watch() {
 
 			cl.Parent.Log(logger.Info, "certificate reloaded after change to %s", cl.KeyPath)
 
-		case <-cl.done:
+		case <-cl.terminate:
 			return
 		}
 	}

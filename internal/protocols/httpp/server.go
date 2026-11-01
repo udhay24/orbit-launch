@@ -2,6 +2,7 @@
 package httpp
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log"
@@ -11,12 +12,14 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/bluenviron/mediamtx/internal/certloader"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
+)
+
+const (
+	shutdownTimeout = 2 * time.Second
 )
 
 type nilWriter struct{}
@@ -43,13 +46,18 @@ type Server struct {
 	ServerCert        string
 	ServerKey         string
 	AllowAutoCert     bool
+	GetCertificate    func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 	Handler           http.Handler
 	Parent            logger.Writer
+	OnListenError     func(context.Context, error)
 
-	ln      net.Listener
-	inner   *http.Server
-	loader  *certloader.CertLoader
-	tracker *handlerTracker
+	ctx       context.Context
+	ctxCancel context.CancelFunc
+	done      chan struct{}
+	ln        net.Listener
+	inner     *http.Server
+	loader    *certloader.CertLoader
+	tracker   *handlerTracker
 }
 
 // Initialize initializes a Server.
@@ -64,23 +72,32 @@ func (s *Server) Initialize() error {
 	var tlsConfig *tls.Config
 
 	if s.Encryption {
-		if s.ServerCert == "" {
-			return fmt.Errorf("server cert is missing")
-		}
+		var getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
-		s.loader = &certloader.CertLoader{
-			CertPath:  s.ServerCert,
-			KeyPath:   s.ServerKey,
-			AllowAuto: s.AllowAutoCert,
-			Parent:    s.Parent,
-		}
-		err := s.loader.Initialize()
-		if err != nil {
-			return err
+		if s.GetCertificate != nil {
+			getCertificate = s.GetCertificate
+		} else {
+			if s.ServerCert == "" {
+				return fmt.Errorf("server cert is missing")
+			}
+
+			s.loader = &certloader.CertLoader{
+				CertPath:  s.ServerCert,
+				KeyPath:   s.ServerKey,
+				AllowAuto: s.AllowAutoCert,
+				Parent:    s.Parent,
+			}
+			err := s.loader.Initialize()
+			if err != nil {
+				return err
+			}
+
+			getCertificate = s.loader.GetCertificate
 		}
 
 		tlsConfig = &tls.Config{
-			GetCertificate: s.loader.GetCertificate(),
+			GetCertificate: getCertificate,
+			NextProtos:     []string{"h2", "http/1.1"},
 		}
 	}
 
@@ -122,13 +139,10 @@ func (s *Server) Initialize() error {
 	}
 
 	if tlsConfig != nil {
-		err := http2.ConfigureServer(s.inner, &http2.Server{})
-		if err != nil {
-			if s.loader != nil {
-				s.loader.Close()
-			}
-			return err
-		}
+		protocols := new(http.Protocols)
+		protocols.SetHTTP1(true)
+		protocols.SetHTTP2(true)
+		s.inner.Protocols = protocols
 	}
 
 	listen := func(network string, address string) (net.Listener, error) {
@@ -189,15 +203,32 @@ func (s *Server) Initialize() error {
 		os.Chmod(address, 0o755) //nolint:errcheck
 	}
 
-	go s.inner.Serve(s.ln)
+	s.ctx, s.ctxCancel = context.WithCancel(context.Background())
+	s.done = make(chan struct{})
+	go s.run()
 
 	return nil
 }
 
+func (s *Server) run() {
+	defer close(s.done)
+
+	err := s.inner.Serve(s.ln)
+	if s.ctx.Err() == nil && s.OnListenError != nil {
+		s.OnListenError(s.ctx, err)
+	}
+}
+
 // Close closes all resources and waits for all routines to return.
 func (s *Server) Close() {
+	s.ctxCancel()
 	s.ln.Close()
-	s.inner.Close() //nolint:errcheck
+	<-s.done
+
+	ctx, ctxCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	s.inner.Shutdown(ctx) //nolint:errcheck
+	ctxCancel()
+
 	s.tracker.close()
 
 	if s.loader != nil {

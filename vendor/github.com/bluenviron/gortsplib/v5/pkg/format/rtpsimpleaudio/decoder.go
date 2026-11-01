@@ -1,6 +1,8 @@
 package rtpsimpleaudio
 
 import (
+	"fmt"
+
 	"github.com/pion/rtp"
 )
 
@@ -13,6 +15,11 @@ func (d *Decoder) Init() error {
 }
 
 // Decode decodes an audio frame from a RTP packet.
+// On success, the frame contains at least one byte.
 func (d *Decoder) Decode(pkt *rtp.Packet) ([]byte, error) {
+	if len(pkt.Payload) == 0 {
+		return nil, fmt.Errorf("payload is too short")
+	}
+
 	return pkt.Payload, nil
 }

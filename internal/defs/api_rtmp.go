@@ -32,10 +32,12 @@ type APIRTMPConn struct {
 	Path                    string           `json:"path"`
 	Query                   string           `json:"query"`
 	User                    string           `json:"user"`
+	ExpiresAt               *time.Time       `json:"expiresAt"`
 	UserAgent               string           `json:"userAgent"`
 	InboundBytes            uint64           `json:"inboundBytes"`
 	OutboundBytes           uint64           `json:"outboundBytes"`
 	OutboundFramesDiscarded uint64           `json:"outboundFramesDiscarded"`
+
 	// deprecated
 	BytesReceived uint64 `json:"bytesReceived" deprecated:"true"`
 	BytesSent     uint64 `json:"bytesSent" deprecated:"true"`

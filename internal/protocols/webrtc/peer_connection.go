@@ -16,7 +16,7 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/transport/v4"
+	"github.com/pion/transport/v5"
 	"github.com/pion/webrtc/v4"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
@@ -27,7 +27,7 @@ const (
 	twccExtensionURI = "http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"
 )
 
-func interfaceIPs(interfaceList []string) ([]string, error) {
+func interfaceIPs(interfaceList []string, excludeList []string) ([]string, error) {
 	intfs, err := net.Interfaces()
 	if err != nil {
 		return nil, err
@@ -36,6 +36,9 @@ func interfaceIPs(interfaceList []string) ([]string, error) {
 	var ips []string
 
 	for _, intf := range intfs {
+		if slices.Contains(excludeList, intf.Name) {
+			continue
+		}
 		if len(interfaceList) == 0 || slices.Contains(interfaceList, intf.Name) {
 			var addrs []net.Addr
 			addrs, err = intf.Addrs()
@@ -171,19 +174,21 @@ type trackRecvPair struct {
 
 // PeerConnection is a wrapper around webrtc.PeerConnection.
 type PeerConnection struct {
-	Net                   transport.Net
-	LocalRandomUDP        bool
-	ICEUDPMux             ice.UDPMux
-	ICETCPMux             *TCPMuxWrapper
-	ICEServers            []webrtc.ICEServer
-	IPsFromInterfaces     bool
-	IPsFromInterfacesList []string
-	AdditionalHosts       []string
-	STUNGatherTimeout     time.Duration
-	Publish               bool
-	OutboundTracks        []*OutboundTrack
-	OutboundDataChannels  []*OutboundDataChannel
-	Log                   logger.Writer
+	Net                          transport.Net
+	LocalRandomUDP               bool
+	ICEUDPMux                    ice.UDPMux
+	ICETCPMux                    *TCPMuxWrapper
+	ICEServers                   []webrtc.ICEServer
+	IPsFromInterfaces            bool
+	IPsFromInterfacesList        []string
+	IPsFromInterfacesExcludeList []string
+	AdditionalHosts              []string
+	STUNGatherTimeout            time.Duration
+	SupportsIPv6                 bool
+	Publish                      bool
+	OutboundTracks               []*OutboundTrack
+	OutboundDataChannels         []*OutboundDataChannel
+	Log                          logger.Writer
 
 	wr               *webrtc.PeerConnection
 	ctx              context.Context
@@ -217,13 +222,16 @@ func (co *PeerConnection) Start() error {
 	settingsEngine.SetIncludeLoopbackCandidate(true)
 
 	// always enable TCP since we might be the client of a remote TCP listener
-	networkTypes := []webrtc.NetworkType{
-		webrtc.NetworkTypeTCP4,
-		webrtc.NetworkTypeTCP6,
+	networkTypes := []webrtc.NetworkType{webrtc.NetworkTypeTCP4}
+	if co.SupportsIPv6 {
+		networkTypes = append(networkTypes, webrtc.NetworkTypeTCP6)
 	}
 
 	if co.LocalRandomUDP || co.ICEUDPMux != nil || len(co.ICEServers) != 0 {
-		networkTypes = append(networkTypes, webrtc.NetworkTypeUDP4, webrtc.NetworkTypeUDP6)
+		networkTypes = append(networkTypes, webrtc.NetworkTypeUDP4)
+		if co.SupportsIPv6 {
+			networkTypes = append(networkTypes, webrtc.NetworkTypeUDP6)
+		}
 	}
 
 	settingsEngine.SetNetworkTypes(networkTypes)
@@ -239,6 +247,12 @@ func (co *PeerConnection) Start() error {
 	settingsEngine.SetSTUNGatherTimeout(co.STUNGatherTimeout)
 
 	settingsEngine.SetNet(co.Net)
+
+	// Do not generate mDNS candidates and do not use mDNS candidates of remote peers.
+	// * they sometimes require a large CPU portion
+	// * they are not involved in any connectivity method mentioned in the documentation
+	// * they work in local networks only
+	settingsEngine.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 
 	mediaEngine := &webrtc.MediaEngine{}
 
@@ -285,10 +299,8 @@ func (co *PeerConnection) Start() error {
 		// Otherwise audio is muted on Firefox and Chrome.
 		if !videoSetupped {
 			err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-				RTPCodecCapability: webrtc.RTPCodecCapability{
-					MimeType:  webrtc.MimeTypeVP8,
-					ClockRate: 90000,
-				},
+				MimeType:    webrtc.MimeTypeVP8,
+				ClockRate:   90000,
 				PayloadType: 96,
 			}, webrtc.RTPCodecTypeVideo)
 			if err != nil {
@@ -476,7 +488,7 @@ func (co *PeerConnection) removeUnwantedCandidates(firstMedia *sdp.MediaDescript
 	var allowedIPs []string
 	if co.IPsFromInterfaces {
 		var err error
-		allowedIPs, err = interfaceIPs(co.IPsFromInterfacesList)
+		allowedIPs, err = interfaceIPs(co.IPsFromInterfacesList, co.IPsFromInterfacesExcludeList)
 		if err != nil {
 			return err
 		}
@@ -588,11 +600,18 @@ func (co *PeerConnection) addAdditionalCandidates(firstMedia *sdp.MediaDescripti
 
 func (co *PeerConnection) filterLocalDescription(desc *webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
 	var psdp sdp.SessionDescription
-	psdp.Unmarshal([]byte(desc.SDP)) //nolint:errcheck
+	err := psdp.Unmarshal([]byte(desc.SDP))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(psdp.MediaDescriptions) == 0 {
+		return nil, fmt.Errorf("local description has no media sections")
+	}
 
 	firstMedia := psdp.MediaDescriptions[0]
 
-	err := co.removeUnwantedCandidates(firstMedia)
+	err = co.removeUnwantedCandidates(firstMedia)
 	if err != nil {
 		return nil, err
 	}

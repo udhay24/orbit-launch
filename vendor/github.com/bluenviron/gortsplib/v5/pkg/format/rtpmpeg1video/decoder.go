@@ -1,6 +1,7 @@
 package rtpmpeg1video
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -28,6 +29,21 @@ func joinFragments(fragments [][]byte, size int) []byte {
 		n += copy(ret[n:], p)
 	}
 	return ret
+}
+
+func validateFrame(frame []byte) error {
+	for {
+		if len(frame) < 4 {
+			return fmt.Errorf("frame is too short")
+		}
+
+		end := bytes.Index(frame[4:], []byte{0, 0, 1})
+		if end >= 0 {
+			frame = frame[end+4:]
+		} else {
+			return nil
+		}
+	}
 }
 
 // Decoder is a RTP/MPEG-1/2 Video decoder.
@@ -130,6 +146,7 @@ func (d *Decoder) decodeSlice(pkt *rtp.Packet) ([]byte, error) {
 }
 
 // Decode decodes frames from a RTP packet.
+// On success, the frame contains at least one byte.
 func (d *Decoder) Decode(pkt *rtp.Packet) ([]byte, error) {
 	slice, err := d.decodeSlice(pkt)
 	if err != nil {
@@ -158,6 +175,11 @@ func (d *Decoder) Decode(pkt *rtp.Packet) ([]byte, error) {
 	// do not reuse sliceBuffer to avoid race conditions
 	d.sliceBuffer = nil
 	d.sliceBufferSize = 0
+
+	err = validateFrame(ret)
+	if err != nil {
+		return nil, err
+	}
 
 	return ret, nil
 }

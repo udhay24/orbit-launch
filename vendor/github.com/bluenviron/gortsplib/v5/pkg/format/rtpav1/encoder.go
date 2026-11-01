@@ -12,10 +12,6 @@ const (
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 )
 
-func ptrOf[T any](v T) *T {
-	return &v
-}
-
 func randUint32() (uint32, error) {
 	var b [4]byte
 	_, err := rand.Read(b[:])
@@ -60,7 +56,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -71,6 +67,8 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes OBUs into RTP packets.
+// OBUs must contain at least 1 element, each element must contain at least 1 byte.
+// The method might panic otherwise.
 func (e *Encoder) Encode(obus [][]byte) ([]*rtp.Packet, error) {
 	var curPacket *rtp.Packet
 	var packets []*rtp.Packet
@@ -137,11 +135,16 @@ func (e *Encoder) Encode(obus [][]byte) ([]*rtp.Packet, error) {
 				break
 			}
 
+			// the remaining space can be too small to hold any byte of the OBU.
+			// in that case the OBU is not fragmented and Y / Z must not be set.
+			fragmented := false
+
 			if omitSize {
 				if avail > 0 {
 					curPacket.Payload[0] |= byte((obusInPacket + 1) << 4) // W
 					curPacket.Payload = append(curPacket.Payload, obu[:avail]...)
 					obu = obu[avail:]
+					fragmented = true
 				}
 			} else {
 				if avail > maxFragmentedLEBSize {
@@ -154,11 +157,12 @@ func (e *Encoder) Encode(obus [][]byte) ([]*rtp.Packet, error) {
 					curPacket.Payload = append(curPacket.Payload, buf...)
 					curPacket.Payload = append(curPacket.Payload, obu[:fragmentLen]...)
 					obu = obu[fragmentLen:]
+					fragmented = true
 				}
 			}
 
-			finalizeCurPacket(true)
-			createNewPacket(true)
+			finalizeCurPacket(fragmented)
+			createNewPacket(fragmented)
 		}
 	}
 

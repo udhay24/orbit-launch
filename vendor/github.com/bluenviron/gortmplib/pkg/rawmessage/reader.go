@@ -47,23 +47,23 @@ func (rc *readerChunkStream) abortMessage() {
 }
 
 func (rc *readerChunkStream) readChunk(c chunk.Chunk, bodySize uint32, hasExtendedTimestamp bool) error {
-	err := c.Read(rc.mr.br, bodySize, hasExtendedTimestamp)
+	err := c.Read(rc.mr.bufr, bodySize, hasExtendedTimestamp)
 	if err != nil {
 		return err
 	}
 
 	// check if an ack is needed
 	if rc.mr.ackWindowSize != 0 {
-		count := uint32(rc.mr.bcr.Count())
-		diff := count - rc.mr.lastAckCount
+		count := uint32(rc.mr.BCR.Count())
+		diff := count - rc.mr.LastAckCount
 
-		if diff > (rc.mr.ackWindowSize) {
-			err = rc.mr.onAckNeeded(count)
+		if diff > rc.mr.ackWindowSize {
+			err = rc.mr.OnAckNeeded(count)
 			if err != nil {
 				return err
 			}
 
-			rc.mr.lastAckCount += (rc.mr.ackWindowSize)
+			rc.mr.LastAckCount += rc.mr.ackWindowSize
 		}
 	}
 
@@ -248,13 +248,14 @@ func (rc *readerChunkStream) readMessage(typ byte) (*Message, error) {
 
 // Reader is a raw message reader.
 type Reader struct {
-	bcr         *bytecounter.Reader
-	onAckNeeded func(uint32) error
+	BR           io.Reader
+	BCR          *bytecounter.Reader
+	OnAckNeeded  func(uint32) error
+	LastAckCount uint32
 
-	br            *bufio.Reader
+	bufr          *bufio.Reader
 	chunkSize     uint32
 	ackWindowSize uint32
-	lastAckCount  uint32
 	msg           Message
 	c0            chunk.Chunk0
 	c1            chunk.Chunk1
@@ -263,19 +264,28 @@ type Reader struct {
 	chunkStreams  map[byte]*readerChunkStream
 }
 
+// Initialize initializes the Reader.
+func (r *Reader) Initialize() {
+	r.bufr = bufio.NewReader(r.BR)
+	r.chunkSize = 128
+	r.chunkStreams = make(map[byte]*readerChunkStream)
+}
+
 // NewReader allocates a Reader.
+//
+// Deprecated: use Initialize() instead.
 func NewReader(
-	r io.Reader,
+	br io.Reader,
 	bcr *bytecounter.Reader,
 	onAckNeeded func(uint32) error,
 ) *Reader {
-	return &Reader{
-		bcr:          bcr,
-		br:           bufio.NewReader(r),
-		onAckNeeded:  onAckNeeded,
-		chunkSize:    128,
-		chunkStreams: make(map[byte]*readerChunkStream),
+	r := &Reader{
+		BR:          br,
+		BCR:         bcr,
+		OnAckNeeded: onAckNeeded,
 	}
+	r.Initialize()
+	return r
 }
 
 // SetChunkSize sets the maximum chunk size.
@@ -310,7 +320,7 @@ func (r *Reader) AbortChunkStream(v uint32) {
 // Read reads a Message.
 func (r *Reader) Read() (*Message, error) {
 	for {
-		byt, err := r.br.ReadByte()
+		byt, err := r.bufr.ReadByte()
 		if err != nil {
 			return nil, err
 		}
@@ -323,32 +333,32 @@ func (r *Reader) Read() (*Message, error) {
 		// since it expects to re-read the basic header from the stream.
 		if chunkStreamID == 0 {
 			// 2-byte form: real ID = next byte + 64
-			byt2, err := r.br.ReadByte()
+			byt2, err := r.bufr.ReadByte()
 			if err != nil {
 				return nil, err
 			}
 			chunkStreamID = byt2 + 64
 			// Prepend synthetic basic header for chunk.Read()
 			synthByte := (typ << 6) | 2
-			r.br = bufio.NewReader(io.MultiReader(
+			r.bufr = bufio.NewReader(io.MultiReader(
 				bytes.NewReader([]byte{synthByte}),
-				r.br,
+				r.bufr,
 			))
 		} else if chunkStreamID == 1 {
 			// 3-byte form: real ID = next 2 bytes (little-endian) + 64
 			buf := make([]byte, 2)
-			_, err := io.ReadFull(r.br, buf)
+			_, err := io.ReadFull(r.bufr, buf)
 			if err != nil {
 				return nil, err
 			}
 			chunkStreamID = buf[0] + 64
 			synthByte := (typ << 6) | 2
-			r.br = bufio.NewReader(io.MultiReader(
+			r.bufr = bufio.NewReader(io.MultiReader(
 				bytes.NewReader([]byte{synthByte}),
-				r.br,
+				r.bufr,
 			))
 		} else {
-			r.br.UnreadByte() //nolint:errcheck
+			r.bufr.UnreadByte() //nolint:errcheck
 		}
 
 		rc, ok := r.chunkStreams[chunkStreamID]

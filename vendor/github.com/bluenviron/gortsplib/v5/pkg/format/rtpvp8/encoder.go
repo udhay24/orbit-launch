@@ -2,7 +2,6 @@ package rtpvp8
 
 import (
 	"crypto/rand"
-	"fmt"
 
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
@@ -12,10 +11,6 @@ const (
 	rtpVersion            = 2
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func randUint32() (uint32, error) {
 	var b [4]byte
@@ -62,7 +57,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -73,10 +68,12 @@ func (e *Encoder) Init() error {
 }
 
 // Encode encodes a VP8 frame into RTP/VP8 packets.
+// Frame must contain at least 1 byte.
+// The method might panic otherwise.
 func (e *Encoder) Encode(frame []byte) ([]*rtp.Packet, error) {
 	payloads := e.vp.Payload(uint16(e.PayloadMaxSize), frame)
 	if payloads == nil {
-		return nil, fmt.Errorf("payloader failed")
+		panic("should not happen")
 	}
 
 	plen := len(payloads)

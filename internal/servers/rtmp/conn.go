@@ -12,6 +12,7 @@ import (
 	"github.com/bluenviron/gortmplib"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
@@ -48,6 +49,7 @@ type conn struct {
 	pathName  string
 	query     string
 	user      string
+	expiresAt *time.Time
 	userAgent string
 	reader    *stream.Reader
 }
@@ -106,24 +108,31 @@ func (c *conn) run() { //nolint:dupl
 }
 
 func (c *conn) runInner() error {
-	readerErr := make(chan error)
-	go func() {
-		readerErr <- c.runReader()
-	}()
+	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
 
-	select {
-	case err := <-readerErr:
-		c.nconn.Close()
-		return err
+	errGroup.Go(func() error {
+		select {
+		case <-c.ctx.Done():
+			return fmt.Errorf("terminated")
+		case <-errGroupCtx.Done():
+			return fmt.Errorf("terminated")
+		}
+	})
 
-	case <-c.ctx.Done():
+	errGroup.Go(func() error {
+		<-errGroupCtx.Done()
 		c.nconn.Close()
-		<-readerErr
 		return errors.New("terminated")
-	}
+	})
+
+	errGroup.Go(func() error {
+		return c.runReader(errGroupCtx, errGroup)
+	})
+
+	return errGroup.Wait()
 }
 
-func (c *conn) runReader() error {
+func (c *conn) runReader(errGroupCtx context.Context, errGroup *errgroup.Group) error {
 	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
 	c.nconn.SetWriteDeadline(time.Now().Add(time.Duration(c.writeTimeout)))
 
@@ -144,7 +153,7 @@ func (c *conn) runReader() error {
 	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
 
 	t1 := time.Now()
-	err = conn.Accept()
+	err = conn.AcceptConn()
 	if err != nil {
 		c.Log(logger.Info, "accept failed after %v: %v", time.Since(t1), err)
 		return err
@@ -157,12 +166,12 @@ func (c *conn) runReader() error {
 	c.mutex.Unlock()
 
 	if !conn.Publish {
-		return c.runRead()
+		return c.runRead(errGroupCtx, errGroup)
 	}
-	return c.runPublish()
+	return c.runPublish(errGroupCtx, errGroup)
 }
 
-func (c *conn) runRead() error {
+func (c *conn) runRead(errGroupCtx context.Context, errGroup *errgroup.Group) error {
 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
 	query := c.rconn.URL.Query()
 
@@ -183,21 +192,45 @@ func (c *conn) runRead() error {
 		},
 	})
 	if err != nil {
+		if _, ok := errors.AsType[*auth.Error](err); ok {
+			rejectErr := c.rconn.RejectAction()
+			if rejectErr != nil {
+				return rejectErr
+			}
+		}
+
 		return err
 	}
 
 	defer res.Path.RemoveReader(defs.PathRemoveReaderReq{Author: c})
 
+	if res.AuthRes.ExpiresAt != nil {
+		errGroup.Go(func() error {
+			select {
+			case <-time.After(time.Until(*res.AuthRes.ExpiresAt)):
+				return errors.New("connection expired")
+			case <-errGroupCtx.Done():
+				return fmt.Errorf("terminated")
+			}
+		})
+	}
+
+	err = c.rconn.AcceptAction()
+	if err != nil {
+		return err
+	}
+
 	c.mutex.Lock()
 	c.state = defs.APIRTMPConnStateRead
 	c.pathName = pathName
 	c.query = c.rconn.URL.RawQuery
-	c.user = res.User
+	c.user = res.AuthRes.User
+	c.expiresAt = res.AuthRes.ExpiresAt
 	c.mutex.Unlock()
 
 	r := &stream.Reader{Parent: c}
 
-	err = rtmp.FromStream(
+	w, err := rtmp.FromStream(
 		res.Stream.OrigDesc,
 		res.Stream.OutDescCopy(),
 		r,
@@ -231,44 +264,27 @@ func (c *conn) runRead() error {
 	c.reader = r
 	c.mutex.Unlock()
 
-	select {
-	case <-c.ctx.Done():
-		return fmt.Errorf("terminated")
+	errGroup.Go(func() error {
+		return w.Wait()
+	})
 
+	select {
 	case err = <-r.Error():
 		return err
+	case <-errGroupCtx.Done():
+		return fmt.Errorf("terminated")
 	}
 }
 
-func (c *conn) runPublish() error {
+func (c *conn) runPublish(errGroupCtx context.Context, errGroup *errgroup.Group) error {
 	pathName := strings.TrimLeft(c.rconn.URL.Path, "/")
 	query := c.rconn.URL.Query()
 
 	// Reset read deadline for the publish setup phase.
 	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
 
-	r := &gortmplib.Reader{
-		Conn: c.rconn,
-	}
-	err := r.Initialize()
-	if err != nil {
-		return err
-	}
-
-	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
-
-	var subStream *stream.SubStream
-
-	medias, err := rtmp.ToStream(r, &subStream)
-	if err != nil {
-		return err
-	}
-
-	res, err := c.pathManager.AddPublisher(defs.PathAddPublisherReq{
-		Author:        c,
-		Desc:          &description.Session{Medias: medias},
-		UseRTPPackets: false,
-		ReplaceNTP:    true,
+	res1, err := c.pathManager.FindPathConf(defs.PathFindPathConfReq{
+		Author: c,
 		AccessRequest: defs.PathAccessRequest{
 			Name:      pathName,
 			Query:     c.rconn.URL.RawQuery,
@@ -285,18 +301,76 @@ func (c *conn) runPublish() error {
 		},
 	})
 	if err != nil {
+		if _, ok := errors.AsType[*auth.Error](err); ok {
+			rejectErr := c.rconn.RejectAction()
+			if rejectErr != nil {
+				return rejectErr
+			}
+		}
+
 		return err
 	}
 
-	defer res.Path.RemovePublisher(defs.PathRemovePublisherReq{Author: c})
+	if res1.AuthRes.ExpiresAt != nil {
+		errGroup.Go(func() error {
+			select {
+			case <-time.After(time.Until(*res1.AuthRes.ExpiresAt)):
+				return errors.New("connection expired")
+			case <-errGroupCtx.Done():
+				return fmt.Errorf("terminated")
+			}
+		})
+	}
 
-	subStream = res.SubStream
+	err = c.rconn.AcceptAction()
+	if err != nil {
+		return err
+	}
+
+	r := &gortmplib.Reader{
+		Conn: c.rconn,
+	}
+	err = r.Initialize()
+	if err != nil {
+		return err
+	}
+
+	c.nconn.SetReadDeadline(time.Now().Add(time.Duration(c.readTimeout)))
+
+	var subStream *stream.SubStream
+
+	medias, err := rtmp.ToStream(r, &subStream)
+	if err != nil {
+		return err
+	}
+
+	res2, err := c.pathManager.AddPublisher(defs.PathAddPublisherReq{
+		Author:        c,
+		Desc:          &description.Session{Medias: medias},
+		UseRTPPackets: false,
+		ReplaceNTP:    true,
+		ConfToCompare: res1.Conf,
+		AccessRequest: defs.PathAccessRequest{
+			Name:     pathName,
+			Query:    c.rconn.URL.RawQuery,
+			Publish:  true,
+			SkipAuth: true,
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	defer res2.Path.RemovePublisher(defs.PathRemovePublisherReq{Author: c})
+
+	subStream = res2.SubStream
 
 	c.mutex.Lock()
 	c.state = defs.APIRTMPConnStatePublish
 	c.pathName = pathName
 	c.query = c.rconn.URL.RawQuery
-	c.user = res.User
+	c.user = res1.AuthRes.User
+	c.expiresAt = res1.AuthRes.ExpiresAt
 	c.mutex.Unlock()
 
 	c.nconn.SetWriteDeadline(time.Time{})
@@ -361,6 +435,7 @@ func (c *conn) apiItem() *defs.APIRTMPConn {
 		Path:                    c.pathName,
 		Query:                   c.query,
 		User:                    c.user,
+		ExpiresAt:               c.expiresAt,
 		UserAgent:               c.userAgent,
 		InboundBytes:            bytesReceived,
 		OutboundBytes:           bytesSent,

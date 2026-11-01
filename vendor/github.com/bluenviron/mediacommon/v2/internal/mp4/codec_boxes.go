@@ -48,17 +48,13 @@ func av1FindSequenceHeader(buf []byte) ([]byte, error) {
 }
 
 func h264FindParams(avcc *amp4.AVCDecoderConfiguration) ([]byte, []byte, error) {
-	if len(avcc.SequenceParameterSets) == 0 {
-		return nil, nil, fmt.Errorf("H264 SPS not provided")
+	if len(avcc.SequenceParameterSets) > 1 || len(avcc.PictureParameterSets) > 1 {
+		return nil, nil, fmt.Errorf("multiple H264 parameters are not supported")
 	}
-	if len(avcc.SequenceParameterSets) > 1 {
-		return nil, nil, fmt.Errorf("multiple H264 SPS are not supported")
-	}
-	if len(avcc.PictureParameterSets) == 0 {
-		return nil, nil, fmt.Errorf("H264 PPS not provided")
-	}
-	if len(avcc.PictureParameterSets) > 1 {
-		return nil, nil, fmt.Errorf("multiple H264 PPS are not supported")
+
+	if len(avcc.SequenceParameterSets) == 0 || len(avcc.SequenceParameterSets[0].NALUnit) == 0 ||
+		len(avcc.PictureParameterSets) == 0 || len(avcc.PictureParameterSets[0].NALUnit) == 0 {
+		return nil, nil, fmt.Errorf("H264 parameters not provided")
 	}
 
 	sps := avcc.SequenceParameterSets[0].NALUnit
@@ -68,33 +64,39 @@ func h264FindParams(avcc *amp4.AVCDecoderConfiguration) ([]byte, []byte, error) 
 		return nil, nil, fmt.Errorf("unable to parse H264 SPS: %w", err)
 	}
 
-	pps := avcc.PictureParameterSets[0].NALUnit
-	if len(pps) == 0 {
-		return nil, nil, fmt.Errorf("invalid H264 PPS")
-	}
-
-	return sps, pps, nil
+	return sps, avcc.PictureParameterSets[0].NALUnit, nil
 }
 
-func h265FindParams(params []amp4.HEVCNaluArray) ([]byte, []byte, []byte, error) {
+func h265FindParams(hvcc *amp4.HvcC) ([]byte, []byte, []byte, error) {
 	var vps []byte
 	var sps []byte
 	var pps []byte
 
-	for _, arr := range params {
+	for _, arr := range hvcc.NaluArrays {
 		switch h265.NALUType(arr.NaluType) {
 		case h265.NALUType_VPS_NUT, h265.NALUType_SPS_NUT, h265.NALUType_PPS_NUT:
-			if arr.NumNalus != 1 {
-				return nil, nil, nil, fmt.Errorf("multiple H265 VPS/SPS/PPS are not supported")
+			if len(arr.Nalus) != 1 {
+				return nil, nil, nil, fmt.Errorf("multiple H265 parameters are not supported")
+			}
+
+			if len(arr.Nalus[0].NALUnit) == 0 {
+				return nil, nil, nil, fmt.Errorf("H265 parameter not provided")
 			}
 
 			switch h265.NALUType(arr.NaluType) {
 			case h265.NALUType_VPS_NUT:
+				if vps != nil {
+					return nil, nil, nil, fmt.Errorf("multiple H265 VPS are not supported")
+				}
 				vps = arr.Nalus[0].NALUnit
 
 			case h265.NALUType_SPS_NUT:
+				if sps != nil {
+					return nil, nil, nil, fmt.Errorf("multiple H265 SPS are not supported")
+				}
 				sps = arr.Nalus[0].NALUnit
 
+				// a valid SPS is required to marshal the codec back
 				var spsp h265.SPS
 				err := spsp.Unmarshal(sps)
 				if err != nil {
@@ -102,21 +104,16 @@ func h265FindParams(params []amp4.HEVCNaluArray) ([]byte, []byte, []byte, error)
 				}
 
 			case h265.NALUType_PPS_NUT:
+				if pps != nil {
+					return nil, nil, nil, fmt.Errorf("multiple H265 PPS are not supported")
+				}
 				pps = arr.Nalus[0].NALUnit
 			}
 		}
 	}
 
-	if len(vps) == 0 {
-		return nil, nil, nil, fmt.Errorf("H265 VPS not provided")
-	}
-
-	if len(sps) == 0 {
-		return nil, nil, nil, fmt.Errorf("H265 SPS not provided")
-	}
-
-	if len(pps) == 0 {
-		return nil, nil, nil, fmt.Errorf("H265 PPS not provided")
+	if vps == nil || sps == nil || pps == nil {
+		return nil, nil, nil, fmt.Errorf("H265 parameters not provided")
 	}
 
 	return vps, sps, pps, nil
@@ -278,7 +275,7 @@ func (r *CodecBoxesReader) Read(h *amp4.ReadHandle) (any, error) {
 		}
 		hvcc := box.(*amp4.HvcC)
 
-		vps, sps, pps, err := h265FindParams(hvcc.NaluArrays)
+		vps, sps, pps, err := h265FindParams(hvcc)
 		if err != nil {
 			return nil, err
 		}
@@ -533,7 +530,7 @@ func (r *CodecBoxesReader) Read(h *amp4.ReadHandle) (any, error) {
 		r.Codec = &codecs.AC3{
 			SampleRate:   r.sampleRate,
 			ChannelCount: r.channelCount,
-			Fscod:        dac3.Fscod,
+			Fscod:        dac3.Fscod, //nolint:staticcheck
 			Bsid:         dac3.Bsid,
 			Bsmod:        dac3.Bsmod,
 			Acmod:        dac3.Acmod,
@@ -772,8 +769,8 @@ func WriteCodecBoxes(w *Writer, codec codecs.Codec, trackID int, info *CodecInfo
 			BitDepthChromaMinus8: uint8(info.H265SPS.BitDepthChromaMinus8),
 			// AvgFrameRate
 			// ConstantFrameRate
-			NumTemporalLayers: 1,
-			// TemporalIdNested
+			NumTemporalLayers:  (info.H265SPS.MaxSubLayersMinus1 + 1),
+			TemporalIdNested:   boolToUint8(info.H265SPS.TemporalIDNestingFlag),
 			LengthSizeMinusOne: 3,
 			NumOfNaluArrays:    3,
 			NaluArrays: []amp4.HEVCNaluArray{

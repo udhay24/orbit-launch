@@ -2,7 +2,6 @@ package rtplpcm
 
 import (
 	"crypto/rand"
-	"fmt"
 
 	"github.com/pion/rtp"
 )
@@ -11,10 +10,6 @@ const (
 	rtpVersion            = 2
 	defaultPayloadMaxSize = 1450 // 1500 (UDP MTU) - 20 (IP header) - 8 (UDP header) - 12 (RTP header) - 10 (SRTP overhead)
 )
-
-func ptrOf[T any](v T) *T {
-	return &v
-}
 
 func randUint32() (uint32, error) {
 	var b [4]byte
@@ -68,7 +63,7 @@ func (e *Encoder) Init() error {
 		if err != nil {
 			return err
 		}
-		e.InitialSequenceNumber = ptrOf(uint16(v))
+		e.InitialSequenceNumber = new(uint16(v))
 	}
 	if e.PayloadMaxSize == 0 {
 		e.PayloadMaxSize = defaultPayloadMaxSize
@@ -89,12 +84,10 @@ func (e *Encoder) packetCount(slen int) int {
 }
 
 // Encode encodes audio samples into RTP packets.
+// Samples must contain at least 1 byte.
+// The method might panic otherwise.
 func (e *Encoder) Encode(samples []byte) ([]*rtp.Packet, error) {
 	slen := len(samples)
-	if (slen % e.sampleSize) != 0 {
-		return nil, fmt.Errorf("invalid samples")
-	}
-
 	packetCount := e.packetCount(slen)
 	ret := make([]*rtp.Packet, packetCount)
 	pos := 0

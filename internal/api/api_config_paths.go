@@ -1,7 +1,6 @@
 package api //nolint:revive
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 
@@ -13,9 +12,7 @@ import (
 )
 
 func (a *API) onConfigPathsList(ctx *gin.Context) {
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
+	c := conf.Redact(a.Parent.APIConfigSnapshot())
 
 	data := &defs.APIPathConfList{
 		Items: make([]conf.Path, len(c.Paths)),
@@ -43,9 +40,7 @@ func (a *API) onConfigPathsGet(ctx *gin.Context) {
 		return
 	}
 
-	a.mutex.RLock()
-	c := a.Conf
-	a.mutex.RUnlock()
+	c := conf.Redact(a.Parent.APIConfigSnapshot())
 
 	p, ok := c.Paths[confName]
 	if !ok {
@@ -70,25 +65,11 @@ func (a *API) onConfigPathsAdd(ctx *gin.Context) { //nolint:dupl
 		return
 	}
 
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err = newConf.AddPath(confName, &p)
+	err = a.Parent.APIConfigPathsAdd(a.ctx, confName, p)
 	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
+		a.writeConfigWriteError(ctx, err)
 		return
 	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
 
 	a.writeOK(ctx)
 }
@@ -107,29 +88,11 @@ func (a *API) onConfigPathsPatch(ctx *gin.Context) { //nolint:dupl
 		return
 	}
 
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err = newConf.PatchPath(confName, &p)
+	err = a.Parent.APIConfigPathsPatch(a.ctx, confName, p)
 	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusBadRequest, err)
-		}
+		a.writeConfigWriteError(ctx, err)
 		return
 	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
 
 	a.writeOK(ctx)
 }
@@ -148,29 +111,11 @@ func (a *API) onConfigPathsReplace(ctx *gin.Context) { //nolint:dupl
 		return
 	}
 
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err = newConf.ReplacePath(confName, &p)
+	err = a.Parent.APIConfigPathsReplace(a.ctx, confName, p)
 	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusBadRequest, err)
-		}
+		a.writeConfigWriteError(ctx, err)
 		return
 	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
 
 	a.writeOK(ctx)
 }
@@ -182,29 +127,11 @@ func (a *API) onConfigPathsDelete(ctx *gin.Context) {
 		return
 	}
 
-	a.mutex.Lock()
-	defer a.mutex.Unlock()
-
-	newConf := a.Conf.Clone()
-
-	err := newConf.RemovePath(confName)
+	err := a.Parent.APIConfigPathsDelete(a.ctx, confName)
 	if err != nil {
-		if errors.Is(err, conf.ErrPathNotFound) {
-			a.writeError(ctx, http.StatusNotFound, err)
-		} else {
-			a.writeError(ctx, http.StatusBadRequest, err)
-		}
+		a.writeConfigWriteError(ctx, err)
 		return
 	}
-
-	err = newConf.Validate(nil)
-	if err != nil {
-		a.writeError(ctx, http.StatusBadRequest, err)
-		return
-	}
-
-	a.Conf = newConf
-	a.Parent.APIConfigSet(newConf)
 
 	a.writeOK(ctx)
 }

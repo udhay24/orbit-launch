@@ -14,8 +14,10 @@ import (
 func TestUnitRemuxer(t *testing.T) {
 	for _, ca := range []string{
 		"av1",
+		"av1-padding-only",
 		"h265",
 		"h264",
+		"h264-recovery-point",
 		"mpeg4video",
 	} {
 		t.Run(ca, func(t *testing.T) {
@@ -29,9 +31,14 @@ func TestUnitRemuxer(t *testing.T) {
 				inputPayload = unit.PayloadAV1{
 					{0x10},       // Temporal Delimiter
 					{0x08, 0x01}, // Sequence Header
+					{0x78},       // Padding
 					{0x10},       // Temporal Delimiter
 				}
 				expectedPayload = unit.PayloadAV1{{0x08, 0x01}}
+
+			case "av1-padding-only":
+				forma = &format.AV1{}
+				inputPayload = unit.PayloadAV1{{0x78}} // Padding
 
 			case "h265":
 				vps := []byte{0x40, 0x01, 0x0c}
@@ -76,6 +83,28 @@ func TestUnitRemuxer(t *testing.T) {
 					sps,
 					pps,
 					{0x65, 0x01},
+				}
+
+			case "h264-recovery-point":
+				sps := []byte{0x67, 0x64, 0x00, 0x20}
+				pps := []byte{0x68, 0xee, 0x3c, 0x80}
+				sei := []byte{0x06, 0x06, 0x01, 0xc4, 0x80} // recovery point
+
+				forma = &format.H264{
+					PacketizationMode: 1,
+					SPS:               sps,
+					PPS:               pps,
+				}
+				inputPayload = unit.PayloadH264{
+					{0x09, 0xf0}, // AUD
+					sei,
+					{0x41, 0xe0, 0x04}, // non-IDR
+				}
+				expectedPayload = unit.PayloadH264{
+					sps,
+					pps,
+					sei,
+					{0x41, 0xe0, 0x04},
 				}
 
 			case "mpeg4video":

@@ -224,16 +224,12 @@ func handlePlayer(sc *gortmplib.ServerConn) error {
 
 	sc.RW.(net.Conn).SetReadDeadline(time.Time{})
 
-	for {
-		buf := make([]byte, 1024)
-		_, err = sc.RW.Read(buf)
-		if err != nil {
-			return err
-		}
-	}
+	return w.Wait()
 }
 
 func handleConnInner(conn net.Conn) error {
+	defer conn.Close()
+
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	sc := &gortmplib.ServerConn{
@@ -244,7 +240,7 @@ func handleConnInner(conn net.Conn) error {
 		return err
 	}
 
-	err = sc.Accept()
+	err = sc.AcceptConn()
 	if err != nil {
 		return err
 	}
@@ -256,8 +252,6 @@ func handleConnInner(conn net.Conn) error {
 }
 
 func handleConn(conn net.Conn) {
-	defer conn.Close()
-
 	log.Printf("conn %v opened", conn.RemoteAddr())
 	err := handleConnInner(conn)
 	log.Printf("conn %v closed: %v", conn.RemoteAddr(), err)

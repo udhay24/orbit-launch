@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
+	mcmpegts "github.com/bluenviron/mediacommon/v2/pkg/formats/mpegts"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
@@ -37,6 +38,11 @@ type Source struct {
 // Log implements logger.Writer.
 func (s *Source) Log(level logger.Level, format string, args ...any) {
 	s.Parent.Log(level, "[MPEG-TS source] "+format, args...)
+}
+
+// Info returns runtime information.
+func (*Source) Info() defs.StaticSourceInfo {
+	return defs.StaticSourceInfo{}
 }
 
 // Run implements StaticSource.
@@ -137,7 +143,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 		case <-params.Context.Done():
 			nc.Close()
-			<-readerErr
+			<-readerErr //nolint:errcheck
 			return fmt.Errorf("terminated")
 		}
 	}
@@ -145,7 +151,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 func (s *Source) runReader(nc net.Conn) error {
 	nc.SetReadDeadline(time.Now().Add(time.Duration(s.ReadTimeout)))
-	mr := &mpegts.EnhancedReader{R: nc}
+	mr := &mcmpegts.Reader{R: nc}
 	err := mr.Initialize()
 	if err != nil {
 		return err

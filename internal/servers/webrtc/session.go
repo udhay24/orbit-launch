@@ -16,8 +16,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/pion/ice/v4"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/transport/v4"
+	"github.com/pion/transport/v5"
 	pwebrtc "github.com/pion/webrtc/v4"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
 	"github.com/bluenviron/mediamtx/internal/conf"
@@ -25,7 +26,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
-	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
 	"github.com/bluenviron/mediamtx/internal/protocols/whip"
 	"github.com/bluenviron/mediamtx/internal/stream"
@@ -236,25 +236,29 @@ type sessionParent interface {
 }
 
 type session struct {
-	net                   transport.Net
-	parentCtx             context.Context
-	ipsFromInterfaces     bool
-	ipsFromInterfacesList []string
-	additionalHosts       []string
-	iceUDPMux             ice.UDPMux
-	iceTCPMux             *webrtc.TCPMuxWrapper
-	stunGatherTimeout     conf.Duration
-	handshakeTimeout      conf.Duration
-	trackGatherTimeout    conf.Duration
-	pathName              string
-	remoteAddr            string
-	offer                 []byte
-	publish               bool
-	httpRequest           *http.Request
-	wg                    *sync.WaitGroup
-	externalCmdPool       *externalcmd.Pool
-	pathManager           serverPathManager
-	parent                sessionParent
+	net                          transport.Net
+	parentCtx                    context.Context
+	ipsFromInterfaces            bool
+	ipsFromInterfacesList        []string
+	ipsFromInterfacesExcludeList []string
+	additionalHosts              []string
+	iceUDPMux                    ice.UDPMux
+	iceTCPMux                    *webrtc.TCPMuxWrapper
+	supportsIPv6                 bool
+	stunGatherTimeout            conf.Duration
+	handshakeTimeout             conf.Duration
+	trackGatherTimeout           conf.Duration
+	remoteAddr                   string
+	pathName                     string
+	query                        string
+	userAgent                    string
+	credentials                  *auth.Credentials
+	offer                        []byte
+	publish                      bool
+	wg                           *sync.WaitGroup
+	externalCmdPool              *externalcmd.Pool
+	pathManager                  serverPathManager
+	parent                       sessionParent
 
 	ctx       context.Context
 	ctxCancel func()
@@ -265,6 +269,7 @@ type session struct {
 	reader    *stream.Reader
 	pc        *webrtc.PeerConnection
 	user      string
+	expiresAt *time.Time
 
 	chInitialRequest chan initialRequestReq
 	chAddCandidates  chan addSessionCandidatesReq
@@ -308,14 +313,40 @@ func (s *session) run() {
 }
 
 func (s *session) runInner() error {
+	errGroup, errGroupCtx := errgroup.WithContext(context.Background())
+
+	errGroup.Go(func() error {
+		select {
+		case <-s.ctx.Done():
+			return fmt.Errorf("terminated")
+		case <-errGroupCtx.Done():
+			return fmt.Errorf("terminated")
+		}
+	})
+
+	errGroup.Go(func() error {
+		return s.runInner2(errGroupCtx, errGroup)
+	})
+
+	return errGroup.Wait()
+}
+
+func (s *session) runInner2(errGroupCtx context.Context, errGroup *errgroup.Group) error {
 	var req initialRequestReq
 	select {
 	case req = <-s.chInitialRequest:
-	case <-s.ctx.Done():
+	case <-errGroupCtx.Done():
 		return fmt.Errorf("terminated")
 	}
 
-	errStatusCode, err := s.runInner2(&req)
+	var errStatusCode int
+	var err error
+
+	if s.publish {
+		errStatusCode, err = s.runPublish(errGroupCtx, errGroup, &req)
+	} else {
+		errStatusCode, err = s.runRead(errGroupCtx, errGroup, &req)
+	}
 
 	if errStatusCode != 0 {
 		req.res <- initialRequestRes{
@@ -327,26 +358,23 @@ func (s *session) runInner() error {
 	return err
 }
 
-func (s *session) runInner2(req *initialRequestReq) (int, error) {
-	if s.publish {
-		return s.runPublish(req)
-	}
-	return s.runRead(req)
-}
-
-func (s *session) runPublish(req *initialRequestReq) (int, error) {
+func (s *session) runPublish(
+	errGroupCtx context.Context,
+	errGroup *errgroup.Group,
+	req *initialRequestReq,
+) (int, error) {
 	ip, _, _ := net.SplitHostPort(s.remoteAddr)
 
 	res1, err := s.pathManager.FindPathConf(defs.PathFindPathConfReq{
 		Author: s,
 		AccessRequest: defs.PathAccessRequest{
 			Name:                 s.pathName,
-			Query:                s.httpRequest.URL.RawQuery,
+			Query:                s.query,
 			Publish:              true,
-			UserAgent:            s.httpRequest.Header.Get("User-Agent"),
+			UserAgent:            s.userAgent,
 			Proto:                auth.ProtocolWebRTC,
 			ID:                   &s.uuid,
-			Credentials:          httpp.Credentials(s.httpRequest),
+			Credentials:          s.credentials,
 			IP:                   net.ParseIP(ip),
 			EnableAskCredentials: true,
 		},
@@ -355,8 +383,20 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 		return http.StatusBadRequest, err
 	}
 
+	if res1.AuthRes.ExpiresAt != nil {
+		errGroup.Go(func() error {
+			select {
+			case <-time.After(time.Until(*res1.AuthRes.ExpiresAt)):
+				return errors.New("connection expired")
+			case <-errGroupCtx.Done():
+				return fmt.Errorf("terminated")
+			}
+		})
+	}
+
 	s.mutex.Lock()
-	s.user = res1.User
+	s.user = res1.AuthRes.User
+	s.expiresAt = res1.AuthRes.ExpiresAt
 	s.mutex.Unlock()
 
 	iceServers, err := s.parent.generateICEServers(false)
@@ -365,36 +405,31 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 	}
 
 	pc := &webrtc.PeerConnection{
-		Net:                   s.net,
-		ICEUDPMux:             s.iceUDPMux,
-		ICETCPMux:             s.iceTCPMux,
-		ICEServers:            iceServers,
-		IPsFromInterfaces:     s.ipsFromInterfaces,
-		IPsFromInterfacesList: s.ipsFromInterfacesList,
-		AdditionalHosts:       s.additionalHosts,
-		STUNGatherTimeout:     time.Duration(s.stunGatherTimeout),
-		Publish:               false,
-		Log:                   s,
+		Net:                          s.net,
+		ICEUDPMux:                    s.iceUDPMux,
+		ICETCPMux:                    s.iceTCPMux,
+		SupportsIPv6:                 s.supportsIPv6,
+		ICEServers:                   iceServers,
+		IPsFromInterfaces:            s.ipsFromInterfaces,
+		IPsFromInterfacesList:        s.ipsFromInterfacesList,
+		IPsFromInterfacesExcludeList: s.ipsFromInterfacesExcludeList,
+		AdditionalHosts:              s.additionalHosts,
+		STUNGatherTimeout:            time.Duration(s.stunGatherTimeout),
+		Publish:                      false,
+		Log:                          s,
 	}
 	err = pc.Start()
 	if err != nil {
 		return http.StatusBadRequest, err
 	}
 
-	terminatorDone := make(chan struct{})
-	defer func() { <-terminatorDone }()
-
-	terminatorRun := make(chan struct{})
-	defer close(terminatorRun)
-
-	go func() {
-		defer close(terminatorDone)
-		select {
-		case <-s.ctx.Done():
-		case <-terminatorRun:
-		}
+	errGroup.Go(func() error {
+		<-errGroupCtx.Done()
+		s.mutex.Lock()
 		pc.Close()
-	}()
+		s.mutex.Unlock()
+		return fmt.Errorf("terminated")
+	})
 
 	offer := whipOffer(s.offer)
 
@@ -430,6 +465,15 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 		return 0, err
 	}
 
+	errGroup.Go(func() error {
+		select {
+		case <-pc.Failed():
+			return fmt.Errorf("peer connection closed")
+		case <-errGroupCtx.Done():
+			return fmt.Errorf("terminated")
+		}
+	})
+
 	s.mutex.Lock()
 	s.pc = pc
 	s.mutex.Unlock()
@@ -438,6 +482,16 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+
+	// GatherInboundTracks already listens for pc.Failed, so there's no reason for this to start before.
+	errGroup.Go(func() error {
+		select {
+		case <-pc.Failed():
+			return fmt.Errorf("peer connection closed")
+		case <-errGroupCtx.Done():
+			return fmt.Errorf("terminated")
+		}
+	})
 
 	var subStream *stream.SubStream
 
@@ -454,8 +508,8 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 		ConfToCompare: res1.Conf,
 		AccessRequest: defs.PathAccessRequest{
 			Name:      s.pathName,
-			Query:     s.httpRequest.URL.RawQuery,
-			UserAgent: s.httpRequest.Header.Get("User-Agent"),
+			Query:     s.query,
+			UserAgent: s.userAgent,
 			Publish:   true,
 			SkipAuth:  true,
 		},
@@ -470,27 +524,22 @@ func (s *session) runPublish(req *initialRequestReq) (int, error) {
 
 	pc.StartReading()
 
-	select {
-	case <-pc.Failed():
-		return 0, fmt.Errorf("peer connection closed")
-
-	case <-s.ctx.Done():
-		return 0, fmt.Errorf("terminated")
-	}
+	<-errGroupCtx.Done()
+	return 0, fmt.Errorf("terminated")
 }
 
-func (s *session) runRead(req *initialRequestReq) (int, error) {
+func (s *session) runRead(errGroupCtx context.Context, errGroup *errgroup.Group, req *initialRequestReq) (int, error) {
 	ip, _, _ := net.SplitHostPort(s.remoteAddr)
 
 	res, err := s.pathManager.AddReader(defs.PathAddReaderReq{
 		Author: s,
 		AccessRequest: defs.PathAccessRequest{
 			Name:                 s.pathName,
-			Query:                s.httpRequest.URL.RawQuery,
-			UserAgent:            s.httpRequest.Header.Get("User-Agent"),
+			Query:                s.query,
+			UserAgent:            s.userAgent,
 			Proto:                auth.ProtocolWebRTC,
 			ID:                   &s.uuid,
-			Credentials:          httpp.Credentials(s.httpRequest),
+			Credentials:          s.credentials,
 			IP:                   net.ParseIP(ip),
 			EnableAskCredentials: true,
 		},
@@ -505,8 +554,20 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 
 	defer res.Path.RemoveReader(defs.PathRemoveReaderReq{Author: s})
 
+	if res.AuthRes.ExpiresAt != nil {
+		errGroup.Go(func() error {
+			select {
+			case <-time.After(time.Until(*res.AuthRes.ExpiresAt)):
+				return errors.New("connection expired")
+			case <-errGroupCtx.Done():
+				return fmt.Errorf("terminated")
+			}
+		})
+	}
+
 	s.mutex.Lock()
-	s.user = res.User
+	s.user = res.AuthRes.User
+	s.expiresAt = res.AuthRes.ExpiresAt
 	s.mutex.Unlock()
 
 	iceServers, err := s.parent.generateICEServers(false)
@@ -515,16 +576,18 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 	}
 
 	pc := &webrtc.PeerConnection{
-		Net:                   s.net,
-		ICEUDPMux:             s.iceUDPMux,
-		ICETCPMux:             s.iceTCPMux,
-		ICEServers:            iceServers,
-		IPsFromInterfaces:     s.ipsFromInterfaces,
-		IPsFromInterfacesList: s.ipsFromInterfacesList,
-		AdditionalHosts:       s.additionalHosts,
-		STUNGatherTimeout:     time.Duration(s.stunGatherTimeout),
-		Publish:               true,
-		Log:                   s,
+		Net:                          s.net,
+		ICEUDPMux:                    s.iceUDPMux,
+		ICETCPMux:                    s.iceTCPMux,
+		SupportsIPv6:                 s.supportsIPv6,
+		ICEServers:                   iceServers,
+		IPsFromInterfaces:            s.ipsFromInterfaces,
+		IPsFromInterfacesList:        s.ipsFromInterfacesList,
+		IPsFromInterfacesExcludeList: s.ipsFromInterfacesExcludeList,
+		AdditionalHosts:              s.additionalHosts,
+		STUNGatherTimeout:            time.Duration(s.stunGatherTimeout),
+		Publish:                      true,
+		Log:                          s,
 	}
 
 	r := &stream.Reader{Parent: s}
@@ -539,20 +602,13 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 		return http.StatusBadRequest, err
 	}
 
-	terminatorDone := make(chan struct{})
-	defer func() { <-terminatorDone }()
-
-	terminatorRun := make(chan struct{})
-	defer close(terminatorRun)
-
-	go func() {
-		defer close(terminatorDone)
-		select {
-		case <-s.ctx.Done():
-		case <-terminatorRun:
-		}
+	errGroup.Go(func() error {
+		<-errGroupCtx.Done()
+		s.mutex.Lock()
 		pc.Close()
-	}()
+		s.mutex.Unlock()
+		return fmt.Errorf("terminated")
+	})
 
 	offer := whipOffer(s.offer)
 
@@ -572,6 +628,15 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 		return 0, err
 	}
 
+	errGroup.Go(func() error {
+		select {
+		case <-pc.Failed():
+			return fmt.Errorf("peer connection closed")
+		case <-errGroupCtx.Done():
+			return fmt.Errorf("terminated")
+		}
+	})
+
 	s.mutex.Lock()
 	s.pc = pc
 	s.mutex.Unlock()
@@ -585,7 +650,7 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 		Conf:            res.Path.SafeConf(),
 		ExternalCmdEnv:  res.Path.ExternalCmdEnv(),
 		Reader:          *s.APIReaderDescribe(),
-		Query:           s.httpRequest.URL.RawQuery,
+		Query:           s.query,
 	})
 	defer onUnreadHook()
 
@@ -597,13 +662,9 @@ func (s *session) runRead(req *initialRequestReq) (int, error) {
 	s.mutex.Unlock()
 
 	select {
-	case <-pc.Failed():
-		return 0, fmt.Errorf("peer connection closed")
-
 	case err = <-r.Error():
 		return 0, err
-
-	case <-s.ctx.Done():
+	case <-errGroupCtx.Done():
 		return 0, fmt.Errorf("terminated")
 	}
 }
@@ -758,9 +819,10 @@ func (s *session) apiItem() *defs.APIWebRTCSession {
 			return defs.APIWebRTCSessionStateRead
 		}(),
 		Path:                    s.pathName,
-		Query:                   s.httpRequest.URL.RawQuery,
+		Query:                   s.query,
 		User:                    s.user,
-		UserAgent:               s.httpRequest.Header.Get("User-Agent"),
+		ExpiresAt:               s.expiresAt,
+		UserAgent:               s.userAgent,
 		InboundBytes:            bytesReceived,
 		InboundRTPPackets:       rtpPacketsReceived,
 		InboundRTPPacketsLost:   rtpPacketsLost,

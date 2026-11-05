@@ -1,4 +1,4 @@
-package publishallowlist
+package cameraaccess
 
 import (
 	"testing"
@@ -9,13 +9,13 @@ import (
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
-func newAllowlist(t *testing.T, addr string, password string, failOpen bool) *Allowlist {
-	a := &Allowlist{
+func newAccess(t *testing.T, addr string, password string) *Access {
+	a := &Access{
 		RedisAddress:  addr,
 		RedisPassword: password,
-		Key:           "camera:stream_ids",
+		BlockKey:      "camera:blocked_stream_ids",
+		OwnerKey:      "camera:stream_ids",
 		PathPrefix:    "live/",
-		FailOpen:      failOpen,
 		Parent:        test.NilLogger,
 	}
 	a.Initialize()
@@ -25,22 +25,21 @@ func newAllowlist(t *testing.T, addr string, password string, failOpen bool) *Al
 
 func TestCheck(t *testing.T) {
 	s := miniredis.RunT(t)
-	_, err := s.SAdd("camera:stream_ids", "CAM1")
+	_, err := s.SAdd("camera:blocked_stream_ids", "BAD1", "NOPREFIX")
 	require.NoError(t, err)
 
-	a := newAllowlist(t, s.Addr(), "", false)
+	a := newAccess(t, s.Addr(), "")
 
 	for _, ca := range []struct {
 		name    string
 		path    string
 		wantErr string
 	}{
-		{"registered", "live/CAM1", ""},
-		{"unregistered", "live/CAM2", "stream 'CAM2' is not registered"},
-		{"wrong prefix", "other/CAM1", "path 'other/CAM1' is not a registered stream path"},
-		{"no prefix", "CAM1", "path 'CAM1' is not a registered stream path"},
-		{"empty id", "live/", "path 'live/' is not a registered stream path"},
-		{"nested", "live/CAM1/x", "path 'live/CAM1/x' is not a registered stream path"},
+		{"blocked", "live/BAD1", "stream 'BAD1' is blocked"},
+		{"not blocked", "live/CAM1", ""},
+		{"unregistered camera", "live/ANYTHING", ""},
+		{"blocked without prefix", "NOPREFIX", "stream 'NOPREFIX' is blocked"},
+		{"other prefix", "other/BAD1", ""},
 	} {
 		t.Run(ca.name, func(t *testing.T) {
 			err := a.Check(ca.path)
@@ -56,34 +55,30 @@ func TestCheck(t *testing.T) {
 func TestCheckFailurePolicy(t *testing.T) {
 	t.Run("missing set", func(t *testing.T) {
 		s := miniredis.RunT(t)
-
-		require.NoError(t, newAllowlist(t, s.Addr(), "", true).Check("live/CAM1"))
-		require.ErrorContains(t, newAllowlist(t, s.Addr(), "", false).Check("live/CAM1"), "does not exist")
+		require.NoError(t, newAccess(t, s.Addr(), "").Check("live/CAM1"))
 	})
 
 	t.Run("redis down", func(t *testing.T) {
 		s := miniredis.RunT(t)
 		addr := s.Addr()
 		s.Close()
-
-		require.NoError(t, newAllowlist(t, addr, "", true).Check("live/CAM1"))
-		require.ErrorContains(t, newAllowlist(t, addr, "", false).Check("live/CAM1"), "unavailable")
+		require.NoError(t, newAccess(t, addr, "").Check("live/CAM1"))
 	})
 
 	t.Run("wrong password", func(t *testing.T) {
 		s := miniredis.RunT(t)
 		s.RequireAuth("secret")
-
-		require.ErrorContains(t, newAllowlist(t, s.Addr(), "wrong", false).Check("live/CAM1"), "unavailable")
+		_, err := s.SAdd("camera:blocked_stream_ids", "BAD1")
+		require.NoError(t, err)
+		require.NoError(t, newAccess(t, s.Addr(), "wrong").Check("live/BAD1"))
 	})
 
 	t.Run("password", func(t *testing.T) {
 		s := miniredis.RunT(t)
 		s.RequireAuth("secret")
-		_, err := s.SAdd("camera:stream_ids", "CAM1")
+		_, err := s.SAdd("camera:blocked_stream_ids", "BAD1")
 		require.NoError(t, err)
-
-		require.NoError(t, newAllowlist(t, s.Addr(), "secret", false).Check("live/CAM1"))
+		require.Error(t, newAccess(t, s.Addr(), "secret").Check("live/BAD1"))
 	})
 }
 
@@ -94,7 +89,7 @@ func TestCheckViewToken(t *testing.T) {
 	_, err = s.SAdd("camera:stream_ids:owned:two", "CAM2")
 	require.NoError(t, err)
 
-	a := newAllowlist(t, s.Addr(), "", false)
+	a := newAccess(t, s.Addr(), "")
 	a.ExemptKeys = []string{"orchestrator"}
 
 	require.NoError(t, a.CheckViewToken("one", "live/CAM1"))
@@ -103,8 +98,7 @@ func TestCheckViewToken(t *testing.T) {
 	require.EqualError(t, a.CheckViewToken("unknown", "live/CAM1"), "key 'unknown' does not own stream 'CAM1'")
 	require.Error(t, a.CheckViewToken("one", "other/CAM1"))
 
-	// a Redis outage: pairs seen before keep working, nothing new does, even with FailOpen.
-	a.FailOpen = true
+	// a Redis outage: pairs seen before keep working, nothing new does.
 	s.Close()
 	require.NoError(t, a.CheckViewToken("one", "live/CAM1"))
 	require.ErrorContains(t, a.CheckViewToken("one", "live/CAM2"), "unavailable")

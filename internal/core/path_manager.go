@@ -79,7 +79,7 @@ type pathSetStreamRegistryReq struct {
 	res chan pathSetStreamRegistryRes
 }
 
-type pathManagerPublishAllowlist interface {
+type pathManagerCameraAccess interface {
 	Check(pathName string) error
 	CheckViewToken(keyID string, pathName string) error
 }
@@ -110,7 +110,8 @@ type pathManager struct {
 	parent              pathManagerParent
 	maxPublishers       int
 	publisherHysteresis int
-	publishAllowlist    pathManagerPublishAllowlist
+	cameraAccess        pathManagerCameraAccess
+	publishBlocklist    bool
 	viewTokenOwnerCheck bool
 	jwtInHTTPQuery      bool
 
@@ -650,14 +651,14 @@ func (pm *pathManager) closePathIfIdle(pa *path) {
 	}
 }
 
-// checkPublishAllowlist runs outside of the run() loop since it performs network I/O.
+// checkPublishBlocklist runs outside of the run() loop since it performs network I/O.
 // Requests with SkipAuth were already checked by FindPathConf.
-func (pm *pathManager) checkPublishAllowlist(author logger.Writer, req *defs.PathAccessRequest) error {
-	if pm.publishAllowlist == nil || !req.Publish || req.SkipAuth {
+func (pm *pathManager) checkPublishBlocklist(author logger.Writer, req *defs.PathAccessRequest) error {
+	if !pm.publishBlocklist || !req.Publish || req.SkipAuth {
 		return nil
 	}
 
-	err := pm.publishAllowlist.Check(req.Name)
+	err := pm.cameraAccess.Check(req.Name)
 	if err != nil {
 		terr := &auth.Error{Wrapped: err}
 		auth.LogAndDelayError(author, terr)
@@ -684,7 +685,7 @@ func (pm *pathManager) checkViewTokenOwner(author logger.Writer, req *defs.PathA
 	if keyID == "" {
 		err = errors.New("token does not name its signing key")
 	} else {
-		err = pm.publishAllowlist.CheckViewToken(keyID, req.Name)
+		err = pm.cameraAccess.CheckViewToken(keyID, req.Name)
 	}
 	if err != nil {
 		terr := &auth.Error{Wrapped: err}
@@ -697,7 +698,7 @@ func (pm *pathManager) checkViewTokenOwner(author logger.Writer, req *defs.PathA
 
 // FindPathConf is called by a reader or publisher.
 func (pm *pathManager) FindPathConf(req defs.PathFindPathConfReq) (*defs.PathFindPathConfRes, error) {
-	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+	if err := pm.checkPublishBlocklist(req.Author, &req.AccessRequest); err != nil {
 		return nil, err
 	}
 	if err := pm.checkViewTokenOwner(req.Author, &req.AccessRequest); err != nil {
@@ -754,7 +755,7 @@ func (pm *pathManager) Describe(req defs.PathDescribeReq) (*defs.PathDescribeRes
 
 // AddPublisher is called by a publisher.
 func (pm *pathManager) AddPublisher(req defs.PathAddPublisherReq) (*defs.PathAddPublisherRes, error) {
-	if err := pm.checkPublishAllowlist(req.Author, &req.AccessRequest); err != nil {
+	if err := pm.checkPublishBlocklist(req.Author, &req.AccessRequest); err != nil {
 		return nil, err
 	}
 

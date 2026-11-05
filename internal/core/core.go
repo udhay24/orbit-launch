@@ -24,6 +24,7 @@ import (
 
 	"github.com/bluenviron/mediamtx/internal/api"
 	"github.com/bluenviron/mediamtx/internal/auth"
+	"github.com/bluenviron/mediamtx/internal/cameraaccess"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/confwatcher"
 	"github.com/bluenviron/mediamtx/internal/dynamicorigins"
@@ -32,7 +33,6 @@ import (
 	"github.com/bluenviron/mediamtx/internal/metrics"
 	"github.com/bluenviron/mediamtx/internal/playback"
 	"github.com/bluenviron/mediamtx/internal/pprof"
-	"github.com/bluenviron/mediamtx/internal/publishallowlist"
 	"github.com/bluenviron/mediamtx/internal/recordcleaner"
 	"github.com/bluenviron/mediamtx/internal/rlimit"
 	"github.com/bluenviron/mediamtx/internal/servers/hls"
@@ -221,7 +221,7 @@ type Core struct {
 	webRTCServer     *webrtc.Server
 	srtServer        *srt.Server
 	streamRegistry   *streamregistry.Registry
-	publishAllowlist *publishallowlist.Allowlist
+	cameraAccessSets *cameraaccess.Access
 	dynamicOrigins   *dynamicorigins.Origins
 	moqServer        *moq.Server
 	api              *api.API
@@ -729,35 +729,35 @@ func (p *Core) createResources(initial bool) error {
 
 	if p.conf.DynamicAllowOrigins && p.dynamicOrigins == nil {
 		p.dynamicOrigins = &dynamicorigins.Origins{
-			RedisAddress:  p.conf.PublishAllowlistAddress,
-			RedisPassword: p.conf.PublishAllowlistPassword,
-			RedisDB:       p.conf.PublishAllowlistDB,
+			RedisAddress:  p.conf.BackendRedisAddress,
+			RedisPassword: p.conf.BackendRedisPassword,
+			RedisDB:       p.conf.BackendRedisDB,
 			Key:           p.conf.DynamicAllowOriginsKey,
 			Parent:        p,
 		}
 		p.dynamicOrigins.Initialize()
 	}
 
-	if p.conf.PublishAllowlist && p.publishAllowlist == nil {
-		p.publishAllowlist = &publishallowlist.Allowlist{
-			RedisAddress:  p.conf.PublishAllowlistAddress,
-			RedisPassword: p.conf.PublishAllowlistPassword,
-			RedisDB:       p.conf.PublishAllowlistDB,
-			Key:           p.conf.PublishAllowlistKey,
-			PathPrefix:    p.conf.PublishAllowlistPathPrefix,
-			FailOpen:      p.conf.PublishAllowlistFailOpen,
+	if (p.conf.PublishBlocklist || p.conf.ViewTokenOwnerCheck) && p.cameraAccessSets == nil {
+		p.cameraAccessSets = &cameraaccess.Access{
+			RedisAddress:  p.conf.BackendRedisAddress,
+			RedisPassword: p.conf.BackendRedisPassword,
+			RedisDB:       p.conf.BackendRedisDB,
+			BlockKey:      p.conf.PublishBlocklistKey,
+			OwnerKey:      p.conf.ViewTokenOwnerKey,
+			PathPrefix:    p.conf.CameraPathPrefix,
 			ExemptKeys:    p.conf.ViewTokenOwnerExemptKeys,
 			Parent:        p,
 		}
-		p.publishAllowlist.Initialize()
+		p.cameraAccessSets.Initialize()
 	}
 
 	if p.pathManager == nil {
 		rtpMaxPayloadSize := getRTPMaxPayloadSize(p.conf.UDPMaxPayloadSize, p.conf.RTSPEncryption)
 
-		var allowlist pathManagerPublishAllowlist
-		if p.publishAllowlist != nil {
-			allowlist = p.publishAllowlist
+		var cameraAccess pathManagerCameraAccess
+		if p.cameraAccessSets != nil {
+			cameraAccess = p.cameraAccessSets
 		}
 
 		p.pathManager = &pathManager{
@@ -777,7 +777,8 @@ func (p *Core) createResources(initial bool) error {
 			metrics:             p.metrics,
 			maxPublishers:       p.conf.MaxPublishers,
 			publisherHysteresis: p.conf.PublisherHysteresis,
-			publishAllowlist:    allowlist,
+			cameraAccess:        cameraAccess,
+			publishBlocklist:    p.conf.PublishBlocklist,
 			viewTokenOwnerCheck: p.conf.ViewTokenOwnerCheck,
 			jwtInHTTPQuery:      p.conf.AuthJWTInHTTPQuery != nil && *p.conf.AuthJWTInHTTPQuery,
 			parent:              p,
@@ -1206,19 +1207,19 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 	closeDynamicOrigins := newConf == nil ||
 		newConf.DynamicAllowOrigins != p.conf.DynamicAllowOrigins ||
 		newConf.DynamicAllowOriginsKey != p.conf.DynamicAllowOriginsKey ||
-		newConf.PublishAllowlistAddress != p.conf.PublishAllowlistAddress ||
-		newConf.PublishAllowlistPassword != p.conf.PublishAllowlistPassword ||
-		newConf.PublishAllowlistDB != p.conf.PublishAllowlistDB
+		newConf.BackendRedisAddress != p.conf.BackendRedisAddress ||
+		newConf.BackendRedisPassword != p.conf.BackendRedisPassword ||
+		newConf.BackendRedisDB != p.conf.BackendRedisDB
 
-	closePublishAllowlist := newConf == nil ||
-		newConf.PublishAllowlist != p.conf.PublishAllowlist ||
-		newConf.PublishAllowlistAddress != p.conf.PublishAllowlistAddress ||
-		newConf.PublishAllowlistPassword != p.conf.PublishAllowlistPassword ||
-		newConf.PublishAllowlistDB != p.conf.PublishAllowlistDB ||
-		newConf.PublishAllowlistKey != p.conf.PublishAllowlistKey ||
-		newConf.PublishAllowlistPathPrefix != p.conf.PublishAllowlistPathPrefix ||
-		newConf.PublishAllowlistFailOpen != p.conf.PublishAllowlistFailOpen ||
+	closeCameraAccess := newConf == nil ||
+		newConf.BackendRedisAddress != p.conf.BackendRedisAddress ||
+		newConf.BackendRedisPassword != p.conf.BackendRedisPassword ||
+		newConf.BackendRedisDB != p.conf.BackendRedisDB ||
+		newConf.CameraPathPrefix != p.conf.CameraPathPrefix ||
+		newConf.PublishBlocklist != p.conf.PublishBlocklist ||
+		newConf.PublishBlocklistKey != p.conf.PublishBlocklistKey ||
 		newConf.ViewTokenOwnerCheck != p.conf.ViewTokenOwnerCheck ||
+		newConf.ViewTokenOwnerKey != p.conf.ViewTokenOwnerKey ||
 		!slices.Equal(newConf.ViewTokenOwnerExemptKeys, p.conf.ViewTokenOwnerExemptKeys)
 
 	closePathManager := newConf == nil ||
@@ -1233,7 +1234,7 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		newConf.RTSPEncryption != p.conf.RTSPEncryption ||
 		closeMetrics ||
 		closeAuthManager ||
-		closePublishAllowlist
+		closeCameraAccess
 	if !closePathManager && !reflect.DeepEqual(newConf.Paths, p.conf.Paths) {
 		p.pathManager.ReloadPathConfs(newConf.Paths)
 	}
@@ -1494,9 +1495,9 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		p.dynamicOrigins = nil
 	}
 
-	if closePublishAllowlist && p.publishAllowlist != nil {
-		p.publishAllowlist.Close()
-		p.publishAllowlist = nil
+	if closeCameraAccess && p.cameraAccessSets != nil {
+		p.cameraAccessSets.Close()
+		p.cameraAccessSets = nil
 	}
 
 	if closePlaybackServer && p.playbackServer != nil {

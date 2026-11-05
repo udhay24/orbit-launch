@@ -11,20 +11,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/auth"
+	"github.com/bluenviron/mediamtx/internal/cameraaccess"
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
-	"github.com/bluenviron/mediamtx/internal/publishallowlist"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
 
-func TestPathManagerPublishAllowlist(t *testing.T) {
+func TestPathManagerPublishBlocklist(t *testing.T) {
 	s := miniredis.RunT(t)
-	_, err := s.SAdd("camera:stream_ids", "CAM1")
+	_, err := s.SAdd("camera:blocked_stream_ids", "BAD1")
 	require.NoError(t, err)
 
-	a := &publishallowlist.Allowlist{
+	a := &cameraaccess.Access{
 		RedisAddress: s.Addr(),
-		Key:          "camera:stream_ids",
+		BlockKey:     "camera:blocked_stream_ids",
 		PathPrefix:   "live/",
 		Parent:       test.NilLogger,
 	}
@@ -41,7 +41,8 @@ func TestPathManagerPublishAllowlist(t *testing.T) {
 			},
 		},
 		parent:           test.NilLogger,
-		publishAllowlist: a,
+		cameraAccess:     a,
+		publishBlocklist: true,
 	}
 	pm.initialize()
 	defer pm.close()
@@ -74,13 +75,16 @@ func TestPathManagerPublishAllowlist(t *testing.T) {
 
 	// both entry points must produce an authentication error, since that is
 	// what makes the RTMP server send a proper rejection to the camera.
-	_, ok := errors.AsType[*auth.Error](addPublisher("live/UNKNOWN"))
+	_, ok := errors.AsType[*auth.Error](addPublisher("live/BAD1"))
 	require.True(t, ok)
-	_, ok = errors.AsType[*auth.Error](findPathConf("live/UNKNOWN", true))
+	_, ok = errors.AsType[*auth.Error](findPathConf("live/BAD1", true))
 	require.True(t, ok)
 
-	// reading is not subject to the allowlist.
-	require.NoError(t, findPathConf("live/UNKNOWN", false))
+	// cameras that are not blocked connect, registered or not.
+	require.NoError(t, addPublisher("live/UNKNOWN"))
+
+	// reading is not subject to the blocklist.
+	require.NoError(t, findPathConf("live/BAD1", false))
 }
 
 type fakeOwnerCheck struct {
@@ -116,7 +120,7 @@ func TestPathManagerViewTokenOwner(t *testing.T) {
 				"all_others": {Regexp: regexp.MustCompile("^.*$"), Name: "all_others", Source: "publisher"},
 			},
 			parent:              test.NilLogger,
-			publishAllowlist:    check,
+			cameraAccess:        check,
 			viewTokenOwnerCheck: true,
 			jwtInHTTPQuery:      true,
 		}
@@ -161,7 +165,7 @@ func TestPathManagerViewTokenOwner(t *testing.T) {
 	require.NoError(t, run(check, defs.PathAccessRequest{Name: "live/CAM1", Credentials: &auth.Credentials{}}))
 	require.Empty(t, check.keys)
 
-	// publishers are covered by the allowlist instead.
+	// publishers are covered by the blocklist instead.
 	check = &fakeOwnerCheck{}
 	require.NoError(t, run(check, defs.PathAccessRequest{
 		Name:        "live/CAM1",

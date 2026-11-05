@@ -137,7 +137,7 @@ authJWTJWKSFingerprint:
 authJWTClaimKey: mediamtx_permissions
 # Actions to exclude from JWT-based authentication.
 # Format is the same as the one of user permissions.
-# Cameras cannot obtain JWTs: publishers are checked by publishAllowlist instead.
+# Cameras cannot obtain JWTs: publishers are checked by publishBlocklist instead.
 # The control API, metrics and pprof stay reachable by the orchestrator.
 authJWTExclude:
 - action: publish
@@ -466,38 +466,39 @@ maxPublishers: 2000
 publisherHysteresis: 300
 
 ###############################################
-# Global settings -> Publish allowlist
+# Global settings -> Camera access
 
-# Reject publishers whose stream ID is not in a Redis set maintained by the backend.
-publishAllowlist: false
-# Address of the Redis server holding the set.
-publishAllowlistAddress: localhost:6379
+# Redis server maintained by the orchestrator, read by the publish blocklist, dynamic
+# allow origins and the view token owner check.
+backendRedisAddress: localhost:6379
 # Password of the Redis server. Never set it here: provide it through the
-# MTX_PUBLISHALLOWLISTPASSWORD environment variable.
-publishAllowlistPassword: ""
+# MTX_BACKENDREDISPASSWORD environment variable.
+backendRedisPassword: ""
 # Redis database number.
-publishAllowlistDB: 0
-# Redis set containing the allowed stream IDs.
-publishAllowlistKey: camera:stream_ids
-# Publishers must use the path <publishAllowlistPathPrefix><stream ID>.
-publishAllowlistPathPrefix: live/
-# What to do when the set cannot be read, because Redis is unreachable or the backend
-# has not filled the set yet. "yes" lets publishers in and logs a warning, so a Redis
-# outage cannot block camera reconnections. "no" rejects them.
-publishAllowlistFailOpen: yes
-# Also allow browser requests from origins that applications register in Redis, using the
-# Redis server above. Each application has its own domain, so this avoids changing every
-# media server when one is launched. Applies to HLS and WebRTC, on top of hlsAllowOrigins
-# and webrtcAllowOrigins, so empty those lists or they will still allow everything.
+backendRedisDB: 0
+# Cameras publish to the path <cameraPathPrefix><stream ID>.
+cameraPathPrefix: live/
+# Refuse publishers whose stream ID is in a Redis set that admins fill from the Orbit Play
+# portal. Every other camera connects. If the set cannot be read, cameras are let in and an
+# error is logged, so a Redis outage cannot block camera reconnections.
+publishBlocklist: false
+# Redis set containing the blocked stream IDs.
+publishBlocklistKey: camera:blocked_stream_ids
+# Also allow browser requests from origins that applications register in Redis. Each
+# application has its own domain, so this avoids changing every media server when one is
+# launched. Applies to HLS and WebRTC, on top of hlsAllowOrigins and webrtcAllowOrigins,
+# so empty those lists or they will still allow everything.
 dynamicAllowOrigins: false
 # Redis set holding the registered origins.
 dynamicAllowOriginsKey: media:allowed_origins
 # Refuse a view token when its signing key does not own the camera. Each application signs
-# with its own key, whose name matches the set <publishAllowlistKey>:owned:<key>, so a key
-# stolen from one application cannot open another's cameras. Needs publishAllowlist and
-# authMethod: jwt, and the playback server off. Lookups that fail are refused, whatever
-# publishAllowlistFailOpen says, except for key and camera pairs seen in the last 24 hours.
+# with its own key, whose name matches the set <viewTokenOwnerKey>:owned:<key>, so a key
+# stolen from one application cannot open another's cameras. Needs authMethod: jwt, and the
+# playback server off. Lookups that fail are refused, except for key and camera pairs seen
+# in the last 24 hours.
 viewTokenOwnerCheck: false
+# Prefix of the Redis sets of cameras owned by each application.
+viewTokenOwnerKey: camera:stream_ids
 # Keys that may read any camera.
 viewTokenOwnerExemptKeys: [orchestrator]
 

@@ -10,8 +10,9 @@ release asset. Templates: `orbit_play_state/scripts/systemd/`.
 |---|---|---|
 | Watching needs a token | MediaMTX | `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS` (the orchestrator's `/load-balancer/api/media-access/jwks`, because media servers take one URL and several applications run at once), `MTX_AUTHJWTISSUER`, `MTX_AUTHJWTAUDIENCE` |
 | Issue tokens | Orbit-NestJS `POST /api/v1/media-access/view-tokens`, each application with its own key | `MEDIA_JWT_PRIVATE_KEY_BASE64`, `MEDIA_JWT_KEY_ID` (the database name), set by the orchestrator on deploy, `MEDIA_VIEW_TOKEN_TTL_SECONDS` (default 12h), `MEDIA_VIEW_TOKEN_MAX_TTL_SECONDS` (default 24h) |
-| Only registered cameras publish | MediaMTX reading Redis set `camera:stream_ids` | `MTX_PUBLISHALLOWLIST=yes`, `MTX_PUBLISHALLOWLISTADDRESS`, `MTX_PUBLISHALLOWLISTPASSWORD` |
-| Keep that set current | Orbit-NestJS claims cameras from the orchestrator, which writes Redis | `ORCHESTRATOR_URL`, `ENABLE_REDIS_FILTER=true`, `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
+| Redis kept by the orchestrator | MediaMTX, for the three rows below | `MTX_BACKENDREDISADDRESS`, `MTX_BACKENDREDISPASSWORD` |
+| Blocked cameras cannot publish | MediaMTX reading Redis set `camera:blocked_stream_ids`, which admins fill from the Orbit Play portal | `MTX_PUBLISHBLOCKLIST=yes` |
+| Know which application owns each camera | Orbit-NestJS claims cameras from the orchestrator, which writes `camera:stream_ids:owned:<db>` | `ORCHESTRATOR_URL`, `ENABLE_REDIS_FILTER=true`, `RUN_CAMERA_STREAM_WATCHER=true` on one process per application |
 | Browsers play only from the web apps | MediaMTX reading Redis set `media:allowed_origins`, kept by the orchestrator | `MTX_DYNAMICALLOWORIGINS=yes`, plus `MTX_HLSALLOWORIGINS` and `MTX_WEBRTCALLOWORIGINS` set to the admin's address only, since the default allows everything |
 
 Tokens above the default lifetime need a CEO or ADMINCONFIG login. A session ends when
@@ -20,7 +21,7 @@ The web app renews tokens by itself; share links just stop.
 
 ## Rollout order
 
-Do these in order. Nothing is enforced until steps 9 to 11.
+Do these in order. Nothing is enforced until steps 9 and 10.
 
 1. Rotate what is exposed: the Redis password, the orchestrator `API_KEY`, every secret
    hardcoded in `services/api_server_service.py`, and the TLS certificate.
@@ -49,16 +50,13 @@ Do these in order. Nothing is enforced until steps 9 to 11.
 8. Lock the two APIs. Deploy Orbit-API-Admin and Orbit-API-Manager, confirm every caller
    sends its key, then set `API_KEYS` on each, last. Media servers ignore upload errors,
    so a missing `ORBIT_API_KEY` would silently lose recording logs.
-9. On one media server turn on `MTX_PUBLISHALLOWLIST=yes` and `MTX_LOGLEVEL=warn`. Check
-   `camera:stream_ids` holds every application's cameras, publish a made-up stream ID to
-   confirm it is refused, and watch for `is not registered` against real cameras and for
-   `allowing ... without a check`. Then roll out.
+9. On one media server turn on `MTX_PUBLISHBLOCKLIST=yes`. Block a test stream ID from the
+   portal, confirm it is refused and disconnected, and that other cameras, registered or not,
+   still connect. Watch for `allowing ... without a blocklist check`. Then roll out.
 10. On one media server turn on `MTX_AUTHMETHOD=jwt`, `MTX_AUTHJWTJWKS`, the issuer and
     audience, `MTX_VIEWTOKENOWNERCHECK=yes`, `MTX_DYNAMICALLOWORIGINS=yes`, and set
     `MTX_HLSALLOWORIGINS` and `MTX_WEBRTCALLOWORIGINS` to the admin's address. Check every
     application plays, then roll out.
-11. Set `publishAllowlistFailOpen: no` once the allowlist has proven itself, if you prefer
-    refusing cameras during a Redis outage to letting unknown ones in.
 
 Rollback: remove the lines from `media.env` and restart `orbit-play`.
 
@@ -94,19 +92,19 @@ applications are added when the orchestrator starts.
 
 ## Known limits
 
-- Installation: validating a stream ID in the CIS app adds it to the allowlist until the
-  next sync (10 minutes), because a device must be online before it can be installed.
 - The CIS app signs in with a supervisor ID and no password.
 - CORS binds browsers only. A copied token works in VLC or curl until it expires.
 - There is no way to cancel a token before it expires.
 - A camera removed from the database keeps streaming until it reconnects.
-- `publishAllowlistFailOpen: yes` (default) lets cameras in when Redis is unreachable or
-  the set is missing, and logs an error. Set it to `no` to reject them instead.
+- The blocklist lets cameras in when Redis is unreachable, and logs an error. Only listed
+  cameras are refused: any other stream ID can publish.
+- Blocking disconnects a live camera through the control API on port 9997, so the
+  orchestrator must be able to reach it.
 - View tokens never fail open. During a Redis outage only key and camera pairs seen in the
   last day work.
 - A new media server is only protected if `MEDIA_SERVER_ENV_BASE64` is set.
-- Publishing is checked by stream ID only. Anyone who knows a registered ID can publish to
-  it, and `overridePublisher` lets them replace the camera.
+- Anyone who knows a camera's stream ID can publish to it, and `overridePublisher` lets
+  them replace the camera.
 - Application signing keys and `ADMIN_API_KEY` reach API servers through cloud-init, so
   anything that can read instance metadata can read them.
 - RTSP, RTMP and SRT reads need tokens too once `authMethod` is `jwt`.

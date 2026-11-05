@@ -12,20 +12,20 @@ func TestRedactRedisPasswords(t *testing.T) {
 	require.NoError(t, err)
 
 	c.StreamRegistryPassword = "registry-secret"
-	c.PublishAllowlistPassword = "allowlist-secret"
+	c.BackendRedisPassword = "backend-secret"
 
 	redacted := Redact(c)
 	require.Equal(t, redactedCredential, redacted.StreamRegistryPassword)
-	require.Equal(t, redactedCredential, redacted.PublishAllowlistPassword)
+	require.Equal(t, redactedCredential, redacted.BackendRedisPassword)
 	require.Equal(t, "registry-secret", c.StreamRegistryPassword)
 
 	// sending back the output of /config/global/get must not overwrite the real passwords.
 	var optional OptionalGlobal
 	require.NoError(t, optional.UnmarshalJSON(
-		[]byte(`{"streamRegistryPassword":"<redacted>","publishAllowlistPassword":"<redacted>"}`)))
+		[]byte(`{"streamRegistryPassword":"<redacted>","backendRedisPassword":"<redacted>"}`)))
 	require.NoError(t, c.PatchGlobal(&optional))
 	require.Equal(t, "registry-secret", c.StreamRegistryPassword)
-	require.Equal(t, "allowlist-secret", c.PublishAllowlistPassword)
+	require.Equal(t, "backend-secret", c.BackendRedisPassword)
 }
 
 func TestViewTokenOwnerCheckRequirements(t *testing.T) {
@@ -39,8 +39,7 @@ func TestViewTokenOwnerCheckRequirements(t *testing.T) {
 		return err
 	}
 
-	require.ErrorContains(t, load("viewTokenOwnerCheck: yes\nauthMethod: jwt\nauthJWTJWKS: http://x\n"), "publishAllowlist")
-	require.ErrorContains(t, load("viewTokenOwnerCheck: yes\npublishAllowlist: yes\n"), "authMethod")
-	require.ErrorContains(t, load("viewTokenOwnerCheck: yes\npublishAllowlist: yes\nauthMethod: jwt\nauthJWTJWKS: http://x\nplayback: yes\n"), "playback")
-	require.NoError(t, load("viewTokenOwnerCheck: yes\npublishAllowlist: yes\nauthMethod: jwt\nauthJWTJWKS: http://x\n"))
+	require.ErrorContains(t, load("viewTokenOwnerCheck: yes\n"), "authMethod")
+	require.ErrorContains(t, load("viewTokenOwnerCheck: yes\nauthMethod: jwt\nauthJWTJWKS: http://x\nplayback: yes\n"), "playback")
+	require.NoError(t, load("viewTokenOwnerCheck: yes\nauthMethod: jwt\nauthJWTJWKS: http://x\n"))
 }

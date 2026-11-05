@@ -419,21 +419,23 @@ type Conf struct {
 	StreamRegistryServerID string   `json:"streamRegistryServerID"`
 	StreamRegistryTTL      Duration `json:"streamRegistryTTL"`
 
-	// Publish allowlist
-	PublishAllowlist           bool   `json:"publishAllowlist"`
-	PublishAllowlistAddress    string `json:"publishAllowlistAddress"`
-	PublishAllowlistPassword   string `json:"publishAllowlistPassword"`
-	PublishAllowlistDB         int    `json:"publishAllowlistDB"`
-	PublishAllowlistKey        string `json:"publishAllowlistKey"`
-	PublishAllowlistPathPrefix string `json:"publishAllowlistPathPrefix"`
-	PublishAllowlistFailOpen   bool   `json:"publishAllowlistFailOpen"`
+	// Redis server maintained by the orchestrator, used by the settings below
+	BackendRedisAddress  string `json:"backendRedisAddress"`
+	BackendRedisPassword string `json:"backendRedisPassword"`
+	BackendRedisDB       int    `json:"backendRedisDB"`
+	CameraPathPrefix     string `json:"cameraPathPrefix"`
 
-	// Dynamic allow origins, read from the Redis server of the publish allowlist
+	// Publish blocklist
+	PublishBlocklist    bool   `json:"publishBlocklist"`
+	PublishBlocklistKey string `json:"publishBlocklistKey"`
+
+	// Dynamic allow origins
 	DynamicAllowOrigins    bool   `json:"dynamicAllowOrigins"`
 	DynamicAllowOriginsKey string `json:"dynamicAllowOriginsKey"`
 
-	// View token owner check, using the publish allowlist
+	// View token owner check
 	ViewTokenOwnerCheck      bool     `json:"viewTokenOwnerCheck"`
+	ViewTokenOwnerKey        string   `json:"viewTokenOwnerKey"`
 	ViewTokenOwnerExemptKeys []string `json:"viewTokenOwnerExemptKeys"`
 
 	// Publisher limits
@@ -573,10 +575,10 @@ func (conf *Conf) setDefaults() {
 	// Stream registry
 	conf.StreamRegistryAddress = "localhost:6379"
 	conf.StreamRegistryTTL = 60 * Duration(time.Second)
-	conf.PublishAllowlistAddress = "localhost:6379"
-	conf.PublishAllowlistKey = "camera:stream_ids"
-	conf.PublishAllowlistPathPrefix = "live/"
-	conf.PublishAllowlistFailOpen = true
+	conf.BackendRedisAddress = "localhost:6379"
+	conf.CameraPathPrefix = "live/"
+	conf.PublishBlocklistKey = "camera:blocked_stream_ids"
+	conf.ViewTokenOwnerKey = "camera:stream_ids"
 	conf.DynamicAllowOriginsKey = "media:allowed_origins"
 	conf.ViewTokenOwnerExemptKeys = []string{"orchestrator"}
 
@@ -900,9 +902,6 @@ func (conf *Conf) validate(l logger.Writer) error {
 	}
 
 	if conf.ViewTokenOwnerCheck {
-		if !conf.PublishAllowlist {
-			return fmt.Errorf("'viewTokenOwnerCheck' requires 'publishAllowlist'")
-		}
 		if conf.AuthMethod != AuthMethodJWT {
 			return fmt.Errorf("'viewTokenOwnerCheck' requires 'authMethod' to be 'jwt'")
 		}
@@ -1267,15 +1266,15 @@ func (conf *Conf) PatchGlobal(optional *OptionalGlobal) error {
 	}
 
 	streamRegistryPassword := conf.StreamRegistryPassword
-	publishAllowlistPassword := conf.PublishAllowlistPassword
+	backendRedisPassword := conf.BackendRedisPassword
 
 	copyStructFields(conf, optional.Values)
 
 	if conf.StreamRegistryPassword == redactedCredential {
 		conf.StreamRegistryPassword = streamRegistryPassword
 	}
-	if conf.PublishAllowlistPassword == redactedCredential {
-		conf.PublishAllowlistPassword = publishAllowlistPassword
+	if conf.BackendRedisPassword == redactedCredential {
+		conf.BackendRedisPassword = backendRedisPassword
 	}
 
 	return conf.validate(nil)

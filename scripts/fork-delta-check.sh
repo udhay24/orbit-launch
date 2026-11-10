@@ -71,6 +71,9 @@ exists   internal/dynamicorigins/origins.go "dynamicorigins package present"
 contains internal/protocols/httpp/handler_origin.go "dynamicAllowOrigins" "httpp: dynamic origins hook"
 contains internal/core/core.go "dynamicOrigins" "core: dynamic origins wiring"
 
+echo "== hls timestamp jumps =="
+exists   internal/protocols/hls/timestamp_rebaser.go "hls: timestamp rebaser present"
+contains internal/protocols/hls/from_stream.go "rb.rebase(u.PTS, track.ClockRate)" "hls: writes go through the rebaser"
 echo "== chaos suite present =="
 exists .ai/chaos_test.py "chaos suite present"
 

@@ -1,8 +1,14 @@
 package hls_test
 
 import (
+	"bytes"
 	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
@@ -13,6 +19,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/protocols/hls"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
+	"github.com/bluenviron/mediamtx/internal/unit"
 )
 
 func TestFromStreamNoSupportedCodecs(t *testing.T) {
@@ -240,4 +247,96 @@ func TestFromStreamMPEGTSVariantSkipExtraAudio(t *testing.T) {
 			m.Close()
 		})
 	}
+}
+
+type playlistResponseWriter struct {
+	bytes.Buffer
+	h          http.Header
+	statusCode int
+}
+
+func (w *playlistResponseWriter) Header() http.Header { return w.h }
+
+func (w *playlistResponseWriter) WriteHeader(statusCode int) { w.statusCode = statusCode }
+
+func getPlaylist(t *testing.T, m *gohlslib.Muxer, path string) string {
+	u, err := url.Parse("http://localhost/" + path)
+	require.NoError(t, err)
+	w := &playlistResponseWriter{h: make(http.Header)}
+	m.Handle(w, &http.Request{URL: u})
+	if w.statusCode != http.StatusOK {
+		return ""
+	}
+	return w.String()
+}
+
+// A camera that stalls and resumes with timestamps 26s ahead must not produce a 26s segment,
+// because the playlist's target duration never decreases and players would keep freezing.
+func TestFromStreamRemovesTimestampJumps(t *testing.T) {
+	desc := &description.Session{Medias: []*description.Media{test.MediaH264}}
+
+	strm := &stream.Stream{
+		OrigDesc:          desc,
+		WriteQueueSize:    512,
+		RTPMaxPayloadSize: 1450,
+		Parent:            test.NilLogger,
+	}
+	require.NoError(t, strm.Initialize())
+	defer strm.Close()
+
+	subStream := &stream.SubStream{Stream: strm, UseRTPPackets: false}
+	require.NoError(t, subStream.Initialize())
+
+	m := &gohlslib.Muxer{
+		Variant:            gohlslib.MuxerVariantMPEGTS,
+		SegmentCount:       7,
+		SegmentMinDuration: time.Second,
+	}
+
+	var warnings []string
+	r := &stream.Reader{Parent: test.Logger(func(_ logger.Level, f string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(f, args...))
+	})}
+	require.NoError(t, hls.FromStream(strm.OrigDesc, strm.OutDescCopy(), r, m))
+	require.NoError(t, m.Start())
+	defer m.Close()
+
+	strm.AddReader(r)
+	defer strm.RemoveReader(r)
+
+	// 12 fps with a keyframe every 2s, like the cameras; a 26s jump after 10s.
+	const frame = 90000 / 12
+	jump := int64(0)
+	for i := range 12 * 40 {
+		if i == 12*10+3 {
+			jump = 26 * 90000
+		}
+		payload := unit.PayloadH264{{1, 2}}
+		if i%24 == 0 {
+			payload = unit.PayloadH264{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}
+		}
+		subStream.WriteUnit(test.MediaH264, test.FormatH264, &unit.Unit{
+			PTS:     int64(i)*frame + jump,
+			NTP:     time.Now(),
+			Payload: payload,
+		})
+	}
+
+	var media string
+	require.Eventually(t, func() bool {
+		media = getPlaylist(t, m, "main_stream.m3u8")
+		return strings.Contains(media, "#EXT-X-MEDIA-SEQUENCE:") &&
+			!strings.Contains(media, "#EXT-X-MEDIA-SEQUENCE:0\n")
+	}, 5*time.Second, 50*time.Millisecond)
+
+	require.Contains(t, media, "#EXT-X-TARGETDURATION:2\n")
+	for _, line := range strings.Split(media, "\n") {
+		if v, ok := strings.CutPrefix(line, "#EXTINF:"); ok {
+			d, err := strconv.ParseFloat(strings.TrimSuffix(v, ","), 64)
+			require.NoError(t, err)
+			require.LessOrEqual(t, d, 2.5, line)
+		}
+	}
+	// 26s plus the 1/12s between the two frames.
+	require.Equal(t, []string{"timestamps jumped by 26.083333334s, removing the gap"}, warnings)
 }

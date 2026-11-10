@@ -1,6 +1,7 @@
 package streamregistry
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -111,4 +112,70 @@ func TestRegistryKeyExpires(t *testing.T) {
 	info, err := r.Lookup("cam1")
 	require.NoError(t, err)
 	require.Nil(t, info)
+}
+
+func freeAddr(t *testing.T) string {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	return addr
+}
+
+func TestRegistryStartsWithoutRedis(t *testing.T) {
+	r := &Registry{
+		RedisAddress: freeAddr(t),
+		ServerID:     "test-server",
+		TTL:          time.Second,
+		Parent:       test.NilLogger,
+	}
+	require.NoError(t, r.Initialize())
+	t.Cleanup(r.Close)
+
+	r.Register("cam1")
+	_, err := r.Lookup("cam1")
+	require.Error(t, err)
+}
+
+func TestRegistryRegistersOnceRedisIsUp(t *testing.T) {
+	addr := freeAddr(t)
+	r := &Registry{
+		RedisAddress: addr,
+		ServerID:     "test-server",
+		TTL:          400 * time.Millisecond,
+		Parent:       test.NilLogger,
+	}
+	require.NoError(t, r.Initialize())
+	t.Cleanup(r.Close)
+
+	r.Register("cam1")
+
+	mr := miniredis.NewMiniRedis()
+	require.NoError(t, mr.StartAddr(addr))
+	t.Cleanup(mr.Close)
+
+	require.Eventually(t, func() bool {
+		info, _ := r.Lookup("cam1")
+		return info != nil && info.Server == "test-server"
+	}, 3*time.Second, 20*time.Millisecond)
+}
+
+func TestRegistryRestoresLostKeys(t *testing.T) {
+	mr := miniredis.RunT(t)
+	r := &Registry{
+		RedisAddress: mr.Addr(),
+		ServerID:     "test-server",
+		TTL:          400 * time.Millisecond,
+		Parent:       test.NilLogger,
+	}
+	require.NoError(t, r.Initialize())
+	t.Cleanup(r.Close)
+
+	r.Register("cam1")
+	require.Eventually(t, func() bool { return mr.Exists(redisKey("cam1")) }, time.Second, 10*time.Millisecond)
+
+	mr.FlushAll()
+
+	require.Eventually(t, func() bool { return mr.Exists(redisKey("cam1")) }, 2*time.Second, 20*time.Millisecond)
+	require.Greater(t, mr.TTL(redisKey("cam1")), time.Duration(0))
 }

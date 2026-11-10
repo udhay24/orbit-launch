@@ -66,6 +66,8 @@ func redisKey(streamID string) string {
 }
 
 // Initialize connects to Redis and starts the heartbeat goroutine.
+// An unreachable Redis is logged, not fatal: the client reconnects by itself and
+// the heartbeat rewrites every key, so the registry fills in once Redis is back.
 func (r *Registry) Initialize() error {
 	if r.ServerID == "" {
 		hostname, err := os.Hostname()
@@ -84,16 +86,17 @@ func (r *Registry) Initialize() error {
 	r.ctx, r.cancel = context.WithCancel(context.Background())
 	r.paths = make(map[string]struct{})
 
-	err := r.client.Ping(r.ctx).Err()
-	if err != nil {
-		r.client.Close()
-		return fmt.Errorf("stream registry: Redis connection failed: %w", err)
-	}
-
 	// Detect this server's private IP once at startup (best-effort).
 	r.serverIP = privateIP()
 
-	r.log(logger.Info, "connected to Redis at %s (server ID: %s, server IP: %s)", r.RedisAddress, r.ServerID, r.serverIP)
+	pingCtx, pingCancel := context.WithTimeout(r.ctx, 3*time.Second)
+	err := r.client.Ping(pingCtx).Err()
+	pingCancel()
+	if err != nil {
+		r.log(logger.Error, "Redis at %s is unreachable, retrying in the background: %v", r.RedisAddress, err)
+	} else {
+		r.log(logger.Info, "connected to Redis at %s (server ID: %s, server IP: %s)", r.RedisAddress, r.ServerID, r.serverIP)
+	}
 
 	r.wg.Add(1)
 	go r.refreshLoop()
@@ -240,12 +243,14 @@ func (r *Registry) refreshAll() {
 		return
 	}
 
+	// SET rather than EXPIRE, so keys missed during a Redis outage or lost by Redis come back.
+	val := r.infoJSON()
 	pipe := r.client.Pipeline()
 	for _, name := range keys {
-		pipe.Expire(r.ctx, redisKey(name), r.TTL)
+		pipe.Set(r.ctx, redisKey(name), val, r.TTL)
 	}
 	_, err := pipe.Exec(r.ctx)
 	if err != nil {
-		r.log(logger.Warn, "failed to refresh TTL for %d streams: %v", len(keys), err)
+		r.log(logger.Warn, "failed to refresh %d streams: %v", len(keys), err)
 	}
 }

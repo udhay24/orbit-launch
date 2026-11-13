@@ -15,6 +15,8 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/flac"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h264"
+	"github.com/bluenviron/mediacommon/v2/pkg/codecs/h265"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/mpeg4audio"
 
 	"github.com/bluenviron/mediamtx/internal/formatlabel"
@@ -48,12 +50,21 @@ func findFormatAndIndexes(d *description.Session, forma any) (*description.Media
 	return nil, -1, -1
 }
 
+// routeTrack sends a track's writes through the stall replay, when there is one.
+func routeTrack(sr *StallReplay, isVideo bool, clockRate int, isKey func(any) bool, w trackWriter) trackWriter {
+	if sr == nil {
+		return w
+	}
+	return sr.addTrack(isVideo, clockRate, isKey, w)
+}
+
 func setupVideoTrack(
 	origDesc *description.Session,
 	outDesc *description.Session,
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
 	rb *timestampRebaser,
+	sr *StallReplay,
 ) {
 	addTrack := func(
 		media *description.Media,
@@ -74,6 +85,11 @@ func setupVideoTrack(
 			ClockRate: videoFormatAV1.ClockRate(),
 		}
 
+		write := routeTrack(sr, true, track.ClockRate, nil,
+			func(ntp time.Time, pts int64, p any) error {
+				return muxer.WriteAV1(track, ntp, pts, p.(unit.PayloadAV1))
+			})
+
 		addTrack(
 			videoMedia,
 			videoFormatAV1,
@@ -83,11 +99,10 @@ func setupVideoTrack(
 					return nil
 				}
 
-				err := muxer.WriteAV1(
-					track,
+				err := write(
 					u.NTP,
 					rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-					u.Payload.(unit.PayloadAV1))
+					u.Payload)
 				if err != nil {
 					return fmt.Errorf("muxer error: %w", err)
 				}
@@ -107,6 +122,11 @@ func setupVideoTrack(
 			ClockRate: videoFormatVP9.ClockRate(),
 		}
 
+		write := routeTrack(sr, true, track.ClockRate, nil,
+			func(ntp time.Time, pts int64, p any) error {
+				return muxer.WriteVP9(track, ntp, pts, p.(unit.PayloadVP9))
+			})
+
 		addTrack(
 			videoMedia,
 			videoFormatVP9,
@@ -116,11 +136,10 @@ func setupVideoTrack(
 					return nil
 				}
 
-				err := muxer.WriteVP9(
-					track,
+				err := write(
 					u.NTP,
 					rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-					u.Payload.(unit.PayloadVP9))
+					u.Payload)
 				if err != nil {
 					return fmt.Errorf("muxer error: %w", err)
 				}
@@ -146,6 +165,11 @@ func setupVideoTrack(
 			ClockRate: videoFormatH265.ClockRate(),
 		}
 
+		write := routeTrack(sr, true, track.ClockRate, func(p any) bool { return h265.IsRandomAccess(p.(unit.PayloadH265)) },
+			func(ntp time.Time, pts int64, p any) error {
+				return muxer.WriteH265(track, ntp, pts, p.(unit.PayloadH265))
+			})
+
 		addTrack(
 			videoMedia,
 			videoFormatH265,
@@ -155,11 +179,10 @@ func setupVideoTrack(
 					return nil
 				}
 
-				err := muxer.WriteH265(
-					track,
+				err := write(
 					u.NTP,
 					rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-					u.Payload.(unit.PayloadH265))
+					u.Payload)
 				if err != nil {
 					return fmt.Errorf("muxer error: %w", err)
 				}
@@ -184,6 +207,11 @@ func setupVideoTrack(
 			ClockRate: videoFormatH264.ClockRate(),
 		}
 
+		write := routeTrack(sr, true, track.ClockRate, func(p any) bool { return h264.IsRandomAccess(p.(unit.PayloadH264)) },
+			func(ntp time.Time, pts int64, p any) error {
+				return muxer.WriteH264(track, ntp, pts, p.(unit.PayloadH264))
+			})
+
 		addTrack(
 			videoMedia,
 			videoFormatH264,
@@ -193,11 +221,10 @@ func setupVideoTrack(
 					return nil
 				}
 
-				err := muxer.WriteH264(
-					track,
+				err := write(
 					u.NTP,
 					rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-					u.Payload.(unit.PayloadH264))
+					u.Payload)
 				if err != nil {
 					return fmt.Errorf("muxer error: %w", err)
 				}
@@ -215,6 +242,7 @@ func setupAudioTracks(
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
 	rb *timestampRebaser,
+	sr *StallReplay,
 ) error {
 	addTrack := func(
 		medi *description.Media,
@@ -252,16 +280,20 @@ func setupAudioTracks(
 					ClockRate: forma.ClockRate(),
 				}
 
+				write := routeTrack(sr, false, track.ClockRate, nil,
+					func(ntp time.Time, pts int64, p any) error {
+						return muxer.WriteOpus(track, ntp, pts, p.(unit.PayloadOpus))
+					})
+
 				addTrack(
 					media,
 					forma,
 					track,
 					func(u *unit.Unit) error {
-						err := muxer.WriteOpus(
-							track,
+						err := write(
 							u.NTP,
 							rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-							u.Payload.(unit.PayloadOpus))
+							u.Payload)
 						if err != nil {
 							return fmt.Errorf("muxer error: %w", err)
 						}
@@ -289,6 +321,11 @@ func setupAudioTracks(
 						ClockRate: forma.ClockRate(),
 					}
 
+					write := routeTrack(sr, false, track.ClockRate, nil,
+						func(ntp time.Time, pts int64, p any) error {
+							return muxer.WriteFLAC(track, ntp, pts, p.(unit.PayloadFLAC))
+						})
+
 					addTrack(
 						media,
 						forma,
@@ -298,11 +335,10 @@ func setupAudioTracks(
 								return nil
 							}
 
-							err2 := muxer.WriteFLAC(
-								track,
+							err2 := write(
 								u.NTP,
 								rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-								u.Payload.(unit.PayloadFLAC))
+								u.Payload)
 							if err2 != nil {
 								return fmt.Errorf("muxer error: %w", err2)
 							}
@@ -319,6 +355,11 @@ func setupAudioTracks(
 					ClockRate: forma.ClockRate(),
 				}
 
+				write := routeTrack(sr, false, track.ClockRate, nil,
+					func(ntp time.Time, pts int64, p any) error {
+						return muxer.WriteMPEG4Audio(track, ntp, pts, p.(unit.PayloadMPEG4Audio))
+					})
+
 				addTrack(
 					media,
 					forma,
@@ -328,11 +369,10 @@ func setupAudioTracks(
 							return nil
 						}
 
-						err := muxer.WriteMPEG4Audio(
-							track,
+						err := write(
 							u.NTP,
 							rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-							u.Payload.(unit.PayloadMPEG4Audio))
+							u.Payload)
 						if err != nil {
 							return fmt.Errorf("muxer error: %w", err)
 						}
@@ -348,6 +388,11 @@ func setupAudioTracks(
 						},
 						ClockRate: forma.ClockRate(),
 					}
+
+					write := routeTrack(sr, false, track.ClockRate, nil,
+						func(ntp time.Time, pts int64, p any) error {
+							return muxer.WriteMPEG4Audio(track, ntp, pts, p.([][]byte))
+						})
 
 					addTrack(
 						media,
@@ -365,8 +410,7 @@ func setupAudioTracks(
 								return err
 							}
 
-							return muxer.WriteMPEG4Audio(
-								track,
+							return write(
 								u.NTP,
 								rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
 								[][]byte{ame.Payloads[0][0][0]})
@@ -385,6 +429,7 @@ func setupDataTracks(
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
 	rb *timestampRebaser,
+	sr *StallReplay,
 ) {
 	addTrack := func(
 		media *description.Media,
@@ -404,6 +449,11 @@ func setupDataTracks(
 					ClockRate: forma.ClockRate(),
 				}
 
+				write := routeTrack(sr, false, track.ClockRate, nil,
+					func(ntp time.Time, pts int64, p any) error {
+						return muxer.WriteKLV(track, ntp, pts, p.(unit.PayloadKLV))
+					})
+
 				addTrack(
 					media,
 					forma,
@@ -413,11 +463,10 @@ func setupDataTracks(
 							return nil
 						}
 
-						err := muxer.WriteKLV(
-							track,
+						err := write(
 							u.NTP,
 							rb.rebase(u.PTS, track.ClockRate), // track.ClockRate = format.ClockRate, so no other conversion is needed
-							u.Payload.(unit.PayloadKLV))
+							u.Payload)
 						if err != nil {
 							return fmt.Errorf("muxer error: %w", err)
 						}
@@ -436,6 +485,18 @@ func FromStream(
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
 ) error {
+	return FromStreamWithReplay(origDesc, outDesc, r, muxer, nil)
+}
+
+// FromStreamWithReplay is FromStream with every write passing through a stall replay.
+// sr must be initialized; it can be nil.
+func FromStreamWithReplay(
+	origDesc *description.Session,
+	outDesc *description.Session,
+	r *stream.Reader,
+	muxer *gohlslib.Muxer,
+	sr *StallReplay,
+) error {
 	rb := &timestampRebaser{
 		onRebase: func(gap time.Duration) {
 			r.Parent.Log(logger.Warn, "timestamps jumped by %v, removing the gap", gap)
@@ -448,6 +509,7 @@ func FromStream(
 		r,
 		muxer,
 		rb,
+		sr,
 	)
 
 	err := setupAudioTracks(
@@ -456,6 +518,7 @@ func FromStream(
 		r,
 		muxer,
 		rb,
+		sr,
 	)
 	if err != nil {
 		return err
@@ -467,6 +530,7 @@ func FromStream(
 		r,
 		muxer,
 		rb,
+		sr,
 	)
 
 	if len(muxer.Tracks) == 0 {

@@ -438,6 +438,12 @@ type Conf struct {
 	ViewTokenOwnerKey        string   `json:"viewTokenOwnerKey"`
 	ViewTokenOwnerExemptKeys []string `json:"viewTokenOwnerExemptKeys"`
 
+	// HLS stall replay
+	HLSStallReplay       bool     `json:"hlsStallReplay"`
+	HLSStallReplayBuffer Duration `json:"hlsStallReplayBuffer"`
+	HLSStallReplayAfter  Duration `json:"hlsStallReplayAfter"`
+	HLSStallReplaySteady Duration `json:"hlsStallReplaySteady"`
+
 	// Publisher limits
 	MaxPublishers       int `json:"maxPublishers"`
 	PublisherHysteresis int `json:"publisherHysteresis"`
@@ -581,6 +587,10 @@ func (conf *Conf) setDefaults() {
 	conf.ViewTokenOwnerKey = "camera:stream_ids"
 	conf.DynamicAllowOriginsKey = "media:allowed_origins"
 	conf.ViewTokenOwnerExemptKeys = []string{"orchestrator"}
+	conf.HLSStallReplay = true
+	conf.HLSStallReplayBuffer = 60 * Duration(time.Second)
+	conf.HLSStallReplayAfter = 2 * Duration(time.Second)
+	conf.HLSStallReplaySteady = 5 * Duration(time.Second)
 
 	// Publisher limits
 	conf.MaxPublishers = 2000
@@ -898,6 +908,15 @@ func (conf *Conf) validate(l logger.Writer) error {
 			if conf.HLSSegmentCount < 3 {
 				return fmt.Errorf("'hlsSegmentCount' must be at least 3")
 			}
+		}
+	}
+
+	if conf.HLSStallReplay {
+		if conf.HLSStallReplayAfter <= 0 || conf.HLSStallReplaySteady <= 0 {
+			return fmt.Errorf("'hlsStallReplayAfter' and 'hlsStallReplaySteady' must be positive")
+		}
+		if conf.HLSStallReplayBuffer < conf.HLSStallReplayAfter {
+			return fmt.Errorf("'hlsStallReplayBuffer' must be at least 'hlsStallReplayAfter'")
 		}
 	}
 

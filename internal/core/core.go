@@ -954,6 +954,10 @@ func (p *Core) createResources(initial bool) error {
 			ReadTimeout:         p.conf.ReadTimeout,
 			WriteTimeout:        p.conf.WriteTimeout,
 			MuxerCloseAfter:     p.conf.HLSMuxerCloseAfter,
+			StallReplay:         p.conf.HLSStallReplay,
+			StallReplayBuffer:   p.conf.HLSStallReplayBuffer,
+			StallReplayAfter:    p.conf.HLSStallReplayAfter,
+			StallReplaySteady:   p.conf.HLSStallReplaySteady,
 			ExternalCmdPool:     p.externalCmdPool,
 			Metrics:             p.metrics,
 			PathManager:         p.pathManager,
@@ -1336,6 +1340,10 @@ func (p *Core) closeResources(newConf *conf.Conf) error {
 		newConf.ReadTimeout != p.conf.ReadTimeout ||
 		newConf.WriteTimeout != p.conf.WriteTimeout ||
 		newConf.HLSMuxerCloseAfter != p.conf.HLSMuxerCloseAfter ||
+		newConf.HLSStallReplay != p.conf.HLSStallReplay ||
+		newConf.HLSStallReplayBuffer != p.conf.HLSStallReplayBuffer ||
+		newConf.HLSStallReplayAfter != p.conf.HLSStallReplayAfter ||
+		newConf.HLSStallReplaySteady != p.conf.HLSStallReplaySteady ||
 		newConf.HLSCDNSecret != p.conf.HLSCDNSecret ||
 		newConf.DumpPackets != p.conf.DumpPackets ||
 		closePathManager ||

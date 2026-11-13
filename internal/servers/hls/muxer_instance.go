@@ -64,11 +64,17 @@ type muxerInstance struct {
 	stream          *stream.Stream
 	server          logger.Writer
 	parent          instanceParent
+	stallReplay     bool
+	replayBuffer    conf.Duration
+	replayAfter     conf.Duration
+	replaySteady    conf.Duration
+	replayAllowed   func() bool
 
 	ctx       context.Context
 	ctxCancel func()
 	hmuxer    *gohlslib.Muxer
 	reader    *stream.Reader
+	replay    *hls.StallReplay
 }
 
 func (mi *muxerInstance) initialize() error {
@@ -106,17 +112,31 @@ func (mi *muxerInstance) initialize() error {
 		Parent:            mi,
 	}
 
-	err := hls.FromStream(
+	if mi.stallReplay {
+		mi.replay = &hls.StallReplay{
+			Buffer:  time.Duration(mi.replayBuffer),
+			After:   time.Duration(mi.replayAfter),
+			Steady:  time.Duration(mi.replaySteady),
+			Allowed: mi.replayAllowed,
+			Parent:  mi,
+		}
+		mi.replay.Initialize()
+	}
+
+	err := hls.FromStreamWithReplay(
 		mi.stream.OrigDesc,
 		mi.stream.OutDescCopy(),
 		mi.reader,
-		mi.hmuxer)
+		mi.hmuxer,
+		mi.replay)
 	if err != nil {
+		mi.closeReplay()
 		return err
 	}
 
 	err = mi.hmuxer.Start()
 	if err != nil {
+		mi.closeReplay()
 		return err
 	}
 
@@ -142,6 +162,12 @@ func (mi *muxerInstance) close() {
 	mi.ctxCancel()
 }
 
+func (mi *muxerInstance) closeReplay() {
+	if mi.replay != nil {
+		mi.replay.Close()
+	}
+}
+
 func (mi *muxerInstance) run() {
 	defer mi.wg.Done()
 
@@ -150,6 +176,9 @@ func (mi *muxerInstance) run() {
 	mi.ctxCancel()
 
 	mi.stream.RemoveReader(mi.reader)
+
+	// after RemoveReader no live frame arrives anymore, so the replay can stop before the muxer.
+	mi.closeReplay()
 
 	mi.hmuxer.Close()
 

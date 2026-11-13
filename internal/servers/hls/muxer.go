@@ -38,6 +38,10 @@ type muxer struct {
 	segmentMaxSize  conf.StringSize
 	directory       string
 	closeAfter      conf.Duration
+	stallReplay     bool
+	replayBuffer    conf.Duration
+	replayAfter     conf.Duration
+	replaySteady    conf.Duration
 	wg              *sync.WaitGroup
 	pathName        string
 	author          *session
@@ -50,6 +54,8 @@ type muxer struct {
 	path            defs.Path
 	lastRequestTime atomic.Int64
 	bytesSent       atomic.Uint64
+	viewers         atomic.Int64
+	services        atomic.Int64
 
 	mutex                            sync.RWMutex
 	instance                         *muxerInstance
@@ -218,6 +224,24 @@ func (m *muxer) runInner() error {
 	}
 }
 
+// addSession counts a session reading this muxer and returns the function that uncounts it.
+// Sessions of services (token subject "service:...", such as Sentinel) must never get
+// replayed footage, so while one reads, replay is off for this camera.
+func (m *muxer) addSession(isService bool) func() {
+	counter := &m.viewers
+	if isService {
+		counter = &m.services
+	}
+	counter.Add(1)
+	return func() { counter.Add(-1) }
+}
+
+// replayAllowed reports whether stalls may be covered with replayed footage:
+// someone is watching and no service is reading.
+func (m *muxer) replayAllowed() bool {
+	return m.viewers.Load() > 0 && m.services.Load() == 0
+}
+
 func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
 	mi := &muxerInstance{
 		lastRequestTime: &m.lastRequestTime,
@@ -233,6 +257,11 @@ func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
 		stream:          strm,
 		server:          m.parent,
 		parent:          m,
+		stallReplay:     m.stallReplay,
+		replayBuffer:    m.replayBuffer,
+		replayAfter:     m.replayAfter,
+		replaySteady:    m.replaySteady,
+		replayAllowed:   m.replayAllowed,
 	}
 	err := mi.initialize()
 	if err != nil {

@@ -84,6 +84,10 @@ type Server struct {
 	ReadTimeout         conf.Duration
 	WriteTimeout        conf.Duration
 	MuxerCloseAfter     conf.Duration
+	StallReplay         bool
+	StallReplayBuffer   conf.Duration
+	StallReplayAfter    conf.Duration
+	StallReplaySteady   conf.Duration
 	ExternalCmdPool     *externalcmd.Pool
 	Metrics             serverMetrics
 	PathManager         serverPathManager
@@ -228,6 +232,10 @@ func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
 		parent:          s,
 		author:          author,
 		closeAfter:      s.MuxerCloseAfter,
+		stallReplay:     s.StallReplay,
+		replayBuffer:    s.StallReplayBuffer,
+		replayAfter:     s.StallReplayAfter,
+		replaySteady:    s.StallReplaySteady,
 	}
 	r.initialize()
 	s.muxers[pathName] = r

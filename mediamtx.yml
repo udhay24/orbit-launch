@@ -503,6 +503,23 @@ viewTokenOwnerKey: camera:stream_ids
 viewTokenOwnerExemptKeys: [orchestrator]
 
 ###############################################
+# Global settings -> HLS stall replay
+
+# While someone watches a camera over HLS, keep its latest footage in memory and, when the
+# camera stays connected but stops sending video, loop that footage to viewers until the
+# camera sends steadily again. Cameras nobody watches keep nothing. A camera that
+# disconnects ends the replay. Never applied while a service token (subject "service:...",
+# such as Sentinel) reads the camera, and never recorded.
+hlsStallReplay: yes
+# How much of the latest footage to keep and loop.
+hlsStallReplayBuffer: 60s
+# How long video must be missing before replay starts. Keep it below what players buffer
+# (about 2.4 segments, 5s with 2s segments) so viewers never run out.
+hlsStallReplayAfter: 2s
+# How long the camera must send without pauses before viewers get live video again.
+hlsStallReplaySteady: 5s
+
+###############################################
 # Global settings -> MoQ server
 
 # Enable the MoQ (Media over QUIC) server, which allows to publish and read streams with the MoQ protocol.

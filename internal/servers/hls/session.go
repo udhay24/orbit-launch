@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -190,6 +191,8 @@ func (s *session) runInner2(errGroupCtx context.Context, errGroup *errgroup.Grou
 	if err != nil {
 		return err
 	}
+
+	defer muxer.addSession(strings.HasPrefix(res.AuthRes.User, "service:"))()
 
 	muxerInstance := muxer.getInstance()
 	if muxerInstance == nil {

@@ -508,8 +508,9 @@ viewTokenOwnerExemptKeys: [orchestrator]
 # While someone watches a camera over HLS, keep its latest footage in memory and, when the
 # camera stays connected but stops sending video, loop that footage to viewers until the
 # camera sends steadily again. Cameras nobody watches keep nothing. A camera that
-# disconnects ends the replay. Never applied while a service token (subject "service:...",
-# such as Sentinel) reads the camera, and never recorded.
+# disconnects ends the replay, and so does 30s without any video. Off for a camera while a
+# service token (subject "service:...", such as Sentinel) reads it and for 15 minutes after,
+# and never recorded.
 hlsStallReplay: yes
 # How much of the latest footage to keep and loop.
 hlsStallReplayBuffer: 60s

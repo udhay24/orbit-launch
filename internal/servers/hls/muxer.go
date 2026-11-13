@@ -17,6 +17,9 @@ import (
 
 const (
 	recreateInstancePause = 10 * time.Second
+	// Services sample a camera every few minutes with short sessions. Replay stays off for
+	// this long after a service last read the camera, so it is also off between visits.
+	serviceReplayHold = 15 * time.Minute
 )
 
 func emptyTimer() *time.Timer {
@@ -56,6 +59,9 @@ type muxer struct {
 	bytesSent       atomic.Uint64
 	viewers         atomic.Int64
 	services        atomic.Int64
+	// when a service last read this camera (unix nanoseconds, 0 if never). Shared by all
+	// muxers of the path, so it survives camera reconnections.
+	lastServiceRead *atomic.Int64
 
 	mutex                            sync.RWMutex
 	instance                         *muxerInstance
@@ -228,18 +234,27 @@ func (m *muxer) runInner() error {
 // Sessions of services (token subject "service:...", such as Sentinel) must never get
 // replayed footage, so while one reads, replay is off for this camera.
 func (m *muxer) addSession(isService bool) func() {
-	counter := &m.viewers
-	if isService {
-		counter = &m.services
+	if !isService {
+		m.viewers.Add(1)
+		return func() { m.viewers.Add(-1) }
 	}
-	counter.Add(1)
-	return func() { counter.Add(-1) }
+
+	m.services.Add(1)
+	m.lastServiceRead.Store(time.Now().UnixNano())
+	return func() {
+		m.lastServiceRead.Store(time.Now().UnixNano())
+		m.services.Add(-1)
+	}
 }
 
 // replayAllowed reports whether stalls may be covered with replayed footage:
-// someone is watching and no service is reading.
+// someone is watching, and no service is reading or has read the camera recently.
 func (m *muxer) replayAllowed() bool {
-	return m.viewers.Load() > 0 && m.services.Load() == 0
+	if m.viewers.Load() == 0 || m.services.Load() != 0 {
+		return false
+	}
+	last := m.lastServiceRead.Load()
+	return last == 0 || time.Since(time.Unix(0, last)) >= serviceReplayHold
 }
 
 func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {

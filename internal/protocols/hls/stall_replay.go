@@ -19,8 +19,12 @@ import (
 
 const (
 	replayTickPeriod = 50 * time.Millisecond
-	// a pause in live video longer than this restarts the "steady" countdown.
-	replaySteadyMaxGap = time.Second
+	// replay needs at least this much footage; looping a single keyframe would send it
+	// at full frame rate.
+	replayMinFootage = time.Second
+	// a camera that stays connected but has sent no video at all for this long is
+	// treated as down: replay stops and the picture freezes until video returns.
+	replayMaxSilence = 30 * time.Second
 	// spacing used after the last frame of the loop and around switches, when the
 	// camera's own frame interval is not known yet.
 	replayDefaultFrameStep = 40 * time.Millisecond
@@ -96,6 +100,8 @@ type StallReplay struct {
 	loopLen           time.Duration
 	steadySince       time.Time
 	lastLiveVideoWall time.Time
+	// when the camera last delivered a video frame, in any state.
+	lastArrivalWall time.Time
 
 	running   bool
 	ctx       context.Context
@@ -184,6 +190,7 @@ func (sr *StallReplay) write(id int, ntp time.Time, pts int64, payload any) erro
 			}
 		}
 		sr.lastVideoIn = in
+		sr.lastArrivalWall = now
 	}
 
 	if sr.state == replayStateReplay {
@@ -191,7 +198,8 @@ func (sr *StallReplay) write(id int, ntp time.Time, pts int64, payload any) erro
 			return nil
 		}
 
-		if sr.lastLiveVideoWall.IsZero() || now.Sub(sr.lastLiveVideoWall) > replaySteadyMaxGap {
+		// steady means no pause long enough to count as a stall.
+		if sr.lastLiveVideoWall.IsZero() || now.Sub(sr.lastLiveVideoWall) >= sr.After {
 			sr.steadySince = now
 		}
 		sr.lastLiveVideoWall = now
@@ -347,7 +355,11 @@ func (sr *StallReplay) tick() bool {
 		}
 
 	case replayStateReplay:
-		sr.emit(now)
+		if now.Sub(sr.lastArrivalWall) >= replayMaxSilence {
+			sr.stopReplay("the camera sent no video for " + replayMaxSilence.String())
+		} else {
+			sr.emit(now)
+		}
 	}
 
 	return true
@@ -355,7 +367,8 @@ func (sr *StallReplay) tick() bool {
 
 func (sr *StallReplay) hasFootage() bool {
 	b := sr.buffered()
-	return len(b) > 0 && b[0].track == sr.video && b[0].key
+	return len(b) > 0 && b[0].track == sr.video && b[0].key &&
+		sr.lastVideoIn-b[0].in >= replayMinFootage
 }
 
 func (sr *StallReplay) startReplay(now time.Time) {

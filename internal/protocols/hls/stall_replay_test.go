@@ -77,6 +77,15 @@ func newTestCamera(t *testing.T, supported bool) *testCamera {
 
 // send delivers d of media in real time.
 func (c *testCamera) send(d time.Duration) {
+	c.sendPaced(d, 20*time.Millisecond)
+}
+
+// sendClump delivers d of media almost at once, as after a network hold-up.
+func (c *testCamera) sendClump(d time.Duration) {
+	c.sendPaced(d, time.Millisecond)
+}
+
+func (c *testCamera) sendPaced(d time.Duration, wallPerStep time.Duration) {
 	for end := c.media + d; c.media < end; {
 		c.nextID++
 		require.NoError(c.t, c.audio(c.clock, durationToTimestamp(c.media, testAudioRate), testPayload{id: c.nextID}))
@@ -92,7 +101,7 @@ func (c *testCamera) send(d time.Duration) {
 
 		c.step++
 		c.media += 20 * time.Millisecond
-		c.clock = c.clock.Add(20 * time.Millisecond)
+		c.clock = c.clock.Add(wallPerStep)
 		c.sr.tick()
 	}
 }
@@ -208,7 +217,7 @@ func TestStallReplayLoopsWithIncreasingTimestamps(t *testing.T) {
 	lastLive := videoOuts(c.outs)[len(videoOuts(c.outs))-1]
 	n := len(c.outs)
 
-	c.idle(32 * time.Second) // 5 passes of the 6s loop
+	c.idle(28 * time.Second) // more than 4 passes of the 6s loop
 
 	outs := c.outsSince(n)
 	requireIncreasing(t, outs, 0)
@@ -225,7 +234,7 @@ func TestStallReplayLoopsWithIncreasingTimestamps(t *testing.T) {
 
 	// output video keeps pace with the clock
 	last := videoOuts(outs)[len(videoOuts(outs))-1]
-	require.InDelta(t, 32.0, timestampToDuration(last.pts-lastLive.pts, testVideoRate).Seconds(), 0.1)
+	require.InDelta(t, 28.0, timestampToDuration(last.pts-lastLive.pts, testVideoRate).Seconds(), 0.1)
 }
 
 func TestStallReplayReturnsToLiveWhenSteady(t *testing.T) {
@@ -344,4 +353,50 @@ func TestStallReplayBufferIsBounded(t *testing.T) {
 	require.GreaterOrEqual(t, span, c.sr.Buffer-2*time.Second)
 	require.True(t, b[0].key)
 	require.Less(t, len(c.sr.buf), 2*len(b)+300, "dropped units are compacted away")
+}
+
+func TestStallReplayNeedsASecondOfFootage(t *testing.T) {
+	c := newTestCamera(t, true)
+	c.send(500 * time.Millisecond)
+	n := len(c.outs)
+
+	c.idle(5 * time.Second)
+	require.Equal(t, n, len(c.outs), "half a second of footage is not looped")
+	require.Equal(t, replayStateLive, c.sr.state)
+}
+
+func TestStallReplayStopsWhenTheCameraSendsNoVideoAtAll(t *testing.T) {
+	c := newTestCamera(t, true)
+	c.send(10 * time.Second)
+
+	c.idle(29 * time.Second)
+	require.Equal(t, replayStateReplay, c.sr.state)
+
+	c.idle(2 * time.Second)
+	require.NotEqual(t, replayStateReplay, c.sr.state, "30s without video: the camera is down")
+	n := len(c.outs)
+	c.idle(20 * time.Second)
+	require.Equal(t, n, len(c.outs), "the picture stays frozen")
+
+	c.send(4 * time.Second)
+	live := videoOuts(c.outsSince(n))
+	require.NotEmpty(t, live)
+	require.True(t, live[0].payload.key)
+	require.True(t, live[0].live)
+	requireIncreasing(t, c.outs, 1)
+}
+
+func TestStallReplayReturnsToLiveOnACameraThatDeliversInClumps(t *testing.T) {
+	c := newTestCamera(t, true)
+	c.send(10 * time.Second)
+	c.idle(3 * time.Second)
+	require.Equal(t, replayStateReplay, c.sr.state)
+
+	// the camera keeps up, but its frames arrive in clumps 1.5s apart: never a 2s stall
+	for i := 0; i < 8; i++ {
+		c.idle(1500 * time.Millisecond)
+		c.sendClump(1500 * time.Millisecond)
+	}
+	require.Equal(t, replayStateLive, c.sr.state)
+	requireIncreasing(t, c.outs, 1)
 }

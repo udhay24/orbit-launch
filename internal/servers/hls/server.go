@@ -99,6 +99,8 @@ type Server struct {
 
 	muxersMutex sync.RWMutex
 	muxers      map[string]*muxer
+	// path name -> *atomic.Int64, see muxer.lastServiceRead
+	serviceReads sync.Map
 
 	sessionsMutex     sync.RWMutex
 	sessionsBySecret  map[uuid.UUID]*session
@@ -219,6 +221,8 @@ func (s *Server) createAutomaticMuxerLocked(pa defs.Path) {
 }
 
 func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
+	lastServiceRead, _ := s.serviceReads.LoadOrStore(pathName, &atomic.Int64{})
+
 	r := &muxer{
 		variant:         s.Variant,
 		segmentCount:    s.SegmentCount,
@@ -236,6 +240,7 @@ func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
 		replayBuffer:    s.StallReplayBuffer,
 		replayAfter:     s.StallReplayAfter,
 		replaySteady:    s.StallReplaySteady,
+		lastServiceRead: lastServiceRead.(*atomic.Int64),
 	}
 	r.initialize()
 	s.muxers[pathName] = r

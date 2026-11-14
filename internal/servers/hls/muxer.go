@@ -41,6 +41,7 @@ type muxer struct {
 	segmentMaxSize  conf.StringSize
 	directory       string
 	closeAfter      conf.Duration
+	videoOnly       bool
 	stallReplay     bool
 	replayBuffer    conf.Duration
 	replayAfter     conf.Duration
@@ -272,6 +273,7 @@ func (m *muxer) createInstance(strm *stream.Stream) (*muxerInstance, error) {
 		stream:          strm,
 		server:          m.parent,
 		parent:          m,
+		videoOnly:       m.videoOnly,
 		stallReplay:     m.stallReplay,
 		replayBuffer:    m.replayBuffer,
 		replayAfter:     m.replayAfter,

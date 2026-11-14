@@ -437,3 +437,31 @@ func TestFromStreamKeepsTracksThatRunApart(t *testing.T) {
 		require.True(t, strings.HasPrefix(w, "timestamps jumped by 26."), w)
 	}
 }
+
+func TestFromStreamVideoOnly(t *testing.T) {
+	for _, ca := range []struct {
+		name   string
+		medias []*description.Media
+		codecs []string
+	}{
+		{"video and audio", []*description.Media{test.MediaH264, test.MediaMPEG4Audio}, []string{"*codecs.H264"}},
+		{"audio only", []*description.Media{test.MediaMPEG4Audio}, []string{"*codecs.MPEG4Audio"}},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			desc := &description.Session{Medias: ca.medias}
+
+			r := &stream.Reader{Parent: test.NilLogger}
+
+			m := &gohlslib.Muxer{Variant: gohlslib.MuxerVariantMPEGTS}
+
+			err := hls.FromStreamWithReplay(desc, desc, r, m, nil, true)
+			require.NoError(t, err)
+
+			var codecs []string
+			for _, tr := range m.Tracks {
+				codecs = append(codecs, fmt.Sprintf("%T", tr.Codec))
+			}
+			require.Equal(t, ca.codecs, codecs)
+		})
+	}
+}

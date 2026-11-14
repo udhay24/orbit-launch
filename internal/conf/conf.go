@@ -438,6 +438,9 @@ type Conf struct {
 	ViewTokenOwnerKey        string   `json:"viewTokenOwnerKey"`
 	ViewTokenOwnerExemptKeys []string `json:"viewTokenOwnerExemptKeys"`
 
+	// HLS video only
+	HLSVideoOnly bool `json:"hlsVideoOnly"`
+
 	// HLS stall replay
 	HLSStallReplay       bool     `json:"hlsStallReplay"`
 	HLSStallReplayBuffer Duration `json:"hlsStallReplayBuffer"`

@@ -84,6 +84,7 @@ type Server struct {
 	ReadTimeout         conf.Duration
 	WriteTimeout        conf.Duration
 	MuxerCloseAfter     conf.Duration
+	VideoOnly           bool
 	StallReplay         bool
 	StallReplayBuffer   conf.Duration
 	StallReplayAfter    conf.Duration
@@ -236,6 +237,7 @@ func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
 		parent:          s,
 		author:          author,
 		closeAfter:      s.MuxerCloseAfter,
+		videoOnly:       s.VideoOnly,
 		stallReplay:     s.StallReplay,
 		replayBuffer:    s.StallReplayBuffer,
 		replayAfter:     s.StallReplayAfter,

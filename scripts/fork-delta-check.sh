@@ -80,6 +80,7 @@ contains internal/protocols/hls/from_stream.go "routeTrack(sr" "hls: writes go t
 contains internal/servers/hls/session.go "addSession(strings.HasPrefix(res.AuthRes.User, \"service:\"))" "hls: sessions counted, services excluded from replay"
 contains internal/conf/conf.go "HLSStallReplay" "conf: HLSStallReplay fields"
 contains mediamtx.yml "hlsStallReplay" "mediamtx.yml: hlsStallReplay key"
+contains mediamtx.yml "hlsVideoOnly: yes" "mediamtx.yml: hlsVideoOnly on (cameras with audio far from video never start in hls.js)"
 echo "== chaos suite present =="
 exists .ai/chaos_test.py "chaos suite present"
 

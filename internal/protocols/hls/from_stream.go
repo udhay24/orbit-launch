@@ -516,17 +516,19 @@ func FromStream(
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
 ) error {
-	return FromStreamWithReplay(origDesc, outDesc, r, muxer, nil)
+	return FromStreamWithReplay(origDesc, outDesc, r, muxer, nil, false)
 }
 
 // FromStreamWithReplay is FromStream with every write passing through a stall replay.
-// sr must be initialized; it can be nil.
+// sr must be initialized; it can be nil. With videoOnly, audio is left out of streams
+// that have video.
 func FromStreamWithReplay(
 	origDesc *description.Session,
 	outDesc *description.Session,
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
 	sr *StallReplay,
+	videoOnly bool,
 ) error {
 	// one rebaser per track: some cameras keep audio seconds away from video, and a shared one
 	// takes every switch between the two for a jump, scrambling timestamps until the muxer fails.
@@ -547,16 +549,21 @@ func FromStreamWithReplay(
 		sr,
 	)
 
-	err := setupAudioTracks(
-		origDesc,
-		outDesc,
-		r,
-		muxer,
-		newRebaser,
-		sr,
-	)
-	if err != nil {
-		return err
+	// some cameras stamp audio tens of seconds away from video, and the gap grows while they
+	// stay connected. hls.js waits for the two to line up before playing, so such a tile takes
+	// as long as the gap to start, or never starts. Muted viewers lose nothing without audio.
+	if !videoOnly || len(muxer.Tracks) == 0 {
+		err := setupAudioTracks(
+			origDesc,
+			outDesc,
+			r,
+			muxer,
+			newRebaser,
+			sr,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
 	setupDataTracks(

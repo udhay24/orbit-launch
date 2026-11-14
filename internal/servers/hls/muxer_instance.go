@@ -64,6 +64,7 @@ type muxerInstance struct {
 	stream          *stream.Stream
 	server          logger.Writer
 	parent          instanceParent
+	videoOnly       bool
 	stallReplay     bool
 	replayBuffer    conf.Duration
 	replayAfter     conf.Duration
@@ -128,7 +129,8 @@ func (mi *muxerInstance) initialize() error {
 		mi.stream.OutDescCopy(),
 		mi.reader,
 		mi.hmuxer,
-		mi.replay)
+		mi.replay,
+		mi.videoOnly)
 	if err != nil {
 		mi.closeReplay()
 		return err

@@ -503,6 +503,15 @@ viewTokenOwnerKey: camera:stream_ids
 viewTokenOwnerExemptKeys: [orchestrator]
 
 ###############################################
+# Global settings -> HLS video only
+
+# Leave audio out of HLS for cameras that send video. Some cameras stamp audio tens of
+# seconds away from video, and the gap grows while they stay connected; players wait for
+# the two to line up, so such a tile starts that much later or never. Cameras without
+# video keep their audio. Recordings and other protocols are not affected.
+hlsVideoOnly: yes
+
+###############################################
 # Global settings -> HLS stall replay
 
 # While someone watches a camera over HLS, keep its latest footage in memory and, when the

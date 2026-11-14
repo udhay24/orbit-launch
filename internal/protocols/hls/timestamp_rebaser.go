@@ -12,8 +12,10 @@ const (
 	resumeStep = 100 * time.Millisecond
 )
 
-// timestampRebaser is shared by all tracks of a stream, so a jump seen on one track is not
-// applied twice when the other tracks catch up. Callbacks of a stream.Reader run on a single
+// timestampRebaser handles one track. Each track gets its own, because some cameras keep audio
+// seconds away from video and a shared one would take every switch between them for a jump.
+// When a camera jumps, every track removes its own gap and lands 100ms after its last sample,
+// so tracks that were in sync stay in sync. Callbacks of a stream.Reader run on a single
 // goroutine, so it needs no lock.
 type timestampRebaser struct {
 	onRebase func(gap time.Duration)

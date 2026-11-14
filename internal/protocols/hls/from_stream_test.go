@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -339,4 +340,100 @@ func TestFromStreamRemovesTimestampJumps(t *testing.T) {
 	}
 	// 26s plus the 1/12s between the two frames.
 	require.Equal(t, []string{"timestamps jumped by 26.083333334s, removing the gap"}, warnings)
+}
+
+// Some cameras keep their audio timestamps tens of seconds away from video. That steady offset
+// is not a jump: removing it on every switch between the two tracks scrambled the video
+// timestamps until the muxer failed and viewers lost the stream for 10s at a time.
+func TestFromStreamKeepsTracksThatRunApart(t *testing.T) {
+	desc := &description.Session{Medias: []*description.Media{test.MediaH264, test.MediaMPEG4Audio}}
+
+	strm := &stream.Stream{
+		OrigDesc:          desc,
+		WriteQueueSize:    4096, // 40s of video and AAC are written at once
+		RTPMaxPayloadSize: 1450,
+		Parent:            test.NilLogger,
+	}
+	require.NoError(t, strm.Initialize())
+	defer strm.Close()
+
+	subStream := &stream.SubStream{Stream: strm, UseRTPPackets: false}
+	require.NoError(t, subStream.Initialize())
+
+	m := &gohlslib.Muxer{
+		Variant:            gohlslib.MuxerVariantMPEGTS,
+		SegmentCount:       7,
+		SegmentMinDuration: time.Second,
+	}
+
+	var mutex sync.Mutex
+	var warnings []string
+	r := &stream.Reader{Parent: test.Logger(func(_ logger.Level, f string, args ...any) {
+		mutex.Lock()
+		defer mutex.Unlock()
+		warnings = append(warnings, fmt.Sprintf(f, args...))
+	})}
+	require.NoError(t, hls.FromStream(strm.OrigDesc, strm.OutDescCopy(), r, m))
+	require.NoError(t, m.Start())
+	defer m.Close()
+
+	strm.AddReader(r)
+	defer strm.RemoveReader(r)
+
+	// 12 fps with a keyframe every 2s; audio runs 32.6s ahead of video, and after 10s both
+	// tracks jump 26s forward together, which must still be removed once on each track.
+	const frame = 90000 / 12
+	const audioAhead = 326 * 44100 / 10
+	jump := int64(0)
+	audio := int64(0)
+	for i := range 12 * 40 {
+		if i == 12*10+3 {
+			jump = 26
+		}
+		payload := unit.PayloadH264{{1, 2}}
+		if i%24 == 0 {
+			payload = unit.PayloadH264{test.FormatH264.SPS, test.FormatH264.PPS, {5, 1}}
+		}
+		subStream.WriteUnit(test.MediaH264, test.FormatH264, &unit.Unit{
+			PTS:     int64(i)*frame + jump*90000,
+			NTP:     time.Now(),
+			Payload: payload,
+		})
+		// AAC frames of 1024 samples covering this video frame.
+		for ; audio*1024 < int64(i+1)*44100/12; audio++ {
+			subStream.WriteUnit(test.MediaMPEG4Audio, test.FormatMPEG4Audio, &unit.Unit{
+				PTS:     audio*1024 + audioAhead + jump*44100,
+				NTP:     time.Now(),
+				Payload: unit.PayloadMPEG4Audio{{1, 2}},
+			})
+		}
+	}
+
+	var media string
+	require.Eventually(t, func() bool {
+		media = getPlaylist(t, m, "main_stream.m3u8")
+		return strings.Contains(media, "#EXT-X-MEDIA-SEQUENCE:") &&
+			!strings.Contains(media, "#EXT-X-MEDIA-SEQUENCE:0\n")
+	}, 5*time.Second, 50*time.Millisecond)
+
+	select {
+	case err := <-r.Error():
+		t.Fatalf("muxer failed: %v", err)
+	default:
+	}
+
+	for _, line := range strings.Split(media, "\n") {
+		if v, ok := strings.CutPrefix(line, "#EXTINF:"); ok {
+			d, err := strconv.ParseFloat(strings.TrimSuffix(v, ","), 64)
+			require.NoError(t, err)
+			require.LessOrEqual(t, d, 2.5, line)
+		}
+	}
+
+	mutex.Lock()
+	defer mutex.Unlock()
+	require.Len(t, warnings, 2, warnings)
+	for _, w := range warnings {
+		require.True(t, strings.HasPrefix(w, "timestamps jumped by 26."), w)
+	}
 }

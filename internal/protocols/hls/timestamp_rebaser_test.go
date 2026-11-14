@@ -1,10 +1,15 @@
 package hls
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/test"
 )
 
 func TestTimestampRebaser(t *testing.T) {
@@ -62,30 +67,6 @@ func TestTimestampRebaser(t *testing.T) {
 	}
 }
 
-func TestTimestampRebaserSharedAcrossTracks(t *testing.T) {
-	r := &timestampRebaser{}
-
-	// video at 90kHz and audio at 44.1kHz jump by the same 26s; the offset is applied once.
-	require.Equal(t, int64(0), r.rebase(0, 90000))
-	require.Equal(t, int64(0), r.rebase(0, 44100))
-	video := r.rebase(26*90000, 90000)
-	audio := r.rebase(26*44100+4410, 44100)
-
-	require.Equal(t, int64(9000), video) // lands 100ms after the last sample
-	require.Equal(t, int64(8820), audio) // keeps its 100ms distance to video
-}
-
-func TestTimestampRebaserIgnoresOneTrackCatchingUp(t *testing.T) {
-	r := &timestampRebaser{}
-
-	// audio keeps flowing while video stalls; video resumes near audio, so nothing is shifted.
-	r.rebase(0, 90000)
-	for i := range 30 {
-		r.rebase(int64(i)*44100, 44100)
-	}
-	require.Equal(t, int64(29*90000), r.rebase(29*90000, 90000))
-}
-
 func TestTimestampConversion(t *testing.T) {
 	for _, cr := range []int64{90000, 48000, 44100} {
 		for _, v := range []int64{0, 1, cr - 1, cr, 3600*cr + 7, 30 * 24 * 3600 * cr} {
@@ -93,4 +74,37 @@ func TestTimestampConversion(t *testing.T) {
 			require.InDelta(t, v, durationToTimestamp(timestampToDuration(v, cr), cr), 1)
 		}
 	}
+}
+
+func TestDropOnDTSError(t *testing.T) {
+	var warnings []string
+	l := test.Logger(func(_ logger.Level, f string, args ...any) {
+		warnings = append(warnings, fmt.Sprintf(f, args...))
+	})
+
+	results := []error{
+		nil,
+		fmt.Errorf("unable to extract DTS: too many reordered frames (14)"),
+		fmt.Errorf("unable to extract DTS: too many reordered frames (15)"),
+		nil, // next keyframe accepted
+		fmt.Errorf("unable to extract DTS: too many reordered frames (3)"),
+		errors.New("segment too big"),
+	}
+	i := 0
+	w := dropOnDTSError(l, func(time.Time, int64, any) error {
+		err := results[i]
+		i++
+		return err
+	})
+
+	for range 5 {
+		require.NoError(t, w(time.Time{}, 0, nil))
+	}
+	require.EqualError(t, w(time.Time{}, 0, nil), "segment too big")
+
+	// one warning per run of dropped frames.
+	require.Equal(t, []string{
+		"dropping frames until the next keyframe: unable to extract DTS: too many reordered frames (14)",
+		"dropping frames until the next keyframe: unable to extract DTS: too many reordered frames (3)",
+	}, warnings)
 }

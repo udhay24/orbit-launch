@@ -58,12 +58,34 @@ func routeTrack(sr *StallReplay, isVideo bool, clockRate int, isKey func(any) bo
 	return sr.addTrack(isVideo, clockRate, isKey, w)
 }
 
+// Cameras that resume after a gap without a keyframe confuse the muxer's DTS extractor.
+// Returning that error would crash the muxer and take the stream away from viewers for 10s or
+// more; dropping frames until the extractor accepts them again only holds the picture until the
+// next keyframe, which resets the extractor.
+func dropOnDTSError(l logger.Writer, w trackWriter) trackWriter {
+	dropping := false
+	return func(ntp time.Time, pts int64, p any) error {
+		err := w(ntp, pts, p)
+		if err != nil && strings.Contains(err.Error(), "unable to extract DTS") {
+			if !dropping {
+				l.Log(logger.Warn, "dropping frames until the next keyframe: %v", err)
+				dropping = true
+			}
+			return nil
+		}
+		if err == nil {
+			dropping = false
+		}
+		return err
+	}
+}
+
 func setupVideoTrack(
 	origDesc *description.Session,
 	outDesc *description.Session,
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
-	rb *timestampRebaser,
+	newRebaser func() *timestampRebaser,
 	sr *StallReplay,
 ) {
 	addTrack := func(
@@ -85,6 +107,7 @@ func setupVideoTrack(
 			ClockRate: videoFormatAV1.ClockRate(),
 		}
 
+		rb := newRebaser()
 		write := routeTrack(sr, true, track.ClockRate, nil,
 			func(ntp time.Time, pts int64, p any) error {
 				return muxer.WriteAV1(track, ntp, pts, p.(unit.PayloadAV1))
@@ -122,6 +145,7 @@ func setupVideoTrack(
 			ClockRate: videoFormatVP9.ClockRate(),
 		}
 
+		rb := newRebaser()
 		write := routeTrack(sr, true, track.ClockRate, nil,
 			func(ntp time.Time, pts int64, p any) error {
 				return muxer.WriteVP9(track, ntp, pts, p.(unit.PayloadVP9))
@@ -165,10 +189,11 @@ func setupVideoTrack(
 			ClockRate: videoFormatH265.ClockRate(),
 		}
 
+		rb := newRebaser()
 		write := routeTrack(sr, true, track.ClockRate, func(p any) bool { return h265.IsRandomAccess(p.(unit.PayloadH265)) },
-			func(ntp time.Time, pts int64, p any) error {
+			dropOnDTSError(r.Parent, func(ntp time.Time, pts int64, p any) error {
 				return muxer.WriteH265(track, ntp, pts, p.(unit.PayloadH265))
-			})
+			}))
 
 		addTrack(
 			videoMedia,
@@ -207,10 +232,11 @@ func setupVideoTrack(
 			ClockRate: videoFormatH264.ClockRate(),
 		}
 
+		rb := newRebaser()
 		write := routeTrack(sr, true, track.ClockRate, func(p any) bool { return h264.IsRandomAccess(p.(unit.PayloadH264)) },
-			func(ntp time.Time, pts int64, p any) error {
+			dropOnDTSError(r.Parent, func(ntp time.Time, pts int64, p any) error {
 				return muxer.WriteH264(track, ntp, pts, p.(unit.PayloadH264))
-			})
+			}))
 
 		addTrack(
 			videoMedia,
@@ -241,7 +267,7 @@ func setupAudioTracks(
 	_ *description.Session,
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
-	rb *timestampRebaser,
+	newRebaser func() *timestampRebaser,
 	sr *StallReplay,
 ) error {
 	addTrack := func(
@@ -280,6 +306,7 @@ func setupAudioTracks(
 					ClockRate: forma.ClockRate(),
 				}
 
+				rb := newRebaser()
 				write := routeTrack(sr, false, track.ClockRate, nil,
 					func(ntp time.Time, pts int64, p any) error {
 						return muxer.WriteOpus(track, ntp, pts, p.(unit.PayloadOpus))
@@ -321,6 +348,7 @@ func setupAudioTracks(
 						ClockRate: forma.ClockRate(),
 					}
 
+					rb := newRebaser()
 					write := routeTrack(sr, false, track.ClockRate, nil,
 						func(ntp time.Time, pts int64, p any) error {
 							return muxer.WriteFLAC(track, ntp, pts, p.(unit.PayloadFLAC))
@@ -355,6 +383,7 @@ func setupAudioTracks(
 					ClockRate: forma.ClockRate(),
 				}
 
+				rb := newRebaser()
 				write := routeTrack(sr, false, track.ClockRate, nil,
 					func(ntp time.Time, pts int64, p any) error {
 						return muxer.WriteMPEG4Audio(track, ntp, pts, p.(unit.PayloadMPEG4Audio))
@@ -389,6 +418,7 @@ func setupAudioTracks(
 						ClockRate: forma.ClockRate(),
 					}
 
+					rb := newRebaser()
 					write := routeTrack(sr, false, track.ClockRate, nil,
 						func(ntp time.Time, pts int64, p any) error {
 							return muxer.WriteMPEG4Audio(track, ntp, pts, p.([][]byte))
@@ -428,7 +458,7 @@ func setupDataTracks(
 	_ *description.Session,
 	r *stream.Reader,
 	muxer *gohlslib.Muxer,
-	rb *timestampRebaser,
+	newRebaser func() *timestampRebaser,
 	sr *StallReplay,
 ) {
 	addTrack := func(
@@ -449,6 +479,7 @@ func setupDataTracks(
 					ClockRate: forma.ClockRate(),
 				}
 
+				rb := newRebaser()
 				write := routeTrack(sr, false, track.ClockRate, nil,
 					func(ntp time.Time, pts int64, p any) error {
 						return muxer.WriteKLV(track, ntp, pts, p.(unit.PayloadKLV))
@@ -497,10 +528,14 @@ func FromStreamWithReplay(
 	muxer *gohlslib.Muxer,
 	sr *StallReplay,
 ) error {
-	rb := &timestampRebaser{
-		onRebase: func(gap time.Duration) {
-			r.Parent.Log(logger.Warn, "timestamps jumped by %v, removing the gap", gap)
-		},
+	// one rebaser per track: some cameras keep audio seconds away from video, and a shared one
+	// takes every switch between the two for a jump, scrambling timestamps until the muxer fails.
+	newRebaser := func() *timestampRebaser {
+		return &timestampRebaser{
+			onRebase: func(gap time.Duration) {
+				r.Parent.Log(logger.Warn, "timestamps jumped by %v, removing the gap", gap)
+			},
+		}
 	}
 
 	setupVideoTrack(
@@ -508,7 +543,7 @@ func FromStreamWithReplay(
 		outDesc,
 		r,
 		muxer,
-		rb,
+		newRebaser,
 		sr,
 	)
 
@@ -517,7 +552,7 @@ func FromStreamWithReplay(
 		outDesc,
 		r,
 		muxer,
-		rb,
+		newRebaser,
 		sr,
 	)
 	if err != nil {
@@ -529,7 +564,7 @@ func FromStreamWithReplay(
 		outDesc,
 		r,
 		muxer,
-		rb,
+		newRebaser,
 		sr,
 	)
 

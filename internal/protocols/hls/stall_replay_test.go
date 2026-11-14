@@ -35,9 +35,11 @@ type testCamera struct {
 	audio   trackWriter
 	allowed atomic.Bool
 	media   time.Duration
-	step    int
-	nextID  int
-	outs    []testOut
+	// how far the camera's audio timestamps run ahead of its video ones
+	audioLead time.Duration
+	step      int
+	nextID    int
+	outs      []testOut
 	// ids of payloads sent live, by track
 	liveIDs map[int]bool
 }
@@ -88,7 +90,7 @@ func (c *testCamera) sendClump(d time.Duration) {
 func (c *testCamera) sendPaced(d time.Duration, wallPerStep time.Duration) {
 	for end := c.media + d; c.media < end; {
 		c.nextID++
-		require.NoError(c.t, c.audio(c.clock, durationToTimestamp(c.media, testAudioRate), testPayload{id: c.nextID}))
+		require.NoError(c.t, c.audio(c.clock, durationToTimestamp(c.media+c.audioLead, testAudioRate), testPayload{id: c.nextID}))
 		c.liveIDs[c.nextID] = true
 
 		if c.step%2 == 0 {
@@ -399,4 +401,57 @@ func TestStallReplayReturnsToLiveOnACameraThatDeliversInClumps(t *testing.T) {
 	}
 	require.Equal(t, replayStateLive, c.sr.state)
 	requireIncreasing(t, c.outs, 1)
+}
+
+// some cameras stamp audio tens of seconds away from video. The replay must keep video
+// continuous on such cameras instead of waiting for the video timeline to reach the audio one.
+func TestStallReplayCameraWithAudioAheadOfVideo(t *testing.T) {
+	for _, lead := range []time.Duration{25 * time.Second, -7 * time.Second} {
+		t.Run(lead.String(), func(t *testing.T) {
+			c := newTestCamera(t, true)
+			c.audioLead = lead
+			c.send(10 * time.Second)
+			lastLive := videoOuts(c.outs)[len(videoOuts(c.outs))-1]
+			n := len(c.outs)
+
+			c.idle(28 * time.Second)
+			require.Equal(t, replayStateReplay, c.sr.state)
+
+			outs := c.outsSince(n)
+			requireIncreasing(t, outs, 0)
+			requireIncreasing(t, outs, 1)
+
+			video := videoOuts(outs)
+			require.NotEmpty(t, video)
+			first := timestampToDuration(video[0].pts-lastLive.pts, testVideoRate)
+			require.LessOrEqual(t, first, 200*time.Millisecond, "replayed video continues the timeline")
+			for i := 1; i < len(video); i++ {
+				gap := timestampToDuration(video[i].pts-video[i-1].pts, testVideoRate)
+				require.LessOrEqual(t, gap, 200*time.Millisecond, "no hole in the replayed video")
+			}
+			last := video[len(video)-1]
+			require.InDelta(t, 28.0, timestampToDuration(last.pts-lastLive.pts, testVideoRate).Seconds(), 0.1)
+
+			audio := 0
+			for _, o := range outs {
+				if o.track == 1 {
+					audio++
+				}
+			}
+			require.Greater(t, audio, 1000, "audio is replayed along with video")
+
+			// back to live, still continuous
+			m := len(c.outs)
+			c.send(8 * time.Second)
+			require.Equal(t, replayStateLive, c.sr.state)
+			outs = c.outsSince(m)
+			requireIncreasing(t, outs, 0)
+			requireIncreasing(t, outs, 1)
+			video = videoOuts(c.outsSince(n))
+			for i := 1; i < len(video); i++ {
+				gap := timestampToDuration(video[i].pts-video[i-1].pts, testVideoRate)
+				require.LessOrEqual(t, gap, 200*time.Millisecond, "no hole when going back to live")
+			}
+		})
+	}
 }

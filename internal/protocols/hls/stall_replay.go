@@ -55,6 +55,8 @@ type replayUnit struct {
 	in      time.Duration
 	payload any
 	key     bool
+	// how far this track's timestamps ran ahead of video when the unit arrived.
+	lead time.Duration
 }
 
 // StallReplay loops recent footage into a muxer while a watched camera stalls.
@@ -83,6 +85,11 @@ type StallReplay struct {
 	offset      time.Duration
 	maxOut      []time.Duration
 	written     []bool
+	// how far each track's timestamps run ahead of video. Some cameras stamp audio tens of
+	// seconds away from video; the replay times everything on the video timeline so video
+	// never waits for the other tracks to come round.
+	lead        []time.Duration
+	videoInSeen bool
 	frameStep   time.Duration
 	buf         []replayUnit
 	bufStart    int
@@ -143,6 +150,7 @@ func (sr *StallReplay) addTrack(isVideo bool, clockRate int, isKey func(any) boo
 	})
 	sr.maxOut = append(sr.maxOut, 0)
 	sr.written = append(sr.written, false)
+	sr.lead = append(sr.lead, 0)
 
 	if isVideo {
 		if sr.video >= 0 || isKey == nil {
@@ -181,7 +189,10 @@ func (sr *StallReplay) write(id int, ntp time.Time, pts int64, payload any) erro
 	sr.ensureRunning()
 
 	key := isVideo && t.isKey(payload)
-	sr.appendBuffer(replayUnit{track: id, pts: pts, in: in, payload: payload, key: key})
+	if !isVideo && sr.videoInSeen {
+		sr.lead[id] = in - sr.lastVideoIn
+	}
+	sr.appendBuffer(replayUnit{track: id, pts: pts, in: in, payload: payload, key: key, lead: sr.lead[id]})
 
 	if isVideo {
 		if !sr.lastVideoWall.IsZero() && in > sr.lastVideoIn {
@@ -190,6 +201,7 @@ func (sr *StallReplay) write(id int, ntp time.Time, pts int64, payload any) erro
 			}
 		}
 		sr.lastVideoIn = in
+		sr.videoInSeen = true
 		sr.lastArrivalWall = now
 	}
 
@@ -256,12 +268,12 @@ func (sr *StallReplay) out(id int, ntp time.Time, outPTS int64, out time.Duratio
 	return t.write(ntp, outPTS, payload)
 }
 
-// nextOut is the first output time after everything written so far.
+// nextOut is the first time on the video timeline after everything written so far.
 func (sr *StallReplay) nextOut() time.Duration {
 	var m time.Duration
 	for i, w := range sr.written {
-		if w && sr.maxOut[i] > m {
-			m = sr.maxOut[i]
+		if w && sr.maxOut[i]-sr.lead[i] > m {
+			m = sr.maxOut[i] - sr.lead[i]
 		}
 	}
 	return m + sr.frameStep
@@ -396,8 +408,8 @@ func (sr *StallReplay) newLoop(start time.Duration) {
 
 	end := sr.loopBase
 	for _, u := range sr.loop {
-		if u.in > end {
-			end = u.in
+		if u.in-u.lead > end {
+			end = u.in - u.lead
 		}
 	}
 	sr.loopLen = end - sr.loopBase + sr.frameStep
@@ -416,11 +428,11 @@ func (sr *StallReplay) emit(now time.Time) {
 
 		u := sr.loop[sr.loopPos]
 		out := sr.loopStart + (u.in - sr.loopBase)
-		if out > target {
+		if out-u.lead > target {
 			return
 		}
 
-		ntp := sr.anchorWall.Add(out - sr.anchorOut)
+		ntp := sr.anchorWall.Add(out - u.lead - sr.anchorOut)
 		shift := durationToTimestamp(sr.loopStart-sr.loopBase, sr.tracks[u.track].clockRate)
 		err := sr.out(u.track, ntp, u.pts+shift, out, u.payload)
 		if err != nil {

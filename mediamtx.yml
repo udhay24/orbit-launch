@@ -505,13 +505,13 @@ viewTokenOwnerExemptKeys: [orchestrator]
 ###############################################
 # Global settings -> HLS video only
 
-# Leave audio out of HLS for cameras that send video. Some cameras stamp audio tens of
-# seconds away from video, and the gap grows while they stay connected; players wait for
-# the two to line up, so such a tile starts that much later or never. Cameras without
-# video keep their audio. Recordings and other protocols are not affected.
-# A viewer who turns the sound on gets it: a player that adds audio=1 to the query of
-# index.m3u8 reads a second muxer with audio, which exists only while someone uses it.
-hlsVideoOnly: yes
+# Leave audio out of HLS for cameras that send video. Off: viewers who unmute a camera
+# hear it at once. Turn it on if tiles stay black or start late: some cameras stamp audio
+# tens of seconds away from video, and players wait for the two to line up. While it is
+# on, a player that adds audio=1 to the query of index.m3u8 still gets audio, from a
+# second muxer that exists only while someone uses it and takes a few seconds to start.
+# Cameras without video keep their audio. Recordings and other protocols are not affected.
+hlsVideoOnly: no
 
 ###############################################
 # Global settings -> HLS stall replay

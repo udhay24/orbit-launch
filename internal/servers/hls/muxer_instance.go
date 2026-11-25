@@ -23,6 +23,11 @@ import (
 const (
 	sessionCookieName     = "hlsSession"
 	sessionQueryParamName = "session"
+	// sessions of the muxer with audio. A browser can play a camera twice, once with audio,
+	// and both cookies sit on the same path; with one name the later session would take
+	// over the requests of the earlier one.
+	audioSessionCookieName = "hlsSessionAudio"
+	audioQueryParamName    = "audio"
 )
 
 // this prevents directory traversal.

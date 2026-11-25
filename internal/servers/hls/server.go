@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"reflect"
 	"sort"
 	"sync"
@@ -31,9 +32,21 @@ func interfaceIsEmpty(i any) bool {
 	return reflect.ValueOf(i).Kind() != reflect.Pointer || reflect.ValueOf(i).IsNil()
 }
 
-func sessionGetSecret(ctx *gin.Context) *uuid.UUID {
+// muxerKey names a muxer. With hlsVideoOnly a camera has its usual muxer without audio,
+// and a second one with audio that exists only while a viewer asks for it (?audio=1).
+type muxerKey struct {
+	pathName string
+	audio    bool
+}
+
+func sessionGetSecret(ctx *gin.Context, audio bool) *uuid.UUID {
+	cookieName := sessionCookieName
+	if audio {
+		cookieName = audioSessionCookieName
+	}
+
 	var rawSecret string
-	if cookie, err := ctx.Request.Cookie(sessionCookieName); err == nil {
+	if cookie, err := ctx.Request.Cookie(cookieName); err == nil {
 		rawSecret = cookie.Value
 	} else {
 		q := ctx.Request.URL.Query()
@@ -99,7 +112,7 @@ type Server struct {
 	httpServer *httpServer
 
 	muxersMutex sync.RWMutex
-	muxers      map[string]*muxer
+	muxers      map[muxerKey]*muxer
 	// path name -> *atomic.Int64, see muxer.lastServiceRead
 	serviceReads sync.Map
 
@@ -110,7 +123,7 @@ type Server struct {
 
 // Initialize initializes the server.
 func (s *Server) Initialize() error {
-	s.muxers = make(map[string]*muxer)
+	s.muxers = make(map[muxerKey]*muxer)
 	s.sessionsBySecret = make(map[uuid.UUID]*session)
 	s.cdnSessionsByPath = make(map[string]*session)
 
@@ -215,13 +228,21 @@ func (s *Server) onListenError(ctx context.Context, err error) {
 
 func (s *Server) createAutomaticMuxerLocked(pa defs.Path) {
 	if s.AlwaysRemux && !pa.SafeConf().SourceOnDemand {
-		if _, ok := s.muxers[pa.Name()]; !ok {
-			s.createMuxerLocked(pa.Name(), nil)
+		key := muxerKey{pathName: pa.Name()}
+		if _, ok := s.muxers[key]; !ok {
+			s.createMuxerLocked(key, nil)
 		}
 	}
 }
 
-func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
+// wantsAudio reports whether a request asks for the muxer with audio. Without hlsVideoOnly
+// every muxer has audio, so there is no second one to pick.
+func (s *Server) wantsAudio(q url.Values) bool {
+	return s.VideoOnly && q.Get(audioQueryParamName) == "1"
+}
+
+func (s *Server) createMuxerLocked(key muxerKey, author *session) *muxer {
+	pathName := key.pathName
 	lastServiceRead, _ := s.serviceReads.LoadOrStore(pathName, &atomic.Int64{})
 
 	r := &muxer{
@@ -233,11 +254,12 @@ func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
 		directory:       s.Directory,
 		wg:              &s.wg,
 		pathName:        pathName,
+		audio:           key.audio,
 		pathManager:     s.PathManager,
 		parent:          s,
 		author:          author,
 		closeAfter:      s.MuxerCloseAfter,
-		videoOnly:       s.VideoOnly,
+		videoOnly:       s.VideoOnly && !key.audio,
 		stallReplay:     s.StallReplay,
 		replayBuffer:    s.StallReplayBuffer,
 		replayAfter:     s.StallReplayAfter,
@@ -245,20 +267,25 @@ func (s *Server) createMuxerLocked(pathName string, author *session) *muxer {
 		lastServiceRead: lastServiceRead.(*atomic.Int64),
 	}
 	r.initialize()
-	s.muxers[pathName] = r
+	s.muxers[key] = r
 	return r
 }
 
 // closeMuxer is called by muxer.
 func (s *Server) closeMuxer(mx *muxer) {
 	s.muxersMutex.Lock()
-	if current, ok := s.muxers[mx.PathName()]; ok && current == mx {
-		delete(s.muxers, mx.PathName())
+	if current, ok := s.muxers[mx.key()]; ok && current == mx {
+		delete(s.muxers, mx.key())
 	}
 	s.muxersMutex.Unlock()
 }
 
-func (s *Server) getOrCreateMuxer(pathName string, author *session, sourceOnDemand bool) (*muxer, error) {
+func (s *Server) getOrCreateMuxer(
+	pathName string,
+	author *session,
+	sourceOnDemand bool,
+	audio bool,
+) (*muxer, error) {
 	s.muxersMutex.Lock()
 	defer s.muxersMutex.Unlock()
 
@@ -266,14 +293,15 @@ func (s *Server) getOrCreateMuxer(pathName string, author *session, sourceOnDema
 		return nil, fmt.Errorf("terminated")
 	}
 
-	mux, ok := s.muxers[pathName]
+	key := muxerKey{pathName: pathName, audio: audio}
+	mux, ok := s.muxers[key]
 	switch {
 	case ok:
 		return mux, nil
-	case s.AlwaysRemux && !sourceOnDemand:
+	case s.AlwaysRemux && !sourceOnDemand && !audio:
 		return nil, fmt.Errorf("muxer is waiting to be created")
 	default:
-		return s.createMuxerLocked(pathName, author), nil
+		return s.createMuxerLocked(key, author), nil
 	}
 }
 
@@ -314,9 +342,10 @@ func (s *Server) PathNotReady(pa defs.Path) {
 		return
 	}
 
-	mx, ok := s.muxers[pa.Name()]
+	key := muxerKey{pathName: pa.Name()}
+	mx, ok := s.muxers[key]
 	if ok && mx.author == nil {
-		delete(s.muxers, pa.Name())
+		delete(s.muxers, key)
 	} else {
 		mx = nil
 	}
@@ -334,9 +363,12 @@ func (s *Server) APIMuxersList() (*defs.APIHLSMuxerList, error) {
 	}
 
 	s.muxersMutex.RLock()
+	// metrics label muxers by path, so a path is listed once: without its audio muxer.
 	muxers := make([]*muxer, 0, len(s.muxers))
-	for _, mx := range s.muxers {
-		muxers = append(muxers, mx)
+	for key, mx := range s.muxers {
+		if !key.audio {
+			muxers = append(muxers, mx)
+		}
 	}
 	s.muxersMutex.RUnlock()
 
@@ -361,7 +393,7 @@ func (s *Server) APIMuxersGet(name string) (*defs.APIHLSMuxer, error) {
 	}
 
 	s.muxersMutex.RLock()
-	mx, ok := s.muxers[name]
+	mx, ok := s.muxers[muxerKey{pathName: name}]
 	s.muxersMutex.RUnlock()
 	if !ok {
 		return nil, ErrMuxerNotFound
@@ -473,7 +505,7 @@ func (s *Server) findNonCDNSession(dir string, ctx *gin.Context) (*session, erro
 		return nil, fmt.Errorf("server is closing")
 	}
 
-	secret := sessionGetSecret(ctx)
+	secret := sessionGetSecret(ctx, s.wantsAudio(ctx.Request.URL.Query()))
 	if secret == nil {
 		return nil, nil
 	}
@@ -504,6 +536,7 @@ func (s *Server) createNonCDNSession(dir string, ctx *gin.Context) *session {
 		remoteAddr:      httpp.RemoteAddr(ctx),
 		pathName:        dir,
 		query:           ctx.Request.URL.RawQuery,
+		audio:           s.wantsAudio(ctx.Request.URL.Query()),
 		userAgent:       ctx.Request.UserAgent(),
 		credentials:     creds,
 		externalCmdPool: s.ExternalCmdPool,

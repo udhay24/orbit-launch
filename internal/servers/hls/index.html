@@ -37,6 +37,22 @@
         box-sizing: border-box;
         text-shadow: 0 0 5px black;
       }
+      #notice {
+        display: none;
+        position: absolute;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: calc(100% - 32px);
+        box-sizing: border-box;
+        padding: 8px 14px;
+        border-radius: 6px;
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        font-size: 14px;
+        text-align: center;
+        pointer-events: none;
+      }
       #lang-icon {
         display: none;
         position: absolute;
@@ -70,6 +86,7 @@
   <body>
     <video id="video"></video>
     <div id="message"></div>
+    <div id="notice" role="status"></div>
     <div id="lang-icon"><div id="lang-list"></div></div>
 
     <script defer src="hls.min.js"></script>
@@ -77,12 +94,89 @@
     <script>
       const video = document.getElementById("video");
       const message = document.getElementById("message");
+      const notice = document.getElementById("notice");
       const langIcon = document.getElementById("lang-icon");
       const langList = document.getElementById("lang-list");
 
       const retryPause = 2000;
+      // a camera whose audio is stamped far from its video never starts with audio
+      const audioStartTimeout = 10000;
+      const noticePause = 6000;
 
       let defaultControls = false;
+
+      // With hlsVideoOnly the server leaves audio out unless it is asked for (?audio=1),
+      // so the stream with audio is loaded when the viewer turns the sound on.
+      let hls = null;
+      let withAudio = false;
+      let streamHasAudio = false;
+      let audioFailed = false;
+      let audioTimer = null;
+      let retryTimer = null;
+      let noticeTimer = null;
+
+      const playlistURL = () => {
+        const params = new URLSearchParams(window.location.search);
+        if (withAudio) {
+          params.set("audio", "1");
+        }
+        const query = params.toString();
+        return "index.m3u8" + (query !== "" ? "?" + query : "");
+      };
+
+      const play = () => {
+        const res = video.play();
+        if (res !== undefined) {
+          // the browser refused to start with sound: start muted, the viewer can unmute again
+          res.catch(() => {
+            if (!video.muted) {
+              video.muted = true;
+              video.play().catch(() => {});
+            }
+          });
+        }
+      };
+
+      const reloadStream = () => {
+        clearTimeout(retryTimer);
+        clearTimeout(audioTimer);
+        if (hls !== null) {
+          hls.destroy();
+          hls = null;
+        }
+        loadStream();
+      };
+
+      // not setMessage(): that one hides the controls and is cleared when the stream loads
+      const showNoSoundNotice = () => {
+        clearTimeout(noticeTimer);
+        notice.innerText = "This camera's sound cannot be played. Showing video without sound.";
+        notice.style.display = "block";
+        noticeTimer = setTimeout(() => {
+          notice.style.display = "none";
+        }, noticePause);
+      };
+
+      const giveUpOnAudio = () => {
+        withAudio = false;
+        audioFailed = true;
+        video.muted = true;
+        reloadStream();
+        showNoSoundNotice();
+      };
+
+      const onSoundChange = () => {
+        if (video.muted || video.volume === 0 || withAudio || streamHasAudio) {
+          return;
+        }
+        if (audioFailed) {
+          showNoSoundNotice();
+          return;
+        }
+        withAudio = true;
+        reloadStream();
+        audioTimer = setTimeout(giveUpOnAudio, audioStartTimeout);
+      };
 
       const setMessage = (str) => {
         if (str !== "") {
@@ -96,13 +190,14 @@
       const loadStream = () => {
         // Prefer hls.js over native HLS, due to better protocol support.
         if (Hls.isSupported()) {
-          const hls = new Hls({
+          hls = new Hls({
             maxLiveSyncPlaybackRate: 1.5,
           });
 
           hls.on(Hls.Events.ERROR, (evt, data) => {
             if (data.fatal) {
               hls.destroy();
+              hls = null;
 
               langIcon.style.display = "none";
               langList.innerHTML = "";
@@ -117,15 +212,17 @@
                 setMessage(data.error + ", retrying in some seconds");
               }
 
-              setTimeout(() => loadStream(), retryPause);
+              retryTimer = setTimeout(() => loadStream(), retryPause);
             }
           });
 
           hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-            hls.loadSource("index.m3u8" + window.location.search);
+            hls.loadSource(playlistURL());
           });
 
           hls.on(Hls.Events.MANIFEST_LOADED, () => {
+            streamHasAudio = hls.levels.some((level) => !!level.audioCodec);
+
             if (hls.audioTracks.length > 1) {
               for (const track of hls.audioTracks) {
                 const div = document.createElement("DIV");
@@ -139,22 +236,25 @@
             }
 
             setMessage("");
-            video.play();
+            play();
           });
 
           // when the video is resumed after a manual or forced pause
           // (i.e. when the window is minimized), restore live streaming.
           video.onplay = () => {
-            video.currentTime = hls.liveSyncPosition;
+            if (hls !== null && hls.liveSyncPosition) {
+              video.currentTime = hls.liveSyncPosition;
+            }
           };
 
           hls.attachMedia(video);
         } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
           // since it's not possible to detect timeout errors in iOS,
           // wait for the playlist to be available before starting the stream
-          fetch("index.m3u8" + window.location.search).then(() => {
-            video.src = "index.m3u8" + window.location.search;
-            video.play();
+          const url = playlistURL();
+          fetch(url).then(() => {
+            video.src = url;
+            play();
           });
         }
       };
@@ -182,13 +282,19 @@
           false,
         );
         defaultControls = video.controls;
+        withAudio = !video.muted;
       };
 
       // use load instead of DOMContentLoaded, otherwise, in Firefox,
       // the page gets stuck in the "loading" state.
       window.addEventListener("load", () => {
         loadAttributesFromQuery();
+        video.addEventListener("volumechange", onSoundChange);
+        video.addEventListener("playing", () => clearTimeout(audioTimer));
         loadStream();
+        if (withAudio) {
+          audioTimer = setTimeout(giveUpOnAudio, audioStartTimeout);
+        }
       });
     </script>
   </body>

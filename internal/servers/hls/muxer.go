@@ -48,6 +48,7 @@ type muxer struct {
 	replaySteady    conf.Duration
 	wg              *sync.WaitGroup
 	pathName        string
+	audio           bool // the second muxer of a path, see muxerKey
 	author          *session
 	pathManager     serverPathManager
 	parent          *Server
@@ -100,12 +101,15 @@ func (m *muxer) Close() {
 
 // Log implements logger.Writer.
 func (m *muxer) Log(level logger.Level, format string, args ...any) {
-	m.parent.Log(level, "[muxer %s] "+format, append([]any{m.pathName}, args...)...)
+	name := m.pathName
+	if m.audio {
+		name += " +audio"
+	}
+	m.parent.Log(level, "[muxer %s] "+format, append([]any{name}, args...)...)
 }
 
-// PathName returns the path name.
-func (m *muxer) PathName() string {
-	return m.pathName
+func (m *muxer) key() muxerKey {
+	return muxerKey{pathName: m.pathName, audio: m.audio}
 }
 
 func (m *muxer) run() {

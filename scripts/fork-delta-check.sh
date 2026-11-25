@@ -81,6 +81,8 @@ contains internal/servers/hls/session.go "addSession(strings.HasPrefix(res.AuthR
 contains internal/conf/conf.go "HLSStallReplay" "conf: HLSStallReplay fields"
 contains mediamtx.yml "hlsStallReplay" "mediamtx.yml: hlsStallReplay key"
 contains mediamtx.yml "hlsVideoOnly: yes" "mediamtx.yml: hlsVideoOnly on (cameras with audio far from video never start in hls.js)"
+contains internal/servers/hls/server.go "func (s *Server) wantsAudio" "hls: audio on request (?audio=1) while hlsVideoOnly is on"
+contains internal/servers/hls/index.html "params.set(\"audio\", \"1\")" "hls page: asks for audio when the viewer unmutes"
 echo "== chaos suite present =="
 exists .ai/chaos_test.py "chaos suite present"
 

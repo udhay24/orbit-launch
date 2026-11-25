@@ -34,7 +34,7 @@ const (
 
 type sessionServer interface {
 	logger.Writer
-	getOrCreateMuxer(string, *session, bool) (*muxer, error)
+	getOrCreateMuxer(string, *session, bool, bool) (*muxer, error)
 	closeSession(*session)
 }
 
@@ -43,6 +43,7 @@ type session struct {
 	remoteAddr      string
 	pathName        string
 	query           string
+	audio           bool // reads the path's muxer with audio, see muxerKey
 	userAgent       string
 	credentials     *auth.Credentials
 	isCDN           bool
@@ -187,6 +188,7 @@ func (s *session) runInner2(errGroupCtx context.Context, errGroup *errgroup.Grou
 		s.pathName,
 		s,
 		res.Path.SafeConf().SourceOnDemand,
+		s.audio,
 	)
 	if err != nil {
 		return err
@@ -303,8 +305,12 @@ func (s *session) handleRequest(ctx *gin.Context, q url.Values) error {
 			// Use exclusively partitioned cookies for safety reasons.
 			// Unfortunately they are available on HTTPS only. In case of HTTP, fall back to query parameters,
 			// which are still not shared between different pages/domains but are visible in the URL.
+			cookieName := sessionCookieName
+			if s.audio {
+				cookieName = audioSessionCookieName
+			}
 			http.SetCookie(ctx.Writer, &http.Cookie{
-				Name:        sessionCookieName,
+				Name:        cookieName,
 				Value:       s.secret.String(),
 				SameSite:    http.SameSiteNoneMode,
 				Secure:      true,

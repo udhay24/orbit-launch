@@ -509,6 +509,8 @@ viewTokenOwnerExemptKeys: [orchestrator]
 # seconds away from video, and the gap grows while they stay connected; players wait for
 # the two to line up, so such a tile starts that much later or never. Cameras without
 # video keep their audio. Recordings and other protocols are not affected.
+# A viewer who turns the sound on gets it: a player that adds audio=1 to the query of
+# index.m3u8 reads a second muxer with audio, which exists only while someone uses it.
 hlsVideoOnly: yes
 
 ###############################################

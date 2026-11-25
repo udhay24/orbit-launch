@@ -398,7 +398,7 @@ func TestServerSessionSecretAfterMuxerClose(t *testing.T) {
 	<-sx.chReady
 
 	s.muxersMutex.RLock()
-	mx := s.muxers["stream"]
+	mx := s.muxers[muxerKey{pathName: "stream"}]
 	s.muxersMutex.RUnlock()
 	require.NotNil(t, mx)
 
